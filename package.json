@@ -1,0 +1,38 @@
+{
+  "name": "justwork-doc-shell",
+  "private": true,
+  "version": "0.0.1",
+  "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "node node_modules/vite/bin/vite.js build --watch",
+    "dev:backend": "cd backend && python -m uvicorn app.main:app --host 127.0.0.1 --port 1446 --reload",
+    "build": "node node_modules/vite/bin/vite.js build",
+    "build:packages": "yarn workspace @justwork/agent-protocol build && yarn workspace @justwork/security build && yarn workspace @justwork/workspace-runtime build && yarn workspace @justwork/bridge build && yarn workspace @justwork/cli build",
+    "typecheck": "tsc --noEmit && yarn workspace @justwork/agent-protocol typecheck && yarn workspace @justwork/security typecheck && yarn workspace @justwork/workspace-runtime typecheck && yarn workspace @justwork/bridge typecheck && yarn workspace @justwork/cli typecheck",
+    "test": "yarn build:packages && node scripts/run-node-tests.mjs",
+    "test:e2e": "yarn build && node scripts/workbench-headless-e2e.mjs",
+    "test:e2e:backend": "yarn build && node scripts/workbench-backend-e2e.mjs",
+    "test:e2e:backend:offline": "yarn build && node scripts/workbench-backend-offline-e2e.mjs",
+    "test:e2e:extension": "yarn build && node scripts/workbench-e2e.mjs",
+    "test:backend": "python -m unittest backend.tests.test_backend_agent_api backend.tests.test_write_signing",
+    "test:cli": "yarn build:packages && powershell -NoProfile -ExecutionPolicy Bypass -File scripts/cli-workspace-e2e.ps1",
+    "justwork": "node packages/cli/dist/index.js"
+  },
+  "dependencies": {
+    "@justwork/security": "0.0.1",
+    "@justwork/workspace-runtime": "0.0.1",
+    "vditor": "^3.11.2"
+  },
+  "devDependencies": {
+    "@crxjs/vite-plugin": "^2.0.0-beta.28",
+    "@types/chrome": "^0.0.277",
+    "@types/node": "^22.15.3",
+    "playwright": "^1.59.1",
+    "typescript": "^5.8.3",
+    "vite": "^6.3.5",
+    "vite-plugin-static-copy": "^3.1.1"
+  }
+}

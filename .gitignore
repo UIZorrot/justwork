@@ -1,0 +1,52 @@
+# --- Dependencies & build output ---
+node_modules/
+dist/
+*.log
+*.tsbuildinfo
+
+# --- Secrets & machine-local config (never commit) ---
+.env
+.env.*
+!.env.build.example
+!backend/.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa
+id_rsa.pub
+*.secret
+docs
+scripts
+
+# --- Local data / dev databases (may contain workspace ciphertext & metadata) ---
+.justwork-data/
+.justwork-backend/
+
+# --- Python ---
+backend/tests/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+*.egg-info/
+
+# --- Tests / Playwright artifacts ---
+coverage/
+test-results/
+playwright-report/
+playwright/.cache/
+
+# --- OS & editors ---
+.DS_Store
+Thumbs.db
+Desktop.ini
+*~
+*.swp
+.idea/
+
+# --- Misc ---
+.cache/

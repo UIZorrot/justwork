@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title data-i18n="app.sidepanel.title">JustWork Notes</title>
+    <link rel="icon" type="image/png" sizes="32x32" href="/icons/icon-32.png" />
+    <link rel="stylesheet" href="./sidepanel.css" />
+  </head>
+  <body>
+    <header class="app-header">
+      <h1 class="app-title" data-i18n="app.title">JustWork</h1>
+      <p class="app-subtitle" data-i18n="app.sidepanel.subtitle">Document shell · Vditor WYSIWYG</p>
+    </header>
+    <main class="app-main">
+      <div
+        id="editor-root"
+        class="doc-editor-host"
+        data-i18n-aria-label="app.sidepanel.editorLabel"
+        aria-label="Document editor"
+      ></div>
+    </main>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>

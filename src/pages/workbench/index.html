@@ -1,0 +1,298 @@
+﻿<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title data-i18n="app.workbench.title">JustWork Workspace</title>
+    <link rel="icon" type="image/png" sizes="32x32" href="/icons/icon-32.png" />
+    <link rel="stylesheet" href="./workbench.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="topbar-left">
+        <strong class="brand" data-i18n="app.workbench.brand">JustWork</strong>
+        <span class="sep">/</span><span class="page-tag" data-i18n="app.workbench.pageTag">Workspace</span>
+        <div id="topbar-quota" class="topbar-quota" hidden>
+          <div class="topbar-quota-bar"><span id="topbar-quota-fill" class="topbar-quota-fill"></span></div>
+          <span id="topbar-quota-text" class="topbar-quota-text">0 MB / 0 MB</span>
+        </div>
+      </div>
+      <div class="topbar-right">
+        <span id="backend-health-status" class="backend-health-status" aria-live="polite" data-i18n="status.connecting">Connecting</span>
+        <span id="save-status" class="save-status" data-i18n="status.saved">Saved</span>
+        <button
+          id="workspace-info-drawer-open-btn"
+          class="ghost-btn"
+          type="button"
+          hidden
+          aria-expanded="false"
+          aria-controls="workspace-info-drawer"
+          data-i18n="drawer.profile.title"
+        >
+          Profile
+        </button>
+        <button
+          id="history-drawer-open-btn"
+          class="ghost-btn"
+          type="button"
+          hidden
+          aria-expanded="false"
+          aria-controls="history-drawer"
+          data-i18n="drawer.history.title"
+        >
+          History
+        </button>
+        <button id="lock-workspace-btn" class="ghost-btn" type="button" hidden data-i18n="status.locked">Locked</button>
+        <div class="language-switcher" id="language-switcher">
+          <button
+            id="language-switcher-btn"
+            class="language-switcher-trigger"
+            type="button"
+            aria-haspopup="menu"
+            aria-expanded="false"
+            aria-controls="language-switcher-menu"
+            data-i18n-aria-label="app.workbench.languageSwitcher"
+            aria-label="Language"
+          >
+            <span id="language-switcher-label" class="language-switcher-label">EN</span>
+            <span class="language-switcher-caret" aria-hidden="true"></span>
+          </button>
+          <div id="language-switcher-menu" class="language-switcher-menu" role="menu" hidden></div>
+        </div>
+      </div>
+    </header>
+
+    <section id="workspace-gate" class="workspace-gate">
+      <div class="workspace-gate-inner">
+        <div id="workspace-setup-panel" class="workspace-gate-panel" hidden>
+          <div class="gate-kicker" data-i18n="gate.setup.kicker">JustWork Backend</div>
+          <h1 data-i18n="gate.setup.title">Create an encrypted workspace</h1>
+          <p data-i18n="gate.setup.description">
+            Enter a workspace password. Content is encrypted before syncing to JustWork Backend, and the password is never written to the database.
+          </p>
+          <div id="backend-setup-extras" class="backend-gate-extras">
+            <input
+              id="backend-title-setup-input"
+              class="gate-input"
+              type="text"
+              data-i18n-placeholder="gate.setup.workspaceTitlePlaceholder"
+              placeholder="Workspace title (optional)"
+            />
+          </div>
+          <input
+            id="setup-password-input"
+            class="gate-input"
+            type="password"
+            autocomplete="new-password"
+            data-i18n-placeholder="gate.setup.passwordPlaceholder"
+            placeholder="Workspace password"
+          />
+          <button id="setup-workspace-btn" class="gate-primary-btn" type="button" data-i18n-aria-label="gate.setup.button" aria-label="Create and unlock">
+            <span class="gate-btn-label" data-i18n="gate.setup.button">Create and unlock</span>
+            <span class="gate-btn-spinner" aria-hidden="true"></span>
+          </button>
+        </div>
+
+        <div id="workspace-unlock-panel" class="workspace-gate-panel" hidden>
+          <div class="gate-kicker" data-i18n="gate.unlock.kicker">Encrypted workspace</div>
+          <h1 data-i18n="gate.unlock.title">Unlock workspace</h1>
+          <p data-i18n="gate.unlock.description">The workspace is locked. Enter the password to read document contents.</p>
+          <div id="backend-unlock-extras" class="backend-gate-extras">
+            <input
+              id="backend-workspace-id-input"
+              class="gate-input"
+              type="text"
+              autocomplete="off"
+              data-i18n-placeholder="gate.unlock.workspaceIdPlaceholder"
+              placeholder="Workspace ID"
+            />
+          </div>
+          <input
+            id="unlock-password-input"
+            class="gate-input"
+            type="password"
+            autocomplete="current-password"
+            data-i18n-placeholder="gate.unlock.passwordPlaceholder"
+            placeholder="Workspace password"
+          />
+          <button id="unlock-workspace-btn" class="gate-primary-btn" type="button">
+            <span class="gate-btn-label" data-i18n="gate.unlock.button">Unlock</span>
+            <span class="gate-btn-spinner" aria-hidden="true"></span>
+          </button>
+        </div>
+
+        <div id="gate-recent-section" class="gate-recent-section">
+          <div class="gate-recent-title" data-i18n="gate.recent.title">Recent workspaces</div>
+          <div id="gate-recent-body" class="gate-recent-body">
+            <ul
+              id="gate-recent-workspaces-list"
+              class="gate-recent-list-inner"
+              aria-label="Recent workspaces"
+              data-i18n-aria-label="gate.recent.title"
+            ></ul>
+            <p id="gate-recent-empty" class="gate-recent-empty" hidden data-i18n="gate.recent.empty">
+              No records yet. Created or unlocked workspaces will appear here.
+            </p>
+          </div>
+          <button id="gate-recent-toggle" type="button" class="gate-recent-toggle" hidden data-i18n="gate.recent.showMore">Show more</button>
+        </div>
+      </div>
+
+      <p id="workspace-gate-error" class="gate-error" role="alert"></p>
+    </section>
+
+    <main class="workspace-shell" hidden>
+      <aside class="workspace-sidebar" aria-label="Workspace sidebar" data-i18n-aria-label="sidebar.label">
+        <div class="sidebar-section">
+          <input id="search-input" class="search-input" data-i18n-placeholder="sidebar.searchPlaceholder" placeholder="Search / jump to page" />
+        </div>
+        <div class="sidebar-section">
+          <button id="new-file-btn" class="sidebar-create-btn has-icon" type="button">
+            <span class="sidebar-btn-icon" aria-hidden="true">📄</span><span data-i18n="sidebar.newFile">New file</span>
+          </button>
+          <button id="new-folder-btn" class="sidebar-create-btn has-icon" type="button">
+            <span class="sidebar-btn-icon" aria-hidden="true">📁</span><span data-i18n="sidebar.newFolder">New folder</span>
+          </button>
+        </div>
+        <div class="sidebar-section">
+          <button id="pin-btn" class="sidebar-create-btn has-icon" type="button" hidden>
+            <span class="sidebar-btn-icon" aria-hidden="true">📌</span><span data-i18n="sidebar.pin">Pin</span>
+          </button>
+          <button id="delete-btn" class="sidebar-create-btn has-icon" type="button" hidden>
+            <span class="sidebar-btn-icon" aria-hidden="true">🗑</span><span data-i18n="sidebar.delete">Delete</span>
+          </button>
+        </div>
+        <div class="sidebar-section">
+          <div class="sidebar-title" data-i18n="sidebar.pinned">Pinned</div>
+          <ul id="pinned-list" class="doc-list"></ul>
+        </div>
+        <div class="sidebar-section">
+          <div class="sidebar-title" data-i18n="sidebar.pages">Pages</div>
+          <ul id="doc-tree" class="doc-list"></ul>
+        </div>
+        <div class="sidebar-section">
+          <div class="sidebar-title" data-i18n="sidebar.trash">Trash</div>
+          <ul id="trash-list" class="doc-list"></ul>
+        </div>
+      </aside>
+
+      <section class="content-stage">
+        <div class="page-meta">
+          <div class="meta-row"><span class="page-tag-soft" data-i18n="editor.pageTag">Page</span></div>
+          <input id="doc-title-input" class="doc-title-input" value="Untitled document" aria-label="Document title" data-i18n-aria-label="editor.titleInput" />
+        </div>
+        <div id="editor-root" class="doc-editor-host" aria-label="Document editor" data-i18n-aria-label="app.sidepanel.editorLabel"></div>
+      </section>
+    </main>
+
+    <div id="workspace-info-drawer-root" class="history-drawer-root" aria-hidden="true">
+      <div id="workspace-info-drawer-backdrop" class="history-drawer-backdrop" tabindex="-1"></div>
+      <aside
+        id="workspace-info-drawer"
+        class="history-drawer"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="workspace-info-drawer-title"
+      >
+        <div class="history-drawer-header">
+          <h2 id="workspace-info-drawer-title" class="history-drawer-title" data-i18n="drawer.profile.title">Profile</h2>
+          <button
+            id="workspace-info-drawer-close-btn"
+            type="button"
+            class="history-drawer-close"
+            aria-label="Close"
+            data-i18n-aria-label="common.close"
+          >
+            ×
+          </button>
+        </div>
+        <div class="history-drawer-body workspace-info-body">
+          <section class="workspace-info-section">
+            <h3 class="workspace-info-heading" data-i18n="drawer.profile.workspaceHeading">Workspace</h3>
+            <h4 class="workspace-info-subheading" data-i18n="drawer.profile.workspaceIdHeading">Workspace ID</h4>
+            <p class="workspace-info-desc" data-i18n="drawer.profile.workspaceDesc">
+              This is the unique identifier for unlock and API access. It does not depend on the workspace title and can be shared across devices.
+            </p>
+            <div class="workspace-info-row">
+              <code id="workspace-info-id" class="workspace-info-code"></code>
+              <button id="workspace-info-copy-id-btn" type="button" class="ghost-btn workspace-info-inline-btn" data-i18n="drawer.profile.copy">Copy</button>
+            </div>
+            <h4 class="workspace-info-subheading workspace-info-subheading--spaced" data-i18n="drawer.profile.workspaceNameHeading">Workspace name</h4>
+            <p class="workspace-info-desc">
+              <span data-i18n-html="drawer.profile.workspaceNameDesc">
+                Used in the recent-workspaces list. Defaults to <span class="workspace-info-em">work_last4</span> and can be changed at any time.
+              </span>
+            </p>
+            <input
+              id="workspace-info-workspace-name-input"
+              class="gate-input workspace-info-input"
+              type="text"
+              maxlength="120"
+              autocomplete="off"
+              data-i18n-placeholder="drawer.profile.workspaceNamePlaceholder"
+              placeholder="For example: Project docs"
+            />
+            <button id="workspace-info-save-workspace-name-btn" type="button" class="ghost-btn workspace-info-save-btn" data-i18n="drawer.profile.saveWorkspaceName">
+              Save workspace name
+            </button>
+            <p id="workspace-info-workspace-name-status" class="workspace-info-status" role="status"></p>
+          </section>
+          <section class="workspace-info-section">
+            <h3 class="workspace-info-heading" data-i18n="drawer.profile.personalHeading">Personal info</h3>
+            <h4 class="workspace-info-subheading" data-i18n="drawer.profile.userIdHeading">User ID</h4>
+            <p class="workspace-info-desc" data-i18n="drawer.profile.userIdDesc">
+              A local identity used for encryption and backend linkage. It is not shown in the navigation bar.
+            </p>
+            <div class="workspace-info-row">
+              <code id="workspace-info-user-id" class="workspace-info-code"></code>
+              <button id="workspace-info-copy-user-id-btn" type="button" class="ghost-btn workspace-info-inline-btn" data-i18n="drawer.profile.copy">Copy</button>
+            </div>
+            <h4 class="workspace-info-subheading workspace-info-subheading--spaced" data-i18n="drawer.profile.nicknameHeading">Workspace display name</h4>
+            <p class="workspace-info-desc" data-i18n="drawer.profile.nicknameDesc">
+              Stored on the server. The display name is the nickname plus an identity suffix and can be changed later.
+            </p>
+            <input
+              id="workspace-info-nickname-input"
+              class="gate-input workspace-info-input"
+              type="text"
+              maxlength="120"
+              autocomplete="nickname"
+              data-i18n-placeholder="drawer.profile.nicknamePlaceholder"
+              placeholder="For example: Alice"
+            />
+            <button id="workspace-info-save-nickname-btn" type="button" class="ghost-btn workspace-info-save-btn" data-i18n="drawer.profile.saveNickname">
+              Save display name
+            </button>
+            <p id="workspace-info-profile-status" class="workspace-info-status" role="status"></p>
+          </section>
+        </div>
+      </aside>
+    </div>
+
+    <div id="history-drawer-root" class="history-drawer-root" aria-hidden="true">
+      <div id="history-drawer-backdrop" class="history-drawer-backdrop" tabindex="-1"></div>
+      <aside
+        id="history-drawer"
+        class="history-drawer"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="history-drawer-title"
+      >
+        <div class="history-drawer-header">
+          <h2 id="history-drawer-title" class="history-drawer-title" data-i18n="drawer.history.title">Activity history</h2>
+          <div class="history-drawer-actions">
+            <button id="history-refresh-btn" type="button" class="ghost-btn" data-i18n="drawer.history.refresh">Refresh</button>
+            <button id="history-drawer-close-btn" type="button" class="history-drawer-close" aria-label="Close" data-i18n-aria-label="common.close">
+              ×
+            </button>
+          </div>
+        </div>
+        <div class="history-drawer-body">
+          <ul id="history-list" class="history-list" aria-label="Activity history" data-i18n-aria-label="drawer.history.ariaLabel" data-testid="history-list"></ul>
+        </div>
+      </aside>
+    </div>
+
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>
