@@ -1,4 +1,4 @@
-/** 编辑器对外只暴露文档状态与生命周期，避免页面直接依赖 Vditor 类型 */
+/** Editor-facing document wrapper. */
 export type DocEditor = {
   readonly root: HTMLElement;
   getMarkdown: () => string;
@@ -6,9 +6,23 @@ export type DocEditor = {
   destroy: () => void;
 };
 
+export type EditorImageUploadResult = {
+  assetId: string;
+  localUrl: string;
+  html: string;
+};
+
+export type EditorImageSync = {
+  toEditorMarkdown: (markdown: string) => string;
+  fromEditorMarkdown: (markdown: string) => string;
+  uploadFiles: (files: File[]) => Promise<EditorImageUploadResult[]>;
+  dispose?: () => void;
+};
+
 export type CreateEditorOptions = {
   container: HTMLElement;
-  /** 初始 Markdown（底层存储格式；用户通过工具栏操作，不强制源码编辑） */
+  /** Initial markdown stored in the workspace. */
   initialMarkdown?: string;
   onChange?: (markdown: string) => void;
+  imageSync?: EditorImageSync;
 };

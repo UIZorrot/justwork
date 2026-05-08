@@ -158,6 +158,17 @@ export type PatchResponse = {
   preview_markdown: string;
 };
 
+export type RelayJoinBody = {
+  password: string;
+};
+
+export type RelayJoinResponse = {
+  ok: boolean;
+  workspace_id: string;
+  ticket: string;
+  expires_at: string;
+};
+
 /** Same shape as `@justwork/security` IdentityKeyPair — inlined to avoid circular workspace deps in types. */
 export type SigningIdentity = {
   userId: string;
@@ -420,6 +431,10 @@ export function createBackendClient(opts: BackendClientOptions) {
       body: { nickname: string },
     ): Promise<{ ok: boolean; profile: ProfileBody }> {
       return request("PUT", `/v1/workspaces/${encodeURIComponent(workspaceId)}/profile`, body);
+    },
+
+    joinRelay(workspaceId: string, body: RelayJoinBody): Promise<RelayJoinResponse> {
+      return request("POST", `/v1/workspaces/${encodeURIComponent(workspaceId)}/relay/join`, body);
     },
   };
 }

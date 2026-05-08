@@ -75,6 +75,10 @@ class WorkspacePasswordRequest(WriteSigningEnvelope):
     password: str = Field(min_length=1)
 
 
+class WorkspaceRelayJoinRequest(BaseModel):
+    password: str = Field(min_length=1)
+
+
 class WorkspaceTreeItem(BaseModel):
     id: str
     title: str
@@ -157,6 +161,13 @@ class WorkspaceQuotaResponse(BaseModel):
     ok: bool
     workspace_id: str
     quota: WorkspaceQuotaBody
+
+
+class WorkspaceRelayJoinResponse(BaseModel):
+    ok: bool
+    workspace_id: str
+    ticket: str
+    expires_at: str
 
 
 class WorkspaceItemMoveRequest(WriteSigningEnvelope):

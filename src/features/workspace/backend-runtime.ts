@@ -82,6 +82,9 @@ export function createBackendWorkspaceSession(opts: BackendWorkspaceSessionOptio
   return {
     client,
     workspaceId: opts.workspaceId,
+    async joinRelay() {
+      return client.joinRelay(opts.workspaceId, { password: opts.password });
+    },
 
     async loadTree() {
       const r = await client.getTree(opts.workspaceId, pwd());

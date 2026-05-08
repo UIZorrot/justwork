@@ -10,6 +10,7 @@ import {
   ROOT_FOLDER_ID,
   type BackendWorkspaceSession,
 } from "@/features/workspace/backend-runtime";
+import { createWorkspaceImageSync, type WorkspaceImageSync } from "@/features/workspace/image-sync";
 import { createChromeRuntimeStorage } from "@/features/workspace/local-runtime";
 import {
   enqueueOfflineMutation,
@@ -495,6 +496,7 @@ export async function startBackendWorkbench(): Promise<void> {
   if (backendWorkspaceIdInput && savedWsId) backendWorkspaceIdInput.value = savedWsId;
 
   let editor: DocEditor | undefined;
+  let imageSync: WorkspaceImageSync | undefined;
   let mounted = false;
   let flushOfflineMutations: () => Promise<void> = async () => {};
   let rerenderActiveWorkbench: (() => void) | undefined;
@@ -776,6 +778,17 @@ export async function startBackendWorkbench(): Promise<void> {
       };
     }
 
+    imageSync = await createWorkspaceImageSync({
+      workspaceId,
+      baseUrl: JUSTWORK_BACKEND_URL,
+      joinRelay: () => session.joinRelay(),
+      onAssetChanged: () => {
+        syncEditorWithActive();
+        renderAll();
+      },
+    });
+    await imageSync.warmMarkdowns(workspace.docs.map((doc) => doc.markdown));
+
     const replaceDoc = (doc: WorkspaceDoc): void => {
       active = doc;
       workspace = {
@@ -792,10 +805,11 @@ export async function startBackendWorkbench(): Promise<void> {
         : treeData.active_item_id;
       workspace = buildDocsStateFromTree(treeData.items, nextActiveId, workspace.workspaceDescription);
       const summary = workspace.docs.find((d) => d.id === nextActiveId) ?? workspace.docs[0]!;
-        const full = summary.kind === "welcome"
+      const full = summary.kind === "welcome"
         ? { ...summary, markdown: buildLocalizedWelcomeMarkdown(workspace) }
         : await session.loadItem(summary.id);
       replaceDoc(full);
+      if (imageSync) await imageSync.warmMarkdowns([full.markdown]);
       await pullQuota();
     };
 
@@ -863,6 +877,9 @@ export async function startBackendWorkbench(): Promise<void> {
             void (async () => {
               try {
                 await session.revertHistoryEvent(ev.id);
+                if (imageSync) {
+                  await imageSync.updateReferences(ev.after_markdown ?? "", ev.before_markdown ?? "").catch(() => undefined);
+                }
                 await persistRefreshTree();
                 syncEditorWithActive();
                 renderAll();
@@ -904,6 +921,8 @@ export async function startBackendWorkbench(): Promise<void> {
       expectedRevision: number,
       patch: OfflineMutationPatch,
     ): Promise<void> => {
+      const previousMarkdown = workspace.docs.find((doc) => doc.id === itemId)?.markdown ?? "";
+      const nextMarkdown = patch.markdown ?? previousMarkdown;
       await enqueueOfflineMutation(chrome.storage.local, {
         id: mutationId(),
         workspaceId,
@@ -913,6 +932,7 @@ export async function startBackendWorkbench(): Promise<void> {
         createdAt: new Date().toISOString(),
       });
       applyLocalPatch(itemId, patch);
+      await imageSync?.updateReferences(previousMarkdown, nextMarkdown).catch(() => undefined);
       setHealthStatus(backendHealthStatus, "offline", t("status.offline"));
       saveStatus(saveStatusEl, t("status.offlinePending"));
     };
@@ -921,10 +941,13 @@ export async function startBackendWorkbench(): Promise<void> {
       if (active.kind === "welcome") return;
       const itemId = active.id;
       const expectedRevision = active.revision;
+      const previousMarkdown = active.markdown;
+      const nextMarkdown = patch.markdown ?? active.markdown;
       saveStatus(saveStatusEl, t("status.saving"));
       try {
         const next = await session.saveItem(itemId, { ...patch, expectedRevision });
         replaceDoc(next);
+        await imageSync?.updateReferences(previousMarkdown, nextMarkdown).catch(() => undefined);
         await persistRefreshTree();
         renderAll();
         void refreshHistoryPanel();
@@ -981,6 +1004,7 @@ export async function startBackendWorkbench(): Promise<void> {
       } else {
         const full = await session.loadItem(doc.id);
         replaceDoc(full);
+        if (imageSync) await imageSync.warmMarkdowns([full.markdown]);
       }
       syncEditorWithActive();
       await persistRefreshTree();
@@ -1087,7 +1111,11 @@ export async function startBackendWorkbench(): Promise<void> {
             e.stopPropagation();
             void (async () => {
               try {
+                const full = await session.loadItem(doc.id);
                 await session.hardDeleteItem(doc.id);
+                if (imageSync) {
+                  await imageSync.updateReferences(full.markdown ?? "", "").catch(() => undefined);
+                }
                 await persistRefreshTree();
                 syncEditorWithActive();
                 renderAll();
@@ -1135,6 +1163,10 @@ export async function startBackendWorkbench(): Promise<void> {
       onChange: (markdown) => {
         void saveActivePatch({ markdown }, t("status.saved"));
       },
+      imageSync: imageSync.editorSync,
+    });
+    void imageSync.connect().catch(() => {
+      // Relay is best-effort. Local image persistence still works if it is unavailable.
     });
 
     docTree.addEventListener("dragover", (e) => {
@@ -1379,12 +1411,15 @@ export async function startBackendWorkbench(): Promise<void> {
 
   lockWorkspaceBtn.addEventListener("click", () => {
     editor?.destroy();
+    imageSync?.disconnect();
+    imageSync = undefined;
     window.location.reload();
   });
 
   window.addEventListener("beforeunload", () => {
     window.clearInterval(healthTimer);
     editor?.destroy();
+    imageSync?.disconnect();
   });
 
   showGate(savedWsId ? "unlock" : "setup");

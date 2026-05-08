@@ -11,7 +11,7 @@ except ImportError:
 if load_dotenv:
     load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, WebSocket, WebSocketDisconnect, status
 from pydantic import BaseModel
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -26,6 +26,8 @@ from .models import (
     WorkspaceQuotaBody,
     WorkspaceQuotaResponse,
     ProfileUpdateRequest,
+    WorkspaceRelayJoinRequest,
+    WorkspaceRelayJoinResponse,
     WorkspaceHistoryResponse,
     WorkspaceCreateRequest,
     WorkspaceCreateResponse,
@@ -46,6 +48,7 @@ from .models import (
     WorkspaceTreeResponse,
     WorkspaceUpsertRequest,
 )
+from .image_relay import get_image_relay_hub, parse_relay_payload, reset_image_relay_for_tests as reset_image_relay_hub_for_tests
 from .write_signing import verify_signed_write_body
 from .workspace_crypto import InvalidWorkspacePassword, decrypt_workspace_payload, encrypt_workspace_payload
 from .workspace_runtime import (
@@ -180,6 +183,10 @@ def get_gateway() -> DatabaseGateway:
 def reset_gateway_for_tests() -> None:
     global _gateway
     _gateway = None
+
+
+def reset_image_relay_for_tests() -> None:
+    reset_image_relay_hub_for_tests()
 
 
 def require_backend_token(authorization: str | None = Header(default=None)) -> None:
@@ -333,6 +340,55 @@ def get_workspace_quota(
         workspace_id=workspace_id,
         quota=get_workspace_quota_snapshot(record),
     )
+
+
+@app.post("/v1/workspaces/{workspace_id}/relay/join", response_model=WorkspaceRelayJoinResponse)
+async def join_workspace_relay(
+    workspace_id: str,
+    body: WorkspaceRelayJoinRequest,
+    _: None = Depends(require_backend_token),
+    gateway: DatabaseGateway = Depends(get_gateway),
+) -> WorkspaceRelayJoinResponse:
+    record = require_workspace(gateway, workspace_id)
+    load_decrypted_state(record, body.password)
+    hub = get_image_relay_hub()
+    ticket, expires_at = await hub.issue_ticket(workspace_id)
+    return WorkspaceRelayJoinResponse(ok=True, workspace_id=workspace_id, ticket=ticket, expires_at=expires_at)
+
+
+@app.websocket("/v1/workspaces/{workspace_id}/relay")
+async def workspace_image_relay(
+    websocket: WebSocket,
+    workspace_id: str,
+    ticket: str,
+) -> None:
+    hub = get_image_relay_hub()
+    if not await hub.validate_ticket(workspace_id, ticket):
+        await websocket.close(code=4401)
+        return
+    await websocket.accept()
+    await hub.register(workspace_id, websocket)
+    try:
+        while True:
+            payload = await websocket.receive_json()
+            parsed = parse_relay_payload(payload)
+            if parsed is None:
+                continue
+            message_workspace_id = parsed.get("workspaceId")
+            if isinstance(message_workspace_id, str) and message_workspace_id != workspace_id:
+                continue
+            if parsed.get("type") == "asset.manifest":
+                meta = parsed.get("meta")
+                if isinstance(meta, dict) and meta.get("workspaceId") != workspace_id:
+                    continue
+            if parsed.get("type") == "relay.leave":
+                await hub.broadcast(workspace_id, websocket, parsed)
+                break
+            await hub.broadcast(workspace_id, websocket, parsed)
+    except WebSocketDisconnect:
+        pass
+    finally:
+        await hub.unregister(workspace_id, websocket)
 
 
 @app.put("/v1/workspaces/{workspace_id}/profile", response_model=ProfileResponse)
