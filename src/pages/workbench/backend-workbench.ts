@@ -19,7 +19,9 @@ import {
   type OfflineMutationPatch,
 } from "@/features/workspace/offline-queue";
 import { loadCollaborativeSnapshot, removeCollaborativeSnapshot, saveCollaborativeSnapshot } from "@/features/collaboration/collab-storage";
+import { overlayDirtyCollaborativeDocs } from "@/features/collaboration/dirty-docs";
 import { createMarkdownCollaborator } from "@/features/collaboration/yjs-markdown";
+import { hasStaleCollaborativeSave, reconcileCollaborativeSave } from "@/features/collaboration/save-race";
 import { JUSTWORK_BACKEND_URL } from "@/shared/backend-config";
 import {
   applyI18n,
@@ -993,6 +995,11 @@ export async function startBackendWorkbench(): Promise<void> {
       activeDocId: active.id,
     };
 
+    const localCollaborativeDocCache = new Map<string, WorkspaceDoc>();
+    for (const doc of workspace.docs) {
+      localCollaborativeDocCache.set(doc.id, doc);
+    }
+
     imageSync = await createWorkspaceImageSync({
       workspaceId,
       baseUrl: JUSTWORK_BACKEND_URL,
@@ -1006,6 +1013,7 @@ export async function startBackendWorkbench(): Promise<void> {
 
     const replaceDoc = (doc: WorkspaceDoc): void => {
       active = doc;
+      localCollaborativeDocCache.set(doc.id, doc);
       workspace = {
         ...workspace,
         docs: workspace.docs.some((d) => d.id === doc.id)
@@ -1019,6 +1027,7 @@ export async function startBackendWorkbench(): Promise<void> {
       const current = workspace.docs.find((doc) => doc.id === docId);
       if (!current) return null;
       const next = update(current);
+      localCollaborativeDocCache.set(docId, next);
       workspace = {
         ...workspace,
         docs: workspace.docs.map((doc) => (doc.id === docId ? next : doc)),
@@ -1030,6 +1039,7 @@ export async function startBackendWorkbench(): Promise<void> {
     };
 
     const removeDocById = (docId: string): void => {
+      localCollaborativeDocCache.delete(docId);
       const nextDocs = workspace.docs.filter((doc) => doc.id !== docId);
       workspace = {
         ...workspace,
@@ -1071,6 +1081,7 @@ export async function startBackendWorkbench(): Promise<void> {
       patch: OfflineMutationPatch;
       previousMarkdown: string;
       nextMarkdown: string;
+      nextTitle: string;
       doneText: string;
       usesDraftQueue: boolean;
     };
@@ -1112,39 +1123,44 @@ export async function startBackendWorkbench(): Promise<void> {
             });
             const draft = request.usesDraftQueue ? await getBackendDocDraft(workspaceId, request.itemId) : null;
             const hasNewerDraft = request.usesDraftQueue && draft !== null && draft.seq > request.seq;
+            const liveDoc = localCollaborativeDocCache.get(request.itemId);
+            const isStale = hasStaleCollaborativeSave(liveDoc, {
+              nextTitle: request.nextTitle,
+              nextMarkdown: request.nextMarkdown,
+            });
+            const saveResolution = reconcileCollaborativeSave(liveDoc, isStale, hasNewerDraft);
             if (request.usesDraftQueue && !hasNewerDraft) {
               await removeBackendDocDraft(workspaceId, request.itemId, request.seq);
             }
-            dirtyDocIds.delete(request.itemId);
+            if (!saveResolution.shouldKeepDirty) {
+              dirtyDocIds.delete(request.itemId);
+            }
 
             updateDocById(request.itemId, (doc) => {
-              if (hasNewerDraft) {
-                return {
-                  ...doc,
-                  revision: next.revision,
-                  updatedAt: next.updatedAt,
-                };
-              }
               return {
                 ...doc,
-                title: next.title,
-                markdown: next.markdown,
+                title: saveResolution.retainedTitle ?? (saveResolution.shouldKeepDirty ? doc.title : next.title),
+                markdown: saveResolution.retainedMarkdown ?? (saveResolution.shouldKeepDirty ? doc.markdown : next.markdown),
                 revision: next.revision,
                 updatedAt: next.updatedAt,
               };
             });
 
-            if (request.patch.markdown !== undefined) {
+            if (request.patch.markdown !== undefined && saveResolution.shouldReseedSnapshot) {
               persistCollaborativeMarkdownSnapshot(workspaceId, request.itemId, next.markdown);
             }
 
-            if (imageSync) {
+            if (imageSync && saveResolution.shouldReseedSnapshot) {
               await imageSync.updateReferences(request.previousMarkdown, request.nextMarkdown).catch(() => undefined);
             }
             scheduleTreeRefresh();
             if (request.itemId === active.id) {
               renderAll();
-              saveStatus(saveStatusEl, request.doneText);
+              if (saveResolution.shouldKeepDirty) {
+                saveStatus(saveStatusEl, t("status.saving"));
+              } else {
+                saveStatus(saveStatusEl, request.doneText);
+              }
             }
           } catch (e) {
             if (e instanceof BackendApiError && e.code === "conflict") {
@@ -1187,6 +1203,10 @@ export async function startBackendWorkbench(): Promise<void> {
         ? active.id
         : treeData.active_item_id;
       workspace = buildDocsStateFromTree(treeData.items, nextActiveId, workspace.workspaceDescription);
+      workspace = {
+        ...workspace,
+        docs: overlayDirtyCollaborativeDocs(workspace.docs, dirtyDocIds, localCollaborativeDocCache),
+      };
       const summary = workspace.docs.find((d) => d.id === nextActiveId) ?? workspace.docs[0]!;
       const localMarkdown = summary.kind === "welcome"
         ? summary.markdown
@@ -1197,7 +1217,7 @@ export async function startBackendWorkbench(): Promise<void> {
       const hydrated = summary.kind === "welcome"
         ? await hydrateDocWithLocalDraft(full)
         : await hydrateDocWithLocalDraft({ ...full, markdown: localMarkdown });
-      const local = dirtyDocIds.has(summary.id) ? workspace.docs.find((doc) => doc.id === summary.id) : null;
+      const local = dirtyDocIds.has(summary.id) ? localCollaborativeDocCache.get(summary.id) ?? null : null;
       if (dirtyDocIds.has(summary.id)) {
         if (local) {
           replaceDoc({
@@ -1568,6 +1588,7 @@ export async function startBackendWorkbench(): Promise<void> {
       timer: number | undefined;
       expectedRevision: number;
       patch: OfflineMutationPatch;
+      nextTitle: string;
       previousMarkdown: string;
       nextMarkdown: string;
       delayMs: number;
@@ -1579,6 +1600,7 @@ export async function startBackendWorkbench(): Promise<void> {
       itemId: string,
       expectedRevision: number,
       patch: OfflineMutationPatch,
+      nextTitle: string,
       previousMarkdown: string,
       nextMarkdown: string,
       delayMs: number,
@@ -1588,6 +1610,7 @@ export async function startBackendWorkbench(): Promise<void> {
         ...(pending?.patch ?? {}),
         ...patch,
       };
+      const mergedNextTitle = patch.title !== undefined ? nextTitle : pending?.nextTitle ?? nextTitle;
       const mergedPreviousMarkdown = pending?.previousMarkdown ?? previousMarkdown;
       const mergedNextMarkdown = patch.markdown !== undefined ? nextMarkdown : pending?.nextMarkdown ?? nextMarkdown;
       if (pending?.timer !== undefined) {
@@ -1597,6 +1620,7 @@ export async function startBackendWorkbench(): Promise<void> {
         timer: undefined,
         expectedRevision,
         patch: mergedPatch,
+        nextTitle: mergedNextTitle,
         previousMarkdown: mergedPreviousMarkdown,
         nextMarkdown: mergedNextMarkdown,
         delayMs,
@@ -1614,6 +1638,7 @@ export async function startBackendWorkbench(): Promise<void> {
               seq: 0,
               expectedRevision: current.expectedRevision,
               patch: draftPatch,
+              nextTitle: current.nextTitle,
               previousMarkdown: current.previousMarkdown,
               nextMarkdown: current.nextMarkdown,
               doneText: t("status.saved"),
@@ -1627,6 +1652,7 @@ export async function startBackendWorkbench(): Promise<void> {
             seq: draft.seq,
             expectedRevision: current.expectedRevision,
             patch: draftPatch,
+            nextTitle: current.nextTitle,
             previousMarkdown: current.previousMarkdown,
             nextMarkdown: current.nextMarkdown,
             doneText: t("status.saved"),
@@ -1645,7 +1671,7 @@ export async function startBackendWorkbench(): Promise<void> {
         const expectedRevision = active.revision;
         const previousMarkdown = workspace.docs.find((doc) => doc.id === itemId)?.markdown ?? "";
         commitLocalEdit(itemId, { markdown });
-        scheduleDocSave(itemId, expectedRevision, { markdown }, previousMarkdown, markdown, 240);
+        scheduleDocSave(itemId, expectedRevision, { markdown }, active.title, previousMarkdown, markdown, 240);
       },
       imageSync: imageSync.editorSync,
     });
@@ -1671,7 +1697,7 @@ export async function startBackendWorkbench(): Promise<void> {
       const currentMarkdown = workspace.docs.find((doc) => doc.id === itemId)?.markdown ?? "";
       commitLocalEdit(itemId, { title });
       renderAll();
-      scheduleDocSave(itemId, expectedRevision, { title }, currentMarkdown, currentMarkdown, 400);
+      scheduleDocSave(itemId, expectedRevision, { title }, title, currentMarkdown, currentMarkdown, 400);
     });
     searchInput.addEventListener("input", () => renderAll());
     historyRefreshBtn.addEventListener("click", () => void refreshHistoryPanel());
