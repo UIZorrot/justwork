@@ -1,4 +1,7 @@
-const SNAPSHOT_PREFIX = "justwork:collaboration:snapshot:";
+import { STORAGE_KEYS } from "@/shared/storage-keys";
+import { getBrowserLocalStorage } from "@/features/workspace/local-runtime";
+
+const SNAPSHOT_PREFIX = STORAGE_KEYS.COLLABORATIVE_MARKDOWN_SNAPSHOT_PREFIX;
 
 function storageKey(documentKey: string): string {
   return `${SNAPSHOT_PREFIX}${documentKey}`;
@@ -14,19 +17,23 @@ function encodeSnapshot(snapshot: Uint8Array): string {
 }
 
 function decodeSnapshot(encoded: string): Uint8Array {
-  if (typeof atob === "function") {
-    const binary = atob(encoded);
-    const snapshot = new Uint8Array(binary.length);
-    for (let index = 0; index < binary.length; index += 1) {
-      snapshot[index] = binary.charCodeAt(index);
+  try {
+    if (typeof atob === "function") {
+      const binary = atob(encoded);
+      const snapshot = new Uint8Array(binary.length);
+      for (let index = 0; index < binary.length; index += 1) {
+        snapshot[index] = binary.charCodeAt(index);
+      }
+      return snapshot;
     }
-    return snapshot;
+    return new Uint8Array(Buffer.from(encoded, "base64"));
+  } catch {
+    return new Uint8Array();
   }
-  return new Uint8Array(Buffer.from(encoded, "base64"));
 }
 
 function getLocalStorage(): Storage | undefined {
-  return typeof globalThis.localStorage === "undefined" ? undefined : globalThis.localStorage;
+  return getBrowserLocalStorage();
 }
 
 export function saveCollaborativeSnapshot(documentKey: string, snapshot: Uint8Array): void {
@@ -39,7 +46,13 @@ export function loadCollaborativeSnapshot(documentKey: string): Uint8Array | nul
   const storage = getLocalStorage();
   if (!storage) return null;
   const encoded = storage.getItem(storageKey(documentKey));
-  return encoded === null ? null : decodeSnapshot(encoded);
+  if (encoded === null) return null;
+  const snapshot = decodeSnapshot(encoded);
+  if (snapshot.length === 0 && encoded.length > 0) {
+    storage.removeItem(storageKey(documentKey));
+    return null;
+  }
+  return snapshot;
 }
 
 export function removeCollaborativeSnapshot(documentKey: string): void {

@@ -9,6 +9,8 @@ export const STORAGE_KEYS = {
   /** 最近使用过的工作区（仅本地，用于门页快捷选择） */
   BACKEND_WORKSPACE_RECENTS: "justwork.backend.workspaceRecents.v1",
   OFFLINE_MUTATION_QUEUE: "justwork.offline.queue.v1",
+  BACKEND_DOC_DRAFTS: "justwork.backend.docDrafts.v1",
+  COLLABORATIVE_MARKDOWN_SNAPSHOT_PREFIX: "justwork:collaboration:snapshot:",
 } as const;
 
 export type DocPayloadV2 = {

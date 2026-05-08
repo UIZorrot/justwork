@@ -1,5 +1,9 @@
 import type { RuntimeStorage } from "@justwork/workspace-runtime";
 
+export function getBrowserLocalStorage(): Storage | undefined {
+  return typeof globalThis.localStorage === "undefined" ? undefined : globalThis.localStorage;
+}
+
 export function createChromeRuntimeStorage(): RuntimeStorage {
   return {
     async get<T = unknown>(key: string): Promise<T | undefined> {

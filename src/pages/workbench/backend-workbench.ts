@@ -18,6 +18,8 @@ import {
   removeOfflineMutation,
   type OfflineMutationPatch,
 } from "@/features/workspace/offline-queue";
+import { loadCollaborativeSnapshot, removeCollaborativeSnapshot, saveCollaborativeSnapshot } from "@/features/collaboration/collab-storage";
+import { createMarkdownCollaborator } from "@/features/collaboration/yjs-markdown";
 import { JUSTWORK_BACKEND_URL } from "@/shared/backend-config";
 import {
   applyI18n,
@@ -122,6 +124,167 @@ type RecentWorkspaceEntry = {
   lastUsedAt: string;
 };
 
+type BackendDocDraft = {
+  workspaceId: string;
+  itemId: string;
+  markdown?: string;
+  title?: string;
+  seq: number;
+  updatedAt: string;
+};
+
+function draftMapKey(workspaceId: string, itemId: string): string {
+  return `${workspaceId}::${itemId}`;
+}
+
+function collaborativeMarkdownSnapshotKey(workspaceId: string, itemId: string): string {
+  return `${workspaceId}::${itemId}`;
+}
+
+function hydrateMarkdownFromCollaborativeSnapshot(
+  workspaceId: string,
+  itemId: string,
+  fallbackMarkdown: string,
+): string {
+  const snapshot = loadCollaborativeSnapshot(collaborativeMarkdownSnapshotKey(workspaceId, itemId));
+  if (snapshot === null) return fallbackMarkdown;
+  const collaborator = createMarkdownCollaborator();
+  try {
+    collaborator.applyRemoteUpdate(snapshot);
+    return collaborator.getMarkdown();
+  } finally {
+    collaborator.destroy();
+  }
+}
+
+function persistCollaborativeMarkdownSnapshot(workspaceId: string, itemId: string, markdown: string): void {
+  const collaborator = createMarkdownCollaborator({ initialMarkdown: markdown });
+  try {
+    saveCollaborativeSnapshot(collaborativeMarkdownSnapshotKey(workspaceId, itemId), collaborator.encodeUpdate());
+  } finally {
+    collaborator.destroy();
+  }
+}
+
+type BackendDocDraftSyncMessage = {
+  type: "justwork.backendDocDraft.sync";
+  drafts: Record<string, BackendDocDraft>;
+};
+
+const backendDocDraftSeqClock = new Map<string, number>();
+const backendDocDraftCache = new Map<string, BackendDocDraft>();
+let backendDocDraftSyncQueue: Promise<void> = Promise.resolve();
+
+function snapshotBackendDocDraftCache(): Record<string, BackendDocDraft> {
+  return Object.fromEntries(backendDocDraftCache.entries());
+}
+
+async function persistBackendDocDraftSnapshot(snapshot: Record<string, BackendDocDraft>): Promise<void> {
+  const payload = { [STORAGE_KEYS.BACKEND_DOC_DRAFTS]: snapshot };
+  try {
+    if (chrome.storage.session) {
+      await chrome.storage.session.set(payload);
+    }
+  } catch {
+    // Session storage is best-effort.
+  }
+  try {
+    const message: BackendDocDraftSyncMessage = {
+      type: "justwork.backendDocDraft.sync",
+      drafts: snapshot,
+    };
+    await chrome.runtime.sendMessage(message);
+  } catch {
+    await chrome.storage.local.set(payload);
+  }
+}
+
+function queueBackendDocDraftSnapshotPersist(): void {
+  backendDocDraftSyncQueue = backendDocDraftSyncQueue
+    .then(async () => {
+      await persistBackendDocDraftSnapshot(snapshotBackendDocDraftCache());
+    })
+    .catch(() => {
+      // Best-effort persistence queue.
+    });
+}
+
+function nextBackendDocDraftSeq(key: string, currentSeq = 0): number {
+  const now = Date.now();
+  const next = Math.max(now, backendDocDraftSeqClock.get(key) ?? 0, currentSeq) + 1;
+  backendDocDraftSeqClock.set(key, next);
+  return next;
+}
+
+async function loadBackendDocDraftMap(): Promise<Record<string, BackendDocDraft>> {
+  const merged: Record<string, BackendDocDraft> = {};
+  const areas: chrome.storage.StorageArea[] = [];
+  if (chrome.storage.session) areas.push(chrome.storage.session);
+  areas.push(chrome.storage.local);
+  const rawEntries = await Promise.all(areas.map((area) => area.get(STORAGE_KEYS.BACKEND_DOC_DRAFTS)));
+  for (const raw of rawEntries) {
+    const map = raw[STORAGE_KEYS.BACKEND_DOC_DRAFTS];
+    if (!map || typeof map !== "object" || Array.isArray(map)) continue;
+    for (const [key, value] of Object.entries(map as Record<string, BackendDocDraft>)) {
+      if (!value || typeof value !== "object") continue;
+      const current = merged[key];
+      if (!current || (typeof value.seq === "number" && value.seq >= current.seq)) {
+        merged[key] = value;
+      }
+    }
+  }
+  for (const [key, draft] of Object.entries(merged)) {
+    backendDocDraftCache.set(key, draft);
+  }
+  return merged;
+}
+
+async function getBackendDocDraft(workspaceId: string, itemId: string): Promise<BackendDocDraft | null> {
+  const key = draftMapKey(workspaceId, itemId);
+  const cached = backendDocDraftCache.get(key) ?? null;
+  if (cached) {
+    return cached;
+  }
+  const map = await loadBackendDocDraftMap();
+  const draft = map[key] ?? null;
+  if (draft) {
+    backendDocDraftCache.set(key, draft);
+    backendDocDraftSeqClock.set(key, Math.max(backendDocDraftSeqClock.get(key) ?? 0, draft.seq));
+  }
+  return draft;
+}
+
+async function upsertBackendDocDraft(
+  workspaceId: string,
+  itemId: string,
+  patch: { markdown?: string; title?: string },
+): Promise<BackendDocDraft> {
+  const key = draftMapKey(workspaceId, itemId);
+  const prev = backendDocDraftCache.get(key) ?? (await loadBackendDocDraftMap())[key];
+  const seq = nextBackendDocDraftSeq(key, prev?.seq ?? 0);
+  const draft = {
+    workspaceId,
+    itemId,
+    markdown: patch.markdown ?? prev?.markdown,
+    title: patch.title ?? prev?.title,
+    seq,
+    updatedAt: new Date().toISOString(),
+  };
+  backendDocDraftCache.set(key, draft);
+  queueBackendDocDraftSnapshotPersist();
+  return draft;
+}
+
+async function removeBackendDocDraft(workspaceId: string, itemId: string, seq: number): Promise<boolean> {
+  const key = draftMapKey(workspaceId, itemId);
+  const current = backendDocDraftCache.get(key) ?? (await loadBackendDocDraftMap())[key];
+  if (!current) return false;
+  if (typeof current.seq === "number" && current.seq > seq) return false;
+  backendDocDraftCache.delete(key);
+  queueBackendDocDraftSnapshotPersist();
+  return true;
+}
+
 async function loadRecentWorkspaceEntries(): Promise<RecentWorkspaceEntry[]> {
   const raw = await chrome.storage.local.get(STORAGE_KEYS.BACKEND_WORKSPACE_RECENTS);
   const v = raw[STORAGE_KEYS.BACKEND_WORKSPACE_RECENTS];
@@ -223,21 +386,40 @@ function flattenTree(docs: WorkspaceDoc[], rootId: string): WorkspaceDoc[] {
   byParent.forEach((arr) => arr.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)));
 
   const out: WorkspaceDoc[] = [];
+  const seen = new Set<string>();
+  const pushUnique = (doc: WorkspaceDoc): void => {
+    if (seen.has(doc.id)) return;
+    seen.add(doc.id);
+    out.push(doc);
+  };
   const visit = (id: string) => {
     const cur = docs.find((d) => d.id === id);
     if (!cur) return;
-    out.push(cur);
+    pushUnique(cur);
     (byParent.get(id) || []).forEach((child) => {
-      if (child.kind === "welcome") return;
       visit(child.id);
     });
   };
   visit(rootId);
+  // Include top-level docs (parentId null), such as Welcome or manually moved items.
+  (byParent.get("") || []).forEach((doc) => {
+    if (doc.id === rootId) return;
+    visit(doc.id);
+  });
   return out;
 }
 
 function saveStatus(el: HTMLElement, text: string): void {
   el.textContent = text;
+}
+
+function setSidebarActionLabel(btn: HTMLButtonElement, label: string): void {
+  const textEl = btn.querySelector("span:last-child");
+  if (textEl) {
+    textEl.textContent = label;
+    return;
+  }
+  btn.textContent = label;
 }
 
 function formatBytesCompact(bytes: number): string {
@@ -266,6 +448,13 @@ function isOfflineError(error: unknown): boolean {
   return !(error instanceof BackendApiError) || error.status === 0;
 }
 
+function shouldQueueAsOfflinePending(error: unknown): boolean {
+  if (isOfflineError(error)) return true;
+  if (!(error instanceof BackendApiError)) return true;
+  // Treat transient backend failures as offline-like to avoid data loss.
+  return error.status >= 500 || error.status === 408 || error.status === 429;
+}
+
 function mutationId(): string {
   return `offline_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
 }
@@ -283,6 +472,7 @@ export async function startBackendWorkbench(): Promise<void> {
   const newFileBtn = document.getElementById("new-file-btn") as HTMLButtonElement | null;
   const newFolderBtn = document.getElementById("new-folder-btn") as HTMLButtonElement | null;
   const pinBtn = document.getElementById("pin-btn") as HTMLButtonElement | null;
+  const shareBtn = document.getElementById("share-btn") as HTMLButtonElement | null;
   const deleteBtn = document.getElementById("delete-btn") as HTMLButtonElement | null;
   const searchInput = document.getElementById("search-input") as HTMLInputElement | null;
   const saveStatusEl = document.getElementById("save-status") as HTMLElement | null;
@@ -341,6 +531,7 @@ export async function startBackendWorkbench(): Promise<void> {
     !newFileBtn ||
     !newFolderBtn ||
     !pinBtn ||
+    !shareBtn ||
     !deleteBtn ||
     !searchInput ||
     !saveStatusEl ||
@@ -535,12 +726,16 @@ export async function startBackendWorkbench(): Promise<void> {
   const disposeLocaleObserver = observePreferredLocaleChanges(handleLocaleChanged);
 
   const closeHistoryDrawer = (): void => {
+    const activeEl = document.activeElement as HTMLElement | null;
+    if (activeEl && historyDrawerRoot.contains(activeEl)) activeEl.blur();
     historyDrawerRoot.classList.remove("is-open");
     historyDrawerRoot.setAttribute("aria-hidden", "true");
     historyDrawerOpenBtn.setAttribute("aria-expanded", "false");
   };
 
   const closeWorkspaceInfoDrawer = (): void => {
+    const activeEl = document.activeElement as HTMLElement | null;
+    if (activeEl && workspaceInfoDrawerRoot.contains(activeEl)) activeEl.blur();
     workspaceInfoDrawerRoot.classList.remove("is-open");
     workspaceInfoDrawerRoot.setAttribute("aria-hidden", "true");
     workspaceInfoDrawerOpenBtn.setAttribute("aria-expanded", "false");
@@ -668,6 +863,7 @@ export async function startBackendWorkbench(): Promise<void> {
     shell.hidden = true;
     lockWorkspaceBtn.hidden = true;
     pinBtn.hidden = true;
+    shareBtn.hidden = true;
     deleteBtn.hidden = true;
     historyDrawerOpenBtn.hidden = true;
     workspaceInfoDrawerOpenBtn.hidden = true;
@@ -695,6 +891,7 @@ export async function startBackendWorkbench(): Promise<void> {
     shell.hidden = false;
     lockWorkspaceBtn.hidden = false;
     pinBtn.hidden = false;
+    shareBtn.hidden = false;
     deleteBtn.hidden = false;
     historyDrawerOpenBtn.hidden = false;
     workspaceInfoDrawerOpenBtn.hidden = false;
@@ -741,7 +938,9 @@ export async function startBackendWorkbench(): Promise<void> {
       else if (ratio >= 0.8) topbarQuota.dataset.level = "warn";
       else topbarQuota.dataset.level = "ok";
     };
-    renderQuotaBar(0, 1);
+    topbarQuotaFill.style.width = "0%";
+    topbarQuotaText.textContent = t("status.loading");
+    topbarQuota.dataset.level = "ok";
 
     const pullQuota = async (): Promise<void> => {
       try {
@@ -778,6 +977,22 @@ export async function startBackendWorkbench(): Promise<void> {
       };
     }
 
+    if (active.kind !== "welcome") {
+      active = hydrateDocWithCollaborativeSnapshot(active);
+      workspace = {
+        ...workspace,
+        docs: workspace.docs.map((d) => (d.id === active.id ? active : d)),
+        activeDocId: active.id,
+      };
+    }
+
+    active = await hydrateDocWithLocalDraft(active);
+    workspace = {
+      ...workspace,
+      docs: workspace.docs.map((d) => (d.id === active.id ? active : d)),
+      activeDocId: active.id,
+    };
+
     imageSync = await createWorkspaceImageSync({
       workspaceId,
       baseUrl: JUSTWORK_BACKEND_URL,
@@ -793,10 +1008,178 @@ export async function startBackendWorkbench(): Promise<void> {
       active = doc;
       workspace = {
         ...workspace,
-        docs: workspace.docs.map((d) => (d.id === doc.id ? doc : d)),
+        docs: workspace.docs.some((d) => d.id === doc.id)
+          ? workspace.docs.map((d) => (d.id === doc.id ? doc : d))
+          : [...workspace.docs, doc],
         activeDocId: doc.id,
       };
     };
+
+    const updateDocById = (docId: string, update: (doc: WorkspaceDoc) => WorkspaceDoc): WorkspaceDoc | null => {
+      const current = workspace.docs.find((doc) => doc.id === docId);
+      if (!current) return null;
+      const next = update(current);
+      workspace = {
+        ...workspace,
+        docs: workspace.docs.map((doc) => (doc.id === docId ? next : doc)),
+      };
+      if (active.id === docId) {
+        active = next;
+      }
+      return next;
+    };
+
+    const removeDocById = (docId: string): void => {
+      const nextDocs = workspace.docs.filter((doc) => doc.id !== docId);
+      workspace = {
+        ...workspace,
+        docs: nextDocs,
+        activeDocId: active.id === docId ? (nextDocs[0]?.id ?? WELCOME_DOC_ID) : workspace.activeDocId,
+      };
+      if (active.id === docId) {
+        const fallback = nextDocs.find((doc) => doc.id === workspace.activeDocId) ?? nextDocs[0] ?? active;
+        active = fallback;
+      }
+    };
+
+    let treeRefreshTimer: number | undefined;
+    const dirtyDocIds = new Set<string>();
+    const scheduleTreeRefresh = (delayMs = 4_000): void => {
+      if (treeRefreshTimer !== undefined) {
+        window.clearTimeout(treeRefreshTimer);
+      }
+      treeRefreshTimer = window.setTimeout(() => {
+        treeRefreshTimer = undefined;
+        void (async () => {
+          try {
+            await persistRefreshTree();
+            renderAll();
+            if (historyDrawerRoot.classList.contains("is-open")) {
+              await refreshHistoryPanel();
+            }
+          } catch {
+            // Background refresh is best-effort; don't interrupt the active editor flow.
+          }
+        })();
+      }, delayMs);
+    };
+
+    type PendingSaveRequest = {
+      itemId: string;
+      seq: number;
+      expectedRevision: number;
+      patch: OfflineMutationPatch;
+      previousMarkdown: string;
+      nextMarkdown: string;
+      doneText: string;
+      usesDraftQueue: boolean;
+    };
+
+    let saveQueue: Promise<void> = Promise.resolve();
+
+    const commitLocalEdit = (itemId: string, patch: OfflineMutationPatch): void => {
+      dirtyDocIds.add(itemId);
+      updateDocById(itemId, (doc) => ({
+        ...doc,
+        title: patch.title ?? doc.title,
+        markdown: patch.markdown ?? doc.markdown,
+        updatedAt: new Date().toISOString(),
+      }));
+      if (patch.title !== undefined) {
+        void upsertBackendDocDraft(workspaceId, itemId, { title: patch.title }).catch(() => undefined);
+      }
+      if (patch.markdown !== undefined) {
+        persistCollaborativeMarkdownSnapshot(workspaceId, itemId, patch.markdown);
+      }
+      if (active.id === itemId) {
+        if (patch.title !== undefined) {
+          titleInput.value = patch.title;
+        }
+      }
+    };
+
+    const queueSaveRequest = (request: PendingSaveRequest): void => {
+      saveQueue = saveQueue
+        .then(async () => {
+          if (request.itemId === active.id) {
+            saveStatus(saveStatusEl, t("status.saving"));
+          }
+          try {
+            const liveRevision = workspace.docs.find((doc) => doc.id === request.itemId)?.revision ?? request.expectedRevision;
+            const next = await session.saveItem(request.itemId, {
+              ...request.patch,
+              expectedRevision: liveRevision,
+            });
+            const draft = request.usesDraftQueue ? await getBackendDocDraft(workspaceId, request.itemId) : null;
+            const hasNewerDraft = request.usesDraftQueue && draft !== null && draft.seq > request.seq;
+            if (request.usesDraftQueue && !hasNewerDraft) {
+              await removeBackendDocDraft(workspaceId, request.itemId, request.seq);
+            }
+            dirtyDocIds.delete(request.itemId);
+
+            updateDocById(request.itemId, (doc) => {
+              if (hasNewerDraft) {
+                return {
+                  ...doc,
+                  revision: next.revision,
+                  updatedAt: next.updatedAt,
+                };
+              }
+              return {
+                ...doc,
+                title: next.title,
+                markdown: next.markdown,
+                revision: next.revision,
+                updatedAt: next.updatedAt,
+              };
+            });
+
+            if (request.patch.markdown !== undefined) {
+              persistCollaborativeMarkdownSnapshot(workspaceId, request.itemId, next.markdown);
+            }
+
+            if (imageSync) {
+              await imageSync.updateReferences(request.previousMarkdown, request.nextMarkdown).catch(() => undefined);
+            }
+            scheduleTreeRefresh();
+            if (request.itemId === active.id) {
+              renderAll();
+              saveStatus(saveStatusEl, request.doneText);
+            }
+          } catch (e) {
+            if (e instanceof BackendApiError && e.code === "conflict") {
+              showToast({ message: t("toast.conflict"), variant: "warning" });
+              return;
+            }
+            if (shouldQueueAsOfflinePending(e)) {
+              await queueOfflinePatch(request.itemId, request.expectedRevision, request.patch);
+              return;
+            }
+            notifyError(e);
+          }
+        })
+        .catch(() => {
+          // Keep queue alive after an error.
+        });
+    };
+
+    function hydrateDocWithCollaborativeSnapshot(doc: WorkspaceDoc): WorkspaceDoc {
+      if (doc.kind !== "page" || doc.id === WELCOME_DOC_ID) return doc;
+      return {
+        ...doc,
+        markdown: hydrateMarkdownFromCollaborativeSnapshot(workspaceId, doc.id, doc.markdown),
+      };
+    }
+
+    async function hydrateDocWithLocalDraft(doc: WorkspaceDoc): Promise<WorkspaceDoc> {
+      if (doc.kind !== "page" || doc.id === WELCOME_DOC_ID) return doc;
+      const draft = await getBackendDocDraft(workspaceId, doc.id);
+      if (!draft) return doc;
+      return {
+        ...doc,
+        title: draft.title ?? doc.title,
+      };
+    }
 
     const persistRefreshTree = async (): Promise<void> => {
       treeData = await session.loadTree();
@@ -805,11 +1188,30 @@ export async function startBackendWorkbench(): Promise<void> {
         : treeData.active_item_id;
       workspace = buildDocsStateFromTree(treeData.items, nextActiveId, workspace.workspaceDescription);
       const summary = workspace.docs.find((d) => d.id === nextActiveId) ?? workspace.docs[0]!;
+      const localMarkdown = summary.kind === "welcome"
+        ? summary.markdown
+        : hydrateMarkdownFromCollaborativeSnapshot(workspaceId, summary.id, summary.markdown);
       const full = summary.kind === "welcome"
         ? { ...summary, markdown: buildLocalizedWelcomeMarkdown(workspace) }
         : await session.loadItem(summary.id);
-      replaceDoc(full);
-      if (imageSync) await imageSync.warmMarkdowns([full.markdown]);
+      const hydrated = summary.kind === "welcome"
+        ? await hydrateDocWithLocalDraft(full)
+        : await hydrateDocWithLocalDraft({ ...full, markdown: localMarkdown });
+      const local = dirtyDocIds.has(summary.id) ? workspace.docs.find((doc) => doc.id === summary.id) : null;
+      if (dirtyDocIds.has(summary.id)) {
+        if (local) {
+          replaceDoc({
+            ...hydrated,
+            title: local.title,
+            markdown: local.markdown,
+          });
+        } else {
+          replaceDoc(hydrated);
+        }
+      } else {
+        replaceDoc(hydrated);
+      }
+      if (imageSync) await imageSync.warmMarkdowns([local?.markdown ?? hydrated.markdown]);
       await pullQuota();
     };
 
@@ -823,7 +1225,7 @@ export async function startBackendWorkbench(): Promise<void> {
       const q = searchInput.value;
       const alive = workspace.docs.filter((d) => !d.inTrash);
       const pinned = alive.filter((d) => d.pinned);
-      const treeSource = alive.filter((d) => !d.pinned && d.kind !== "welcome");
+      const treeSource = alive;
       const tree = flattenTree(treeSource, ROOT_FOLDER_ID);
       const trash = workspace.docs.filter((d) => d.inTrash);
 
@@ -832,9 +1234,11 @@ export async function startBackendWorkbench(): Promise<void> {
       renderDocRows(trashList, trash, { showTrashActions: true, search: q });
       titleInput.value = displayDocTitle(active);
       titleInput.readOnly = active.kind === "welcome" || active.id === ROOT_FOLDER_ID;
-      pinBtn.textContent = active.pinned ? t("sidebar.unpin") : t("sidebar.pin");
+      setSidebarActionLabel(pinBtn, active.pinned ? t("sidebar.unpin") : t("sidebar.pin"));
       pinBtn.disabled = active.kind === "welcome" || active.id === ROOT_FOLDER_ID || active.inTrash;
       pinBtn.title = pinBtn.disabled ? t("doc.protected") : t("sidebar.pin");
+      shareBtn.disabled = active.kind === "welcome" || active.kind === "folder" || active.inTrash;
+      shareBtn.title = shareBtn.disabled ? t("doc.protected") : t("sidebar.share");
       deleteBtn.disabled = active.kind === "welcome" || active.id === ROOT_FOLDER_ID || active.inTrash;
       deleteBtn.title = deleteBtn.disabled ? t("doc.protected") : t("doc.trash");
     };
@@ -876,14 +1280,13 @@ export async function startBackendWorkbench(): Promise<void> {
           revertBtn.addEventListener("click", () => {
             void (async () => {
               try {
-                await session.revertHistoryEvent(ev.id);
+                replaceDoc(await session.revertHistoryEvent(ev.id));
                 if (imageSync) {
                   await imageSync.updateReferences(ev.after_markdown ?? "", ev.before_markdown ?? "").catch(() => undefined);
                 }
-                await persistRefreshTree();
-                syncEditorWithActive();
                 renderAll();
-                await refreshHistoryPanel();
+                scheduleTreeRefresh();
+                void refreshHistoryPanel();
                 saveStatus(saveStatusEl, t("status.reverted"));
               } catch (e) {
                 notifyError(e);
@@ -931,50 +1334,36 @@ export async function startBackendWorkbench(): Promise<void> {
         expectedRevision,
         createdAt: new Date().toISOString(),
       });
-      applyLocalPatch(itemId, patch);
+      commitLocalEdit(itemId, patch);
+      if (patch.title !== undefined) {
+        renderAll();
+      }
       await imageSync?.updateReferences(previousMarkdown, nextMarkdown).catch(() => undefined);
       setHealthStatus(backendHealthStatus, "offline", t("status.offline"));
       saveStatus(saveStatusEl, t("status.offlinePending"));
     };
 
-    const saveActivePatch = async (patch: OfflineMutationPatch, doneText: string): Promise<void> => {
-      if (active.kind === "welcome") return;
-      const itemId = active.id;
-      const expectedRevision = active.revision;
-      const previousMarkdown = active.markdown;
-      const nextMarkdown = patch.markdown ?? active.markdown;
-      saveStatus(saveStatusEl, t("status.saving"));
-      try {
-        const next = await session.saveItem(itemId, { ...patch, expectedRevision });
-        replaceDoc(next);
-        await imageSync?.updateReferences(previousMarkdown, nextMarkdown).catch(() => undefined);
-        await persistRefreshTree();
-        renderAll();
-        void refreshHistoryPanel();
-        saveStatus(saveStatusEl, doneText);
-      } catch (e) {
-        if (e instanceof BackendApiError && e.code === "conflict") {
-          showToast({ message: t("toast.conflict"), variant: "warning" });
-          return;
-        }
-        if (isOfflineError(e)) {
-          await queueOfflinePatch(itemId, expectedRevision, patch);
-          return;
-        }
-        notifyError(e);
-      }
-    };
-
     flushOfflineMutations = async (): Promise<void> => {
       const pending = (await loadOfflineMutations(chrome.storage.local)).filter((entry) => entry.workspaceId === workspaceId);
       if (pending.length === 0) return;
+      const revisionByItem = new Map<string, number>();
+      for (const doc of workspace.docs) {
+        revisionByItem.set(doc.id, doc.revision);
+      }
 
       for (const mutation of pending) {
         try {
-          await session.saveItem(mutation.itemId, {
+          const expectedRevision = revisionByItem.get(mutation.itemId) ?? mutation.expectedRevision;
+          const saved = await session.saveItem(mutation.itemId, {
             ...mutation.patch,
-            expectedRevision: mutation.expectedRevision,
+            expectedRevision,
           });
+          revisionByItem.set(mutation.itemId, saved.revision);
+          updateDocById(mutation.itemId, (doc) => ({
+            ...doc,
+            revision: saved.revision,
+            updatedAt: saved.updatedAt,
+          }));
           await removeOfflineMutation(chrome.storage.local, mutation.id);
         } catch (e) {
           if (e instanceof BackendApiError && e.code === "conflict") {
@@ -991,32 +1380,52 @@ export async function startBackendWorkbench(): Promise<void> {
         }
       }
 
-      await persistRefreshTree();
-      syncEditorWithActive();
+      scheduleTreeRefresh();
       renderAll();
       void refreshHistoryPanel();
       saveStatus(saveStatusEl, t("status.synced"));
     };
 
-    const switchActiveDoc = async (doc: WorkspaceDoc): Promise<void> => {
+    const switchActiveDoc = (doc: WorkspaceDoc): void => {
       if (doc.kind === "welcome") {
-                replaceDoc({ ...doc, markdown: buildLocalizedWelcomeMarkdown(workspace) });
-      } else {
-        const full = await session.loadItem(doc.id);
-        replaceDoc(full);
-        if (imageSync) await imageSync.warmMarkdowns([full.markdown]);
+        const next = { ...doc, markdown: buildLocalizedWelcomeMarkdown(workspace) };
+        replaceDoc(next);
+        syncEditorWithActive();
+        renderAll();
+        return;
       }
+
+      const cached = workspace.docs.find((item) => item.id === doc.id) ?? doc;
+      replaceDoc({
+        ...hydrateDocWithCollaborativeSnapshot({
+          ...cached,
+          markdown: cached.markdown || "",
+        }),
+      });
       syncEditorWithActive();
-      await persistRefreshTree();
       renderAll();
+
+      void (async () => {
+        const full = await session.loadItem(doc.id);
+        const hydrated = await hydrateDocWithLocalDraft(hydrateDocWithCollaborativeSnapshot(full));
+        if (!dirtyDocIds.has(doc.id)) {
+          updateDocById(doc.id, () => hydrated);
+        }
+        if (active.id === doc.id && !dirtyDocIds.has(doc.id)) {
+          active = hydrated;
+          syncEditorWithActive();
+          renderAll();
+        }
+        if (imageSync) await imageSync.warmMarkdowns([hydrated.markdown]);
+      })();
     };
 
     const onDropToFolder = (targetFolderId: string | null, draggedId: string) => {
       void (async () => {
         try {
-          await session.moveItem(draggedId, targetFolderId);
-          await persistRefreshTree();
+          replaceDoc(await session.moveItem(draggedId, targetFolderId));
           renderAll();
+          scheduleTreeRefresh();
           void refreshHistoryPanel();
           saveStatus(saveStatusEl, t("doc.moved"));
         } catch (e) {
@@ -1092,10 +1501,8 @@ export async function startBackendWorkbench(): Promise<void> {
             void (async () => {
               try {
                 replaceDoc(await session.restoreItem(doc.id));
-                await persistRefreshTree();
-                syncEditorWithActive();
                 renderAll();
-                void refreshHistoryPanel();
+                scheduleTreeRefresh();
                 saveStatus(saveStatusEl, t("doc.restored"));
               } catch (err) {
                 notifyError(err);
@@ -1116,10 +1523,11 @@ export async function startBackendWorkbench(): Promise<void> {
                 if (imageSync) {
                   await imageSync.updateReferences(full.markdown ?? "", "").catch(() => undefined);
                 }
-                await persistRefreshTree();
+                removeCollaborativeSnapshot(collaborativeMarkdownSnapshotKey(workspaceId, doc.id));
+                removeDocById(doc.id);
                 syncEditorWithActive();
                 renderAll();
-                void refreshHistoryPanel();
+                scheduleTreeRefresh();
                 saveStatus(saveStatusEl, t("doc.hardDeleted"));
               } catch (err) {
                 notifyError(err);
@@ -1139,10 +1547,9 @@ export async function startBackendWorkbench(): Promise<void> {
             void (async () => {
               try {
                 await session.trashItem(doc.id);
-                await persistRefreshTree();
-                syncEditorWithActive();
+                replaceDoc(await session.loadItem(doc.id));
                 renderAll();
-                void refreshHistoryPanel();
+                scheduleTreeRefresh();
                 saveStatus(saveStatusEl, t("doc.trashed"));
               } catch (err) {
                 notifyError(err);
@@ -1157,11 +1564,88 @@ export async function startBackendWorkbench(): Promise<void> {
       });
     };
 
+    type PendingDocSave = {
+      timer: number | undefined;
+      expectedRevision: number;
+      patch: OfflineMutationPatch;
+      previousMarkdown: string;
+      nextMarkdown: string;
+      delayMs: number;
+    };
+
+    const pendingDocSaves = new Map<string, PendingDocSave>();
+
+    const scheduleDocSave = (
+      itemId: string,
+      expectedRevision: number,
+      patch: OfflineMutationPatch,
+      previousMarkdown: string,
+      nextMarkdown: string,
+      delayMs: number,
+    ): void => {
+      const pending = pendingDocSaves.get(itemId);
+      const mergedPatch: OfflineMutationPatch = {
+        ...(pending?.patch ?? {}),
+        ...patch,
+      };
+      const mergedPreviousMarkdown = pending?.previousMarkdown ?? previousMarkdown;
+      const mergedNextMarkdown = patch.markdown !== undefined ? nextMarkdown : pending?.nextMarkdown ?? nextMarkdown;
+      if (pending?.timer !== undefined) {
+        window.clearTimeout(pending.timer);
+      }
+      const nextPending: PendingDocSave = {
+        timer: undefined,
+        expectedRevision,
+        patch: mergedPatch,
+        previousMarkdown: mergedPreviousMarkdown,
+        nextMarkdown: mergedNextMarkdown,
+        delayMs,
+      };
+      pendingDocSaves.set(itemId, nextPending);
+      nextPending.timer = window.setTimeout(() => {
+        const current = pendingDocSaves.get(itemId);
+        if (!current) return;
+        pendingDocSaves.delete(itemId);
+        void (async () => {
+          const draftPatch = current.patch;
+          if (draftPatch.markdown !== undefined) {
+            queueSaveRequest({
+              itemId,
+              seq: 0,
+              expectedRevision: current.expectedRevision,
+              patch: draftPatch,
+              previousMarkdown: current.previousMarkdown,
+              nextMarkdown: current.nextMarkdown,
+              doneText: t("status.saved"),
+              usesDraftQueue: false,
+            });
+            return;
+          }
+          const draft = await upsertBackendDocDraft(workspaceId, itemId, draftPatch);
+          queueSaveRequest({
+            itemId,
+            seq: draft.seq,
+            expectedRevision: current.expectedRevision,
+            patch: draftPatch,
+            previousMarkdown: current.previousMarkdown,
+            nextMarkdown: current.nextMarkdown,
+            doneText: t("status.saved"),
+            usesDraftQueue: true,
+          });
+        })();
+      }, delayMs);
+    };
+
     editor = createWysiwygEditor({
       container: editorRoot,
       initialMarkdown: active.kind === "welcome" ? buildLocalizedWelcomeMarkdown(workspace) : active.markdown,
       onChange: (markdown) => {
-        void saveActivePatch({ markdown }, t("status.saved"));
+        if (active.kind !== "page" || active.id === WELCOME_DOC_ID) return;
+        const itemId = active.id;
+        const expectedRevision = active.revision;
+        const previousMarkdown = workspace.docs.find((doc) => doc.id === itemId)?.markdown ?? "";
+        commitLocalEdit(itemId, { markdown });
+        scheduleDocSave(itemId, expectedRevision, { markdown }, previousMarkdown, markdown, 240);
       },
       imageSync: imageSync.editorSync,
     });
@@ -1179,12 +1663,16 @@ export async function startBackendWorkbench(): Promise<void> {
       if (draggedId) onDropToFolder(ROOT_FOLDER_ID, draggedId);
     });
 
-    const debouncedTitleSave = debounce(() => {
+    titleInput.addEventListener("input", () => {
+      if (active.kind !== "page" || active.id === WELCOME_DOC_ID) return;
+      const itemId = active.id;
+      const expectedRevision = active.revision;
       const title = titleInput.value.trim() || t("editor.untitledDocument");
-      void saveActivePatch({ title }, t("status.saved"));
-    }, 400);
-
-    titleInput.addEventListener("input", () => debouncedTitleSave());
+      const currentMarkdown = workspace.docs.find((doc) => doc.id === itemId)?.markdown ?? "";
+      commitLocalEdit(itemId, { title });
+      renderAll();
+      scheduleDocSave(itemId, expectedRevision, { title }, currentMarkdown, currentMarkdown, 400);
+    });
     searchInput.addEventListener("input", () => renderAll());
     historyRefreshBtn.addEventListener("click", () => void refreshHistoryPanel());
 
@@ -1271,7 +1759,7 @@ export async function startBackendWorkbench(): Promise<void> {
             title: normalized,
             expectedRevision: workspaceNameDoc.revision,
           });
-          await persistRefreshTree();
+          scheduleTreeRefresh();
           renderAll();
           const nextLabel = formatRecentWorkspaceListLabel(treeData.items, t("editor.untitled"));
           await touchRecentWorkspaceEntry(workspaceId, nextLabel);
@@ -1295,11 +1783,11 @@ export async function startBackendWorkbench(): Promise<void> {
 
     const createAndOpen = async (kind: "page" | "folder", title: string): Promise<void> => {
       try {
-        replaceDoc(await session.createItem(kind, title, currentParentId()));
-        await persistRefreshTree();
+        const created = await session.createItem(kind, title, currentParentId());
+        replaceDoc(await hydrateDocWithLocalDraft(hydrateDocWithCollaborativeSnapshot(created)));
         syncEditorWithActive();
         renderAll();
-        void refreshHistoryPanel();
+        scheduleTreeRefresh();
         saveStatus(saveStatusEl, kind === "folder" ? t("doc.createdFolder") : t("doc.createdFile"));
       } catch (e) {
         notifyError(e);
@@ -1314,12 +1802,35 @@ export async function startBackendWorkbench(): Promise<void> {
         if (pinBtn.disabled) return;
         try {
           replaceDoc(await session.setPinned(active.id, !active.pinned));
-          await persistRefreshTree();
           renderAll();
-          void refreshHistoryPanel();
+          scheduleTreeRefresh();
           saveStatus(saveStatusEl, active.pinned ? t("doc.pinned") : t("doc.unpinned"));
         } catch (e) {
           notifyError(e);
+        }
+      })();
+    });
+
+    shareBtn.addEventListener("click", () => {
+      void (async () => {
+        if (shareBtn.disabled) return;
+        if (active.kind === "welcome" || active.kind === "folder" || active.inTrash) return;
+        const prevDisabled = shareBtn.disabled;
+        shareBtn.disabled = true;
+        shareBtn.classList.add("is-busy");
+        shareBtn.setAttribute("aria-busy", "true");
+        saveStatus(saveStatusEl, t("status.creatingShare"));
+        try {
+          const r = await backendClient.createShareLink(workspaceId, active.id);
+          await navigator.clipboard.writeText(r.share_url);
+          saveStatus(saveStatusEl, t("toast.copied"));
+          showToast({ message: t("toast.shareCreated"), variant: "success", durationMs: 4200 });
+        } catch (e) {
+          notifyError(e);
+        } finally {
+          shareBtn.classList.remove("is-busy");
+          shareBtn.setAttribute("aria-busy", "false");
+          shareBtn.disabled = prevDisabled;
         }
       })();
     });
@@ -1329,11 +1840,10 @@ export async function startBackendWorkbench(): Promise<void> {
         if (deleteBtn.disabled) return;
         try {
           await session.trashItem(active.id);
-          await persistRefreshTree();
-          syncEditorWithActive();
+          replaceDoc(await session.loadItem(active.id));
           renderAll();
-          void refreshHistoryPanel();
-                saveStatus(saveStatusEl, t("doc.trashed"));
+          scheduleTreeRefresh();
+          saveStatus(saveStatusEl, t("doc.trashed"));
         } catch (e) {
           notifyError(e);
         }
