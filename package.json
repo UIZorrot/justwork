@@ -24,7 +24,8 @@
   "dependencies": {
     "@justwork/security": "0.0.1",
     "@justwork/workspace-runtime": "0.0.1",
-    "vditor": "^3.11.2"
+    "vditor": "^3.11.2",
+    "yjs": "^13.6.30"
   },
   "devDependencies": {
     "@crxjs/vite-plugin": "^2.0.0-beta.28",
