@@ -117,6 +117,7 @@ import { formatBackendOrUnknownError } from "@/shared/user-facing-error";
 
 const DRAG_TYPE = "application/x-justwork-doc-id";
 const OPTIMISTIC_DOC_ID_PREFIX = "optimistic_";
+const REMOTE_WORKSPACE_POLL_MS = 5_000;
 
 const MAX_BACKEND_WORKSPACE_RECENTS = 12;
 
@@ -2173,7 +2174,6 @@ export async function startBackendWorkbench(): Promise<void> {
         ?? workspace.docs.find((d) => !d.inTrash)
         ?? workspace.docs[0]!;
       const collaborator = summary.kind === "page" ? getCollaboratorForDoc(summary) : null;
-      const localMarkdown = summary.kind === "welcome" ? summary.markdown : collaborator?.getMarkdown() ?? summary.markdown;
       const local = localCollaborativeDocCache.get(summary.id) ?? null;
       const shouldReloadStructured = (
         (summary.kind === "table" || summary.kind === "board") &&
@@ -2193,31 +2193,31 @@ export async function startBackendWorkbench(): Promise<void> {
       const hydrated = await hydrateDocWithLocalDraft(
         summary.kind === "welcome"
           ? full
-          : {
-              ...full,
-              markdown: localMarkdown,
-            },
+          : full,
       );
-      if (local) {
+      const shouldPreferLocal = Boolean(
+        local && (
+          dirtyDocIds.has(summary.id) ||
+          (local.revision ?? 0) > (hydrated.revision ?? 0)
+        ),
+      );
+      if (shouldPreferLocal && local) {
         replaceDoc({
           ...hydrated,
           title: local.title,
-          markdown: local.markdown,
+          markdown: local.kind === "page" ? (collaborator?.getMarkdown() ?? local.markdown) : hydrated.markdown,
           content: local.content ?? hydrated.content ?? null,
         });
       } else {
-        replaceDoc(
-          summary.kind === "welcome"
-            ? hydrated
-            : {
-                ...hydrated,
-                markdown: localMarkdown,
-              },
-        );
+        if (summary.kind === "page" && collaborator && collaborator.getMarkdown() !== hydrated.markdown) {
+          collaborator.applyLocalMarkdown(hydrated.markdown);
+        }
+        replaceDoc(hydrated);
       }
       if (summary.kind === "page") {
-        void imageSync?.warmMarkdowns([local?.markdown ?? localMarkdown]).catch(() => undefined);
+        void imageSync?.warmMarkdowns([shouldPreferLocal && local ? local.markdown : hydrated.markdown]).catch(() => undefined);
       }
+      syncEditorWithActive();
       void pullQuota();
     };
 
@@ -3367,8 +3367,20 @@ export async function startBackendWorkbench(): Promise<void> {
       window.clearInterval(workspaceSyncTimer);
     }
     workspaceSyncTimer = window.setInterval(() => {
-      void persistRefreshTree().catch(() => undefined);
-    }, 15_000);
+      if (document.visibilityState === "visible") {
+        void persistRefreshTree().then(() => renderAll()).catch(() => undefined);
+      }
+    }, REMOTE_WORKSPACE_POLL_MS);
+    window.addEventListener("focus", () => {
+      if (mounted) {
+        void persistRefreshTree().then(() => renderAll()).catch(() => undefined);
+      }
+    });
+    document.addEventListener("visibilitychange", () => {
+      if (mounted && document.visibilityState === "visible") {
+        void persistRefreshTree().then(() => renderAll()).catch(() => undefined);
+      }
+    });
 
     void (async () => {
       await touchRecentWorkspaceEntry(workspaceId, recentListLabel);
