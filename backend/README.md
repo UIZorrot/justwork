@@ -20,29 +20,27 @@ Local mode does not require PostgreSQL. If `JUSTWORK_DATABASE_URL` is missing, t
 
 **Import path:** the Python package is `app` under this `backend/` directory. You must run uvicorn with the **current working directory set to `backend/`** (as below), or set `PYTHONPATH` to this folder. Running `uvicorn app.main:app` from the **repository root** causes `ModuleNotFoundError: No module named 'app'`.
 
-From the repo root you can use:
-
-```powershell
-yarn dev:backend
-```
-
-Or:
+Install dependencies and run from this `backend/` directory:
 
 ```powershell
 cd backend
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
+uv sync
 copy .env.example .env
 # edit .env if needed
-uvicorn app.main:app --host 127.0.0.1 --port 1446 --reload
+uv run --env-file .env -m uvicorn app.main:app --host 127.0.0.1 --port 1446 --reload
 ```
 
-From the repo root without `cd`, PowerShell:
+For a non-reloading process, for example under PM2:
 
 ```powershell
-$env:PYTHONPATH = (Resolve-Path .\backend).Path
-python -m uvicorn app.main:app --host 127.0.0.1 --port 1446 --reload
+cd backend
+pm2 start uv --name justwork-backend -- run --env-file .env -m uvicorn app.main:app --host 127.0.0.1 --port 1446
+```
+
+From the repo root, the same backend uv project can be started with:
+
+```powershell
+uv run --directory backend --env-file .env -m uvicorn app.main:app --host 127.0.0.1 --port 1446 --reload
 ```
 
 OpenAPI:
@@ -58,7 +56,8 @@ http://127.0.0.1:1446/docs
 cd backend
 $env:JUSTWORK_DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:5432/justwork"
 $env:JUSTWORK_BACKEND_TOKEN="change-me"
-uvicorn app.main:app --host 127.0.0.1 --port 1446 --reload
+uv sync
+uv run --env-file .env -m uvicorn app.main:app --host 127.0.0.1 --port 1446 --reload
 ```
 
 ## Quota Controls (env)
