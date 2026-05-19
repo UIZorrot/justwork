@@ -1,7 +1,7 @@
 import type { WorkspaceImageAssetStore } from "./asset-store";
 
 const PLACEHOLDER_PREFIX = "jwasset://";
-const IMAGE_REF_RE = /!\[([^\]]*)\]\((jwasset:\/\/[^)]+)\)/g;
+const IMAGE_REF_RE = /!\[([^\]]*)\]\(([^)]+)\)/g;
 
 function parseAssetRef(url: string): { workspaceId: string; assetId: string } | null {
   if (!url.startsWith(PLACEHOLDER_PREFIX)) return null;
@@ -26,8 +26,17 @@ export function collectWorkspaceAssetRefs(markdown: string, workspaceId: string)
 export function createWorkspaceImageMarkdownCodec(opts: {
   workspaceId: string;
   store: WorkspaceImageAssetStore;
+  resolveAssetIdByFilename?: (filename: string) => string | null;
 }) {
-  const { workspaceId, store } = opts;
+  const { workspaceId, store, resolveAssetIdByFilename } = opts;
+
+  const resolveFilenameFallback = (alt: string, url: string): string | null => {
+    if (!resolveAssetIdByFilename) return null;
+    if (!url.startsWith("blob:")) return null;
+    const filename = alt.trim();
+    if (!filename) return null;
+    return resolveAssetIdByFilename(filename);
+  };
 
   return {
     async warmMarkdown(markdown: string): Promise<void> {
@@ -47,8 +56,14 @@ export function createWorkspaceImageMarkdownCodec(opts: {
     rewriteForEditor(markdown: string): string {
       return markdown.replace(IMAGE_REF_RE, (_full, alt: string, url: string) => {
         const ref = parseAssetRef(url);
-        if (!ref || ref.workspaceId !== workspaceId) return `![${alt}](${url})`;
-        return `![${alt}](${store.resolveAssetUrlSync(ref.assetId)})`;
+        if (ref && ref.workspaceId === workspaceId) {
+          return `![${alt}](${store.resolveAssetUrlSync(ref.assetId)})`;
+        }
+        const fallbackAssetId = resolveFilenameFallback(alt, url);
+        if (fallbackAssetId) {
+          return `![${alt}](${store.resolveAssetUrlSync(fallbackAssetId)})`;
+        }
+        return `![${alt}](${url})`;
       });
     },
     rewriteFromEditor(markdown: string): string {
@@ -56,8 +71,19 @@ export function createWorkspaceImageMarkdownCodec(opts: {
         const ref = parseAssetRef(url);
         if (ref && ref.workspaceId === workspaceId) return `![${alt}](${url})`;
         const assetId = store.resolveAssetIdFromUrl(url);
-        if (!assetId) return `![${alt}](${url})`;
-        return `![${alt}](jwasset://${workspaceId}/${assetId})`;
+        if (assetId) {
+          return `![${alt}](jwasset://${workspaceId}/${assetId})`;
+        }
+        if (url.startsWith("blob:") && resolveAssetIdByFilename) {
+          const filename = alt.trim();
+          if (filename) {
+            const fallbackAssetId = resolveAssetIdByFilename(filename);
+            if (fallbackAssetId) {
+              return `![${alt}](jwasset://${workspaceId}/${fallbackAssetId})`;
+            }
+          }
+        }
+        return `![${alt}](${url})`;
       });
     },
     resolveAssetUrl(assetId: string): string {

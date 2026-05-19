@@ -9,6 +9,7 @@ import {
   shouldSignWriteRequest,
   signingTargetIdForPath,
 } from "./sign-write";
+import type { WorkspaceDocContent } from "@/shared/storage-keys";
 
 export type BackendErrorBody = {
   ok: false;
@@ -29,6 +30,8 @@ export class BackendApiError extends Error {
 
 // --- API shapes (snake_case) ---
 
+export type BackendWorkspaceItemKind = "page" | "folder" | "table" | "board";
+
 export type WorkspaceSummary = {
   workspace_id: string;
   owner_user_id: string;
@@ -41,7 +44,7 @@ export type WorkspaceSummary = {
 export type WorkspaceTreeItem = {
   id: string;
   title: string;
-  kind: string;
+  kind: BackendWorkspaceItemKind;
   parent_id: string | null;
   pinned: boolean;
   in_trash: boolean;
@@ -53,7 +56,8 @@ export type WorkspaceItem = {
   id: string;
   title: string;
   markdown: string;
-  kind: string;
+  content?: WorkspaceDocContent | null;
+  kind: BackendWorkspaceItemKind;
   parent_id: string | null;
   pinned: boolean;
   in_trash: boolean;
@@ -65,6 +69,15 @@ export type ProfileBody = {
   user_id: string;
   nickname: string;
   display_name: string;
+};
+
+export type WorkspaceMemberBody = {
+  user_id: string;
+  nickname: string;
+  display_name: string;
+  joined_at: string;
+  updated_at: string;
+  is_owner: boolean;
 };
 
 export type WorkspaceQuotaBody = {
@@ -89,19 +102,6 @@ export type OutlineHeading = {
   line: number;
 };
 
-export type HistoryEvent = {
-  id: string;
-  op: string;
-  item_id: string;
-  timestamp: string;
-  title: string;
-  before_markdown: string;
-  after_markdown: string;
-  actor_user_id?: string | null;
-  signed?: boolean;
-  signature_digest?: string | null;
-};
-
 export type CreateWorkspaceBody = {
   owner_user_id: string;
   nickname?: string;
@@ -117,19 +117,26 @@ export type UpdateItemBody = {
   password: string;
   title?: string | null;
   markdown?: string | null;
+  content?: WorkspaceDocContent | null;
   expected_revision?: number | null;
 };
 
 export type CreateItemBody = {
   password: string;
-  kind: "page" | "folder";
+  kind: BackendWorkspaceItemKind;
   title?: string;
   parent_id?: string | null;
+  client_item_id?: string | null;
 };
 
 export type PinItemBody = {
   password: string;
   pinned: boolean;
+};
+
+export type UpdateWorkspaceSettingsBody = {
+  password: string;
+  title: string;
 };
 
 export type MoveItemBody = {
@@ -165,6 +172,18 @@ export type RelayJoinBody = {
 export type RelayJoinResponse = {
   ok: boolean;
   workspace_id: string;
+  ticket: string;
+  expires_at: string;
+};
+
+export type CollaborativeJoinBody = {
+  password: string;
+};
+
+export type CollaborativeJoinResponse = {
+  ok: boolean;
+  workspace_id: string;
+  item_id: string;
   ticket: string;
   expires_at: string;
 };
@@ -262,7 +281,13 @@ export function createBackendClient(opts: BackendClientOptions) {
 
     createWorkspace(
       body: CreateWorkspaceBody,
-    ): Promise<{ ok: boolean; workspace: WorkspaceSummary; active_item_id: string; items: WorkspaceTreeItem[] }> {
+    ): Promise<{
+      ok: boolean;
+      workspace: WorkspaceSummary;
+      workspace_title: string;
+      active_item_id: string;
+      items: WorkspaceTreeItem[];
+    }> {
       return request("POST", "/v1/workspaces", body);
     },
 
@@ -273,8 +298,21 @@ export function createBackendClient(opts: BackendClientOptions) {
     getTree(
       workspaceId: string,
       body: PasswordBody,
-    ): Promise<{ ok: boolean; workspace_id: string; active_item_id: string; items: WorkspaceTreeItem[] }> {
+    ): Promise<{
+      ok: boolean;
+      workspace_id: string;
+      workspace_title: string;
+      active_item_id: string;
+      items: WorkspaceTreeItem[];
+    }> {
       return request("POST", `/v1/workspaces/${encodeURIComponent(workspaceId)}/tree`, body);
+    },
+
+    updateWorkspaceSettings(
+      workspaceId: string,
+      body: UpdateWorkspaceSettingsBody,
+    ): Promise<{ ok: boolean; workspace_id: string; title: string }> {
+      return request("PUT", `/v1/workspaces/${encodeURIComponent(workspaceId)}/settings`, body);
     },
 
     getItem(
@@ -399,27 +437,25 @@ export function createBackendClient(opts: BackendClientOptions) {
       );
     },
 
-    listHistory(
+    createShareLink(
       workspaceId: string,
-      body: PasswordBody,
-    ): Promise<{ ok: boolean; workspace_id: string; events: HistoryEvent[] }> {
-      return request("POST", `/v1/workspaces/${encodeURIComponent(workspaceId)}/history`, body);
-    },
-
-    revertHistory(
-      workspaceId: string,
-      eventId: string,
-      body: PasswordBody,
-    ): Promise<{ ok: boolean; workspace_id: string; item: WorkspaceItem }> {
+      itemId: string,
+    ): Promise<{ ok: boolean; workspace_id: string; item_id: string; share_url: string }> {
       return request(
         "POST",
-        `/v1/workspaces/${encodeURIComponent(workspaceId)}/history/${encodeURIComponent(eventId)}/revert`,
-        body,
+        `/v1/workspaces/${encodeURIComponent(workspaceId)}/items/${encodeURIComponent(itemId)}/share`,
       );
     },
 
     getProfile(workspaceId: string): Promise<{ ok: boolean; profile: ProfileBody }> {
       return request("GET", `/v1/workspaces/${encodeURIComponent(workspaceId)}/profile`);
+    },
+
+    listMembers(
+      workspaceId: string,
+      body: PasswordBody,
+    ): Promise<{ ok: boolean; workspace_id: string; members: WorkspaceMemberBody[] }> {
+      return request("POST", `/v1/workspaces/${encodeURIComponent(workspaceId)}/members`, body);
     },
 
     getQuota(workspaceId: string): Promise<{ ok: boolean; workspace_id: string; quota: WorkspaceQuotaBody }> {
@@ -428,13 +464,25 @@ export function createBackendClient(opts: BackendClientOptions) {
 
     updateProfile(
       workspaceId: string,
-      body: { nickname: string },
+      body: { nickname: string; password?: string | null },
     ): Promise<{ ok: boolean; profile: ProfileBody }> {
       return request("PUT", `/v1/workspaces/${encodeURIComponent(workspaceId)}/profile`, body);
     },
 
     joinRelay(workspaceId: string, body: RelayJoinBody): Promise<RelayJoinResponse> {
       return request("POST", `/v1/workspaces/${encodeURIComponent(workspaceId)}/relay/join`, body);
+    },
+
+    joinCollaborativeMarkdown(
+      workspaceId: string,
+      itemId: string,
+      body: CollaborativeJoinBody,
+    ): Promise<CollaborativeJoinResponse> {
+      return request(
+        "POST",
+        `/v1/workspaces/${encodeURIComponent(workspaceId)}/items/${encodeURIComponent(itemId)}/collab/join`,
+        body,
+      );
     },
   };
 }

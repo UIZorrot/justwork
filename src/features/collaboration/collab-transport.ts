@@ -13,8 +13,18 @@ export function createCollaborativeTransport(
 ): CollaborativeTransport {
   const socket = new WebSocket(url, protocols);
   const handlers = new Set<CollaborativeUpdateHandler>();
+  const pendingUpdates: Uint8Array[] = [];
+
+  const flushPendingUpdates = (): void => {
+    if (socket.readyState !== WebSocket.OPEN) return;
+    while (pendingUpdates.length > 0) {
+      const next = pendingUpdates.shift();
+      if (next) socket.send(next);
+    }
+  };
 
   socket.binaryType = "arraybuffer";
+  socket.addEventListener("open", flushPendingUpdates);
   socket.addEventListener("message", (event) => {
     const payload = event.data;
     if (payload instanceof ArrayBuffer) {
@@ -35,9 +45,11 @@ export function createCollaborativeTransport(
       return socket.readyState;
     },
     sendUpdate: (update) => {
-      if (socket.readyState === WebSocket.OPEN) {
-        socket.send(update);
+      if (socket.readyState === WebSocket.CLOSING || socket.readyState === WebSocket.CLOSED) {
+        throw new Error("Collaborative transport is closed");
       }
+      pendingUpdates.push(update.slice());
+      flushPendingUpdates();
     },
     onUpdate: (handler) => {
       handlers.add(handler);

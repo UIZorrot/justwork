@@ -6,18 +6,18 @@ export default defineManifest({
   version: "0.0.1",
   description: "协同文档骨架：独立页面工作台（Vditor 所见即所得）",
   icons: {
-    "16": "icons/icon-16.png",
-    "32": "icons/icon-32.png",
-    "48": "icons/icon-48.png",
-    "128": "icons/icon-128.png",
+    "16": "justwork_logo.png",
+    "32": "justwork_logo.png",
+    "48": "justwork_logo.png",
+    "128": "justwork_logo.png",
   },
   action: {
     default_title: "打开 JustWork",
     default_icon: {
-      "16": "icons/icon-16.png",
-      "32": "icons/icon-32.png",
-      "48": "icons/icon-48.png",
-      "128": "icons/icon-128.png",
+      "16": "justwork_logo.png",
+      "32": "justwork_logo.png",
+      "48": "justwork_logo.png",
+      "128": "justwork_logo.png",
     },
   },
   background: {

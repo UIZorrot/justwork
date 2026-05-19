@@ -13,6 +13,15 @@ class RelayTicket:
     expires_at: float
 
 
+@dataclass
+class RelayMember:
+    workspace_id: str
+    session_id: str
+    display_name: str
+    user_id: str | None
+    joined_at: str
+
+
 def parse_relay_payload(payload: Any) -> dict[str, Any] | None:
     if not isinstance(payload, dict):
         return None
@@ -25,6 +34,16 @@ def parse_relay_payload(payload: Any) -> dict[str, Any] | None:
             return None
         if msg_type == "relay.join" and not isinstance(payload.get("ticket"), str):
             return None
+        if msg_type == "relay.join":
+            if "sessionId" in payload and payload.get("sessionId") is not None and not isinstance(payload.get("sessionId"), str):
+                return None
+            if "displayName" in payload and payload.get("displayName") is not None and not isinstance(payload.get("displayName"), str):
+                return None
+            if "userId" in payload and payload.get("userId") is not None and not isinstance(payload.get("userId"), str):
+                return None
+        if msg_type == "relay.leave":
+            if "sessionId" in payload and payload.get("sessionId") is not None and not isinstance(payload.get("sessionId"), str):
+                return None
         return payload
     if msg_type == "asset.manifest":
         meta = payload.get("meta")
@@ -47,6 +66,8 @@ def parse_relay_payload(payload: Any) -> dict[str, Any] | None:
         if not isinstance(payload.get("chunkBase64"), str):
             return None
         return payload
+    if msg_type == "workspace.presence.sync":
+        return payload if isinstance(payload.get("workspaceId"), str) else None
     return None
 
 
@@ -55,6 +76,8 @@ class ImageRelayHub:
         self._ticket_ttl_seconds = ticket_ttl_seconds
         self._tickets: dict[str, RelayTicket] = {}
         self._rooms: dict[str, set[WebSocket]] = {}
+        self._members: dict[str, dict[str, RelayMember]] = {}
+        self._websocket_index: dict[WebSocket, tuple[str, str]] = {}
         self._lock = asyncio.Lock()
 
     async def issue_ticket(self, workspace_id: str) -> tuple[str, str]:
@@ -91,6 +114,60 @@ class ImageRelayHub:
             room.discard(websocket)
             if not room:
                 self._rooms.pop(workspace_id, None)
+
+    async def register_member(
+        self,
+        workspace_id: str,
+        websocket: WebSocket,
+        session_id: str,
+        display_name: str,
+        user_id: str | None = None,
+    ) -> RelayMember:
+        member = RelayMember(
+            workspace_id=workspace_id,
+            session_id=session_id,
+            display_name=display_name or "Guest",
+            user_id=user_id.strip() if isinstance(user_id, str) and user_id.strip() else None,
+            joined_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        )
+        async with self._lock:
+            room = self._members.setdefault(workspace_id, {})
+            room[session_id] = member
+            self._websocket_index[websocket] = (workspace_id, session_id)
+        return member
+
+    async def unregister_member(self, websocket: WebSocket) -> RelayMember | None:
+        async with self._lock:
+            ref = self._websocket_index.pop(websocket, None)
+            if ref is None:
+                return None
+            workspace_id, session_id = ref
+            room = self._members.get(workspace_id)
+            member = room.pop(session_id, None) if room is not None else None
+            if room is not None and not room:
+                self._members.pop(workspace_id, None)
+            return member
+
+    async def get_member(self, websocket: WebSocket) -> RelayMember | None:
+        async with self._lock:
+            ref = self._websocket_index.get(websocket)
+            if ref is None:
+                return None
+            workspace_id, session_id = ref
+            return self._members.get(workspace_id, {}).get(session_id)
+
+    async def list_members(self, workspace_id: str) -> list[dict[str, str]]:
+        async with self._lock:
+            room = list(self._members.get(workspace_id, {}).values())
+        return [
+            {
+                "sessionId": member.session_id,
+                "displayName": member.display_name,
+                "userId": member.user_id,
+                "joinedAt": member.joined_at,
+            }
+            for member in sorted(room, key=lambda member: member.joined_at)
+        ]
 
     async def broadcast(self, workspace_id: str, sender: WebSocket, payload: dict[str, Any]) -> None:
         async with self._lock:

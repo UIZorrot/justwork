@@ -5,11 +5,45 @@ export type RelayJoinMessage = {
   workspaceId: string;
   ticket: string;
   localAssetIds?: string[];
+  sessionId?: string;
+  displayName?: string;
+  userId?: string;
 };
 
 export type RelayLeaveMessage = {
   type: "relay.leave";
   workspaceId: string;
+  sessionId?: string;
+};
+
+export type WorkspacePresenceSnapshotMessage = {
+  type: "workspace.presence.snapshot";
+  workspaceId: string;
+  members: WorkspacePresenceMember[];
+};
+
+export type WorkspacePresenceJoinMessage = {
+  type: "workspace.presence.join";
+  workspaceId: string;
+  member: WorkspacePresenceMember;
+};
+
+export type WorkspacePresenceLeaveMessage = {
+  type: "workspace.presence.leave";
+  workspaceId: string;
+  sessionId: string;
+};
+
+export type WorkspacePresenceSyncMessage = {
+  type: "workspace.presence.sync";
+  workspaceId: string;
+};
+
+export type WorkspacePresenceMember = {
+  sessionId: string;
+  displayName: string;
+  userId?: string;
+  joinedAt: string;
 };
 
 export type AssetManifestMessage = {
@@ -51,7 +85,11 @@ export type RelayMessage =
   | AssetRequestMessage
   | AssetMissingMessage
   | AssetAckMessage
-  | AssetChunkMessage;
+  | AssetChunkMessage
+  | WorkspacePresenceSnapshotMessage
+  | WorkspacePresenceJoinMessage
+  | WorkspacePresenceLeaveMessage
+  | WorkspacePresenceSyncMessage;
 
 function isString(value: unknown): value is string {
   return typeof value === "string";
@@ -82,11 +120,25 @@ export function parseRelayMessage(value: unknown): RelayMessage | null {
     case "relay.join":
       if (isString(msg.workspaceId) && isString(msg.ticket)) {
         const localAssetIds = Array.isArray(msg.localAssetIds) ? msg.localAssetIds.filter(isString) : undefined;
-        return { type: "relay.join", workspaceId: msg.workspaceId, ticket: msg.ticket, localAssetIds };
+        return {
+          type: "relay.join",
+          workspaceId: msg.workspaceId,
+          ticket: msg.ticket,
+          localAssetIds,
+          sessionId: isString(msg.sessionId) ? msg.sessionId : undefined,
+          displayName: isString(msg.displayName) ? msg.displayName : undefined,
+          userId: isString(msg.userId) ? msg.userId : undefined,
+        };
       }
       return null;
     case "relay.leave":
-      return isString(msg.workspaceId) ? { type: "relay.leave", workspaceId: msg.workspaceId } : null;
+      return isString(msg.workspaceId)
+        ? {
+            type: "relay.leave",
+            workspaceId: msg.workspaceId,
+            sessionId: isString(msg.sessionId) ? msg.sessionId : undefined,
+          }
+        : null;
     case "asset.manifest":
       return isMeta(msg.meta) ? { type: "asset.manifest", meta: msg.meta } : null;
     case "asset.request":
@@ -112,13 +164,42 @@ export function parseRelayMessage(value: unknown): RelayMessage | null {
             workspaceId: msg.workspaceId,
             assetId: msg.assetId,
             index: msg.index,
-            total: msg.total,
-            chunkBase64: msg.chunkBase64,
+          total: msg.total,
+          chunkBase64: msg.chunkBase64,
+        }
+        : null;
+    case "workspace.presence.snapshot":
+      return isString(msg.workspaceId) && Array.isArray(msg.members)
+        ? {
+            type: "workspace.presence.snapshot",
+            workspaceId: msg.workspaceId,
+            members: msg.members.filter(isPresenceMember),
           }
         : null;
+    case "workspace.presence.join":
+      return isString(msg.workspaceId) && isPresenceMember(msg.member)
+        ? { type: "workspace.presence.join", workspaceId: msg.workspaceId, member: msg.member }
+        : null;
+    case "workspace.presence.leave":
+      return isString(msg.workspaceId) && isString(msg.sessionId)
+        ? { type: "workspace.presence.leave", workspaceId: msg.workspaceId, sessionId: msg.sessionId }
+        : null;
+    case "workspace.presence.sync":
+      return isString(msg.workspaceId) ? { type: "workspace.presence.sync", workspaceId: msg.workspaceId } : null;
     default:
       return null;
   }
+}
+
+function isPresenceMember(value: unknown): value is WorkspacePresenceMember {
+  if (typeof value !== "object" || value === null) return false;
+  const member = value as WorkspacePresenceMember;
+  return (
+    isString(member.sessionId) &&
+    isString(member.displayName) &&
+    (member.userId === undefined || isString(member.userId)) &&
+    isString(member.joinedAt)
+  );
 }
 
 export function bytesToBase64(bytes: ArrayBuffer): string {
@@ -149,4 +230,3 @@ export function chunkBytes(bytes: ArrayBuffer, chunkSize = 256 * 1024): ArrayBuf
   if (chunks.length === 0) chunks.push(new ArrayBuffer(0));
   return chunks;
 }
-

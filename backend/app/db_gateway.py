@@ -11,8 +11,13 @@ import json
 from pathlib import Path
 from threading import Lock
 from typing import Optional
+from contextlib import contextmanager
 
 from .models import WorkspaceRecord
+
+
+class DatabaseUnavailableError(RuntimeError):
+    """Raised when the database transport is temporarily unavailable."""
 
 
 class DatabaseGateway:
@@ -20,17 +25,52 @@ class DatabaseGateway:
         self._database_url = os.getenv("JUSTWORK_DATABASE_URL", "").strip()
         self._data_file = Path(os.getenv("JUSTWORK_BACKEND_DATA_FILE", ".justwork-backend/workspaces.json"))
         self._lock = Lock()
+        self._pool = None
         if self._database_url:
+            self._pool = self._create_pool()
             self._init_schema()
         else:
             self._data_file.parent.mkdir(parents=True, exist_ok=True)
             if not self._data_file.exists():
                 self._data_file.write_text("{}", encoding="utf-8")
 
-    def _connect(self):
-        import psycopg
+    def _create_pool(self):
+        from psycopg_pool import ConnectionPool
 
-        return psycopg.connect(self._database_url)
+        connect_timeout = max(1, int(os.getenv("JUSTWORK_DB_CONNECT_TIMEOUT_SECONDS", "5")))
+        pool_timeout = max(1, int(os.getenv("JUSTWORK_DB_POOL_TIMEOUT_SECONDS", "5")))
+        min_size = max(1, int(os.getenv("JUSTWORK_DB_POOL_MIN_SIZE", "1")))
+        max_size = max(min_size, int(os.getenv("JUSTWORK_DB_POOL_MAX_SIZE", "5")))
+        pool = ConnectionPool(
+            conninfo=self._database_url,
+            min_size=min_size,
+            max_size=max_size,
+            timeout=pool_timeout,
+            kwargs={
+                "connect_timeout": connect_timeout,
+                "prepare_threshold": None,
+            },
+            open=True,
+        )
+        try:
+            pool.wait()
+        except Exception as exc:  # noqa: BLE001
+            raise DatabaseUnavailableError("database unavailable") from exc
+        return pool
+
+    @contextmanager
+    def _connect(self):
+        if self._pool is None:
+            raise DatabaseUnavailableError("database unavailable")
+        try:
+            with self._pool.connection() as conn:
+                yield conn
+        except Exception as exc:  # noqa: BLE001
+            try:
+                self._pool.check()
+            except Exception:  # noqa: BLE001
+                pass
+            raise DatabaseUnavailableError("database unavailable") from exc
 
     def _init_schema(self) -> None:
         with self._connect() as conn:
@@ -73,6 +113,56 @@ class DatabaseGateway:
                     updated_at=row[4],
                 )
 
+    def count_workspaces_by_owner(self, owner_user_id: str) -> int:
+        if not self._database_url:
+            return self._file_count_workspaces_by_owner(owner_user_id)
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM workspaces
+                    WHERE owner_user_id = %s
+                    """,
+                    (owner_user_id,),
+                )
+                row = cur.fetchone()
+                return int(row[0]) if row else 0
+
+    def insert_workspace_with_owner_limit(self, record: WorkspaceRecord, max_workspaces: int) -> WorkspaceRecord | None:
+        if not self._database_url:
+            return self._file_insert_workspace_with_owner_limit(record, max_workspaces)
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (record.owner_user_id,))
+                cur.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM workspaces
+                    WHERE owner_user_id = %s
+                    """,
+                    (record.owner_user_id,),
+                )
+                row = cur.fetchone()
+                if row and int(row[0]) >= max_workspaces:
+                    conn.rollback()
+                    return None
+                cur.execute(
+                    """
+                    INSERT INTO workspaces (workspace_id, owner_user_id, owner_nickname, encrypted_payload, updated_at)
+                    VALUES (%s, %s, %s, %s, %s)
+                    """,
+                    (
+                        record.workspace_id,
+                        record.owner_user_id,
+                        record.owner_nickname,
+                        record.encrypted_payload,
+                        record.updated_at,
+                    ),
+                )
+            conn.commit()
+        return record
+
     def upsert_workspace(self, record: WorkspaceRecord) -> WorkspaceRecord:
         if not self._database_url:
             return self._file_upsert_workspace(record)
@@ -109,6 +199,25 @@ class DatabaseGateway:
         with self._lock:
             data = self._read_file_records().get(workspace_id)
         return WorkspaceRecord(**data) if data else None
+
+    def _file_count_workspaces_by_owner(self, owner_user_id: str) -> int:
+        with self._lock:
+            records = self._read_file_records().values()
+            return sum(1 for record in records if record.get("owner_user_id") == owner_user_id)
+
+    def _file_insert_workspace_with_owner_limit(
+        self,
+        record: WorkspaceRecord,
+        max_workspaces: int,
+    ) -> WorkspaceRecord | None:
+        with self._lock:
+            records = self._read_file_records()
+            owned_count = sum(1 for entry in records.values() if entry.get("owner_user_id") == record.owner_user_id)
+            if owned_count >= max_workspaces:
+                return None
+            records[record.workspace_id] = record.model_dump()
+            self._write_file_records(records)
+        return record
 
     def _file_upsert_workspace(self, record: WorkspaceRecord) -> WorkspaceRecord:
         with self._lock:

@@ -1,4 +1,4 @@
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -67,6 +67,7 @@ class WorkspaceSummary(BaseModel):
 class WorkspaceCreateResponse(BaseModel):
     ok: bool
     workspace: WorkspaceSummary
+    workspace_title: str
     active_item_id: str
     items: list["WorkspaceTreeItem"]
 
@@ -79,10 +80,14 @@ class WorkspaceRelayJoinRequest(BaseModel):
     password: str = Field(min_length=1)
 
 
+class WorkspaceCollabJoinRequest(BaseModel):
+    password: str = Field(min_length=1)
+
+
 class WorkspaceTreeItem(BaseModel):
     id: str
     title: str
-    kind: str
+    kind: Literal["page", "folder", "table", "board"]
     parent_id: str | None = None
     pinned: bool = False
     in_trash: bool = False
@@ -93,6 +98,7 @@ class WorkspaceTreeItem(BaseModel):
 class WorkspaceTreeResponse(BaseModel):
     ok: bool
     workspace_id: str
+    workspace_title: str
     active_item_id: str
     items: list[WorkspaceTreeItem]
 
@@ -101,7 +107,8 @@ class WorkspaceItem(BaseModel):
     id: str
     title: str
     markdown: str
-    kind: str
+    content: dict[str, Any] | None = None
+    kind: Literal["page", "folder", "table", "board"]
     parent_id: str | None = None
     pinned: bool = False
     in_trash: bool = False
@@ -115,19 +122,37 @@ class WorkspaceItemResponse(BaseModel):
     item: WorkspaceItem
 
 
+class WorkspaceShareCreateResponse(BaseModel):
+    ok: bool
+    workspace_id: str
+    item_id: str
+    share_url: str
+
+
+class ShareViewRequest(BaseModel):
+    password: str = Field(min_length=1)
+
+
+class ShareViewResponse(BaseModel):
+    ok: bool
+    workspace_id: str
+    item: WorkspaceItem
+
+
 class WorkspaceItemUpdateRequest(WriteSigningEnvelope):
     password: str = Field(min_length=1)
     title: str | None = None
     markdown: str | None = None
-    expected_revision: int | None = None
+    content: dict[str, Any] | None = None
     expected_revision: int | None = None
 
 
 class WorkspaceItemCreateRequest(WriteSigningEnvelope):
     password: str = Field(min_length=1)
-    kind: str = Field(pattern="^(page|folder)$")
+    kind: Literal["page", "folder", "table", "board"] = "page"
     title: str = "Untitled"
     parent_id: str | None = None
+    client_item_id: str | None = None
 
 
 class WorkspaceItemPinRequest(WriteSigningEnvelope):
@@ -135,7 +160,19 @@ class WorkspaceItemPinRequest(WriteSigningEnvelope):
     pinned: bool
 
 
+class WorkspaceSettingsUpdateRequest(WriteSigningEnvelope):
+    password: str = Field(min_length=1)
+    title: str = ""
+
+
+class WorkspaceSettingsResponse(BaseModel):
+    ok: bool
+    workspace_id: str
+    title: str
+
+
 class ProfileUpdateRequest(WriteSigningEnvelope):
+    password: str | None = None
     nickname: str = ""
 
 
@@ -148,6 +185,21 @@ class ProfileBody(BaseModel):
 class ProfileResponse(BaseModel):
     ok: bool
     profile: ProfileBody
+
+
+class WorkspaceMemberBody(BaseModel):
+    user_id: str
+    nickname: str
+    display_name: str
+    joined_at: str
+    updated_at: str
+    is_owner: bool = False
+
+
+class WorkspaceMembersResponse(BaseModel):
+    ok: bool
+    workspace_id: str
+    members: list[WorkspaceMemberBody]
 
 
 class WorkspaceQuotaBody(BaseModel):
@@ -170,6 +222,14 @@ class WorkspaceRelayJoinResponse(BaseModel):
     expires_at: str
 
 
+class WorkspaceCollabJoinResponse(BaseModel):
+    ok: bool
+    workspace_id: str
+    item_id: str
+    ticket: str
+    expires_at: str
+
+
 class WorkspaceItemMoveRequest(WriteSigningEnvelope):
     password: str = Field(min_length=1)
     parent_id: str | None = None
@@ -183,7 +243,7 @@ class WorkspaceSearchRequest(WriteSigningEnvelope):
 class WorkspaceSearchResult(BaseModel):
     id: str
     title: str
-    kind: str
+    kind: Literal["page", "folder", "table", "board"]
     parent_id: str | None = None
     score: int
     excerpt: str
@@ -222,22 +282,3 @@ class WorkspacePatchResponse(BaseModel):
     item: WorkspaceItem
     changed: bool
     preview_markdown: str
-
-
-class HistoryEvent(BaseModel):
-    id: str
-    op: str
-    item_id: str
-    timestamp: str
-    title: str
-    before_markdown: str
-    after_markdown: str
-    actor_user_id: str | None = None
-    signed: bool = False
-    signature_digest: str | None = None
-
-
-class WorkspaceHistoryResponse(BaseModel):
-    ok: bool
-    workspace_id: str
-    events: list[HistoryEvent]

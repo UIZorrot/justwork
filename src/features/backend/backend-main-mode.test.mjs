@@ -10,6 +10,8 @@ test("workbench defaults to the fixed Backend product surface", async () => {
 
   assert.match(config, /JUSTWORK_BACKEND_URL/);
   assert.match(config, /DEFAULT_BACKEND_URL/);
+  assert.match(config, /URLSearchParams/);
+  assert.match(config, /backendUrl/);
   assert.equal(main.includes("WORKBENCH_DATA_SOURCE"), false);
   assert.match(main, /startBackendWorkbench/);
   assert.equal(html.includes("backend-url-setup-input"), false);

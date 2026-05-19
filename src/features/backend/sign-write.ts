@@ -16,9 +16,8 @@ export function parseWorkspaceIdFromApiPath(path: string): string | null {
  * create item → `""`; profile → `profile`; revert → `event_id`; otherwise primary item id segment.
  */
 export function signingTargetIdForPath(path: string): string {
-  const revert = path.match(/\/v1\/workspaces\/[^/]+\/history\/([^/]+)\/revert$/);
-  if (revert) return revert[1];
   if (/\/v1\/workspaces\/[^/]+\/profile$/.test(path)) return "profile";
+  if (/\/v1\/workspaces\/[^/]+\/settings$/.test(path)) return "settings";
   if (/\/v1\/workspaces\/[^/]+\/items$/.test(path)) return "";
   const itemAction = path.match(
     /\/v1\/workspaces\/[^/]+\/items\/([^/]+)\/(?:pin|move|trash|restore|patch|hard-delete)$/,
@@ -36,11 +35,10 @@ export function shouldSignWriteRequest(method: string, path: string): boolean {
   if (/\/v1\/workspaces\/[^/]+\/tree$/.test(path)) return false;
   if (/\/search$/.test(path)) return false;
   if (/\/outline$/.test(path)) return false;
-  if (/\/v1\/workspaces\/[^/]+\/history$/.test(path)) return false;
   // Read single item: POST .../items/{id} with no extra segments
   if (method === "POST" && /\/v1\/workspaces\/[^/]+\/items\/[^/]+$/.test(path)) return false;
   if (/\/v1\/workspaces\/[^/]+\/profile$/.test(path) && method === "PUT") return true;
-  if (/\/history\/[^/]+\/revert$/.test(path) && method === "POST") return true;
+  if (/\/v1\/workspaces\/[^/]+\/settings$/.test(path) && method === "PUT") return true;
   if (/\/items\/[^/]+\/patch$/.test(path) && method === "POST") return true;
   if (/\/items\/[^/]+\/hard-delete$/.test(path) && method === "POST") return true;
   if (/\/v1\/workspaces\/[^/]+\/items$/.test(path) && method === "POST") return true;

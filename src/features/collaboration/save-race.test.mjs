@@ -85,3 +85,21 @@ test("stale collaborative saves are rejected when live text moved on", async () 
     updatedAt: "2026-05-08T09:01:00.000Z",
   });
 });
+
+test("structured collaborative saves are rejected when live content moved on", async () => {
+  const mod = await importTsModule("src/features/collaboration/save-race.ts");
+
+  const liveDoc = {
+    title: "Untitled board",
+    markdown: "",
+    content: { kind: "board", cards: [{ id: "card_1", title: "Keep me", fields: [] }], columns: [], template: { columnId: "template", title: "Template", cardTitle: "Default", fields: [] } },
+  };
+  const request = {
+    nextTitle: "Untitled board",
+    nextMarkdown: "",
+    content: { kind: "board", cards: [{ id: "card_1", title: "Keep me", fields: [] }, { id: "card_2", title: "Delete me later", fields: [] }], columns: [], template: { columnId: "template", title: "Template", cardTitle: "Default", fields: [] } },
+  };
+
+  const stale = mod.hasStaleCollaborativeSave(liveDoc, request);
+  assert.equal(stale, true);
+});

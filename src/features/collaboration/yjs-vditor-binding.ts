@@ -1,9 +1,9 @@
 import type { MarkdownCollaborator } from "./yjs-markdown";
 
 export type MarkdownEditorSurface = {
-  readonly root: HTMLElement;
   getMarkdown: () => string;
   setMarkdown: (markdown: string, clearHistory?: boolean) => void;
+  onMarkdownInput: (listener: (markdown: string) => void) => () => void;
 };
 
 export type VditorMarkdownBinding = {
@@ -18,9 +18,9 @@ export function createVditorMarkdownBinding(
 ): VditorMarkdownBinding {
   let suppress = false;
 
-  const syncCollaboratorFromEditor = (): void => {
+  const syncCollaboratorFromEditor = (markdown: string): void => {
     if (suppress) return;
-    collaborator.applyLocalMarkdown(editor.getMarkdown());
+    collaborator.applyLocalMarkdown(markdown);
   };
 
   const syncEditorFromCollaborator = (): void => {
@@ -32,8 +32,7 @@ export function createVditorMarkdownBinding(
   };
 
   collaborator.text.observe(syncEditorFromCollaborator);
-  editor.root.addEventListener("input", syncCollaboratorFromEditor, true);
-  editor.root.addEventListener("change", syncCollaboratorFromEditor, true);
+  const stopInput = editor.onMarkdownInput(syncCollaboratorFromEditor);
 
   return {
     applyLocalEditorMarkdown: (markdown) => {
@@ -48,8 +47,7 @@ export function createVditorMarkdownBinding(
     },
     destroy: () => {
       collaborator.text.unobserve(syncEditorFromCollaborator);
-      editor.root.removeEventListener("input", syncCollaboratorFromEditor, true);
-      editor.root.removeEventListener("change", syncCollaboratorFromEditor, true);
+      stopInput();
     },
   };
 }

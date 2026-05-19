@@ -6,11 +6,11 @@
 import {
   createBackendClient,
   type BackendClientOptions,
-  type HistoryEvent,
+  type BackendWorkspaceItemKind,
   type WorkspaceItem,
   type WorkspaceTreeItem,
 } from "@/features/backend/client";
-import type { WorkspaceDoc, WorkspaceDocsState } from "@/shared/storage-keys";
+import type { WorkspaceDoc, WorkspaceDocContent, WorkspaceDocsState } from "@/shared/storage-keys";
 
 const ROOT_FOLDER_ID = "root";
 
@@ -19,6 +19,7 @@ export function apiTreeItemToPartialDoc(item: WorkspaceTreeItem): WorkspaceDoc {
     id: item.id,
     title: item.title,
     markdown: "",
+    content: null,
     revision: item.revision,
     updatedAt: item.updated_at,
     lastVisitedAt: item.updated_at,
@@ -34,6 +35,7 @@ export function apiItemToDoc(item: WorkspaceItem): WorkspaceDoc {
     id: item.id,
     title: item.title,
     markdown: item.markdown,
+    content: item.content ?? null,
     revision: item.revision,
     updatedAt: item.updated_at,
     lastVisitedAt: item.updated_at,
@@ -48,16 +50,19 @@ export function apiItemToDoc(item: WorkspaceItem): WorkspaceDoc {
 export function buildDocsStateFromTree(
   items: WorkspaceTreeItem[],
   activeDocId: string,
+  workspaceTitle: string,
   workspaceDescription: string,
 ): WorkspaceDocsState {
   const docs = items.map((it) => ({
     ...apiTreeItemToPartialDoc(it),
     markdown: "",
+    content: null,
     lastVisitedAt: it.updated_at,
   }));
   return {
     activeDocId,
     docs,
+    workspaceTitle,
     workspaceDescription,
   };
 }
@@ -86,12 +91,38 @@ export function createBackendWorkspaceSession(opts: BackendWorkspaceSessionOptio
       return client.joinRelay(opts.workspaceId, { password: opts.password });
     },
 
+    async joinCollaborativeMarkdown(itemId: string) {
+      return client.joinCollaborativeMarkdown(opts.workspaceId, itemId, { password: opts.password });
+    },
+
     async loadTree() {
       const r = await client.getTree(opts.workspaceId, pwd());
       return {
         active_item_id: r.active_item_id,
+        workspace_title: r.workspace_title,
         items: r.items,
       };
+    },
+
+    async updateWorkspaceTitle(title: string) {
+      const r = await client.updateWorkspaceSettings(opts.workspaceId, {
+        password: opts.password,
+        title,
+      });
+      return r.title;
+    },
+
+    async listMembers() {
+      const r = await client.listMembers(opts.workspaceId, pwd());
+      return r.members;
+    },
+
+    async updateProfile(nickname: string) {
+      const r = await client.updateProfile(opts.workspaceId, {
+        nickname,
+        password: opts.password,
+      });
+      return r.profile;
     },
 
     async loadItem(itemId: string) {
@@ -99,22 +130,32 @@ export function createBackendWorkspaceSession(opts: BackendWorkspaceSessionOptio
       return apiItemToDoc(r.item);
     },
 
-    async saveItem(itemId: string, patch: { title?: string; markdown?: string; expectedRevision?: number }) {
+    async saveItem(
+      itemId: string,
+      patch: { title?: string; markdown?: string; content?: WorkspaceDocContent | null; expectedRevision?: number },
+    ) {
       const r = await client.updateItem(opts.workspaceId, itemId, {
         password: opts.password,
         title: patch.title ?? null,
         markdown: patch.markdown ?? null,
+        content: patch.content ?? null,
         expected_revision: patch.expectedRevision ?? null,
       });
       return apiItemToDoc(r.item);
     },
 
-    async createItem(kind: "page" | "folder", title: string, parentId: string | null = ROOT_FOLDER_ID) {
+    async createItem(
+      kind: BackendWorkspaceItemKind,
+      title: string,
+      parentId: string | null = ROOT_FOLDER_ID,
+      clientItemId?: string | null,
+    ) {
       const r = await client.createItem(opts.workspaceId, {
         password: opts.password,
         kind,
         title,
         parent_id: parentId,
+        client_item_id: clientItemId ?? undefined,
       });
       return apiItemToDoc(r.item);
     },
@@ -158,15 +199,6 @@ export function createBackendWorkspaceSession(opts: BackendWorkspaceSessionOptio
       return r.results;
     },
 
-    async listHistory(): Promise<HistoryEvent[]> {
-      const r = await client.listHistory(opts.workspaceId, pwd());
-      return r.events;
-    },
-
-    async revertHistoryEvent(eventId: string): Promise<WorkspaceDoc> {
-      const r = await client.revertHistory(opts.workspaceId, eventId, pwd());
-      return apiItemToDoc(r.item);
-    },
   };
 }
 

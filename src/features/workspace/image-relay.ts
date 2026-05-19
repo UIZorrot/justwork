@@ -15,6 +15,9 @@ type RelayHandlers = {
   onRequest?: (message: Extract<RelayMessage, { type: "asset.request" }>) => void;
   onMissing?: (message: Extract<RelayMessage, { type: "asset.missing" }>) => void;
   onAck?: (message: Extract<RelayMessage, { type: "asset.ack" }>) => void;
+  onPresenceSnapshot?: (message: Extract<RelayMessage, { type: "workspace.presence.snapshot" }>) => void;
+  onPresenceJoin?: (message: Extract<RelayMessage, { type: "workspace.presence.join" }>) => void;
+  onPresenceLeave?: (message: Extract<RelayMessage, { type: "workspace.presence.leave" }>) => void;
   onAssetComplete?: (meta: WorkspaceImageAssetMeta, bytes: ArrayBuffer) => Promise<void> | void;
   onReady?: () => void;
 };
@@ -23,6 +26,9 @@ export type WorkspaceImageRelayOptions = RelayHandlers & {
   baseUrl: string;
   workspaceId: string;
   joinRelay: () => Promise<RelayJoinResponse>;
+  sessionId: string;
+  displayName: string;
+  userId?: string;
 };
 
 function websocketUrl(baseUrl: string, workspaceId: string, ticket: string): string {
@@ -49,6 +55,7 @@ function concatArrayBuffers(chunks: ArrayBuffer[]): ArrayBuffer {
 
 export function createWorkspaceImageRelayClient(opts: WorkspaceImageRelayOptions) {
   let socket: WebSocket | undefined;
+  let currentTicket: string | undefined;
   const manifests = new Map<string, WorkspaceImageAssetMeta>();
   const partialChunks = new Map<string, { total: number; chunks: ArrayBuffer[] }>();
 
@@ -74,6 +81,7 @@ export function createWorkspaceImageRelayClient(opts: WorkspaceImageRelayOptions
 
   const connect = async (): Promise<void> => {
     const ticket = await opts.joinRelay();
+    currentTicket = ticket.ticket;
     return await new Promise<void>((resolve, reject) => {
       socket = new WebSocket(websocketUrl(opts.baseUrl, opts.workspaceId, ticket.ticket));
       let opened = false;
@@ -83,7 +91,11 @@ export function createWorkspaceImageRelayClient(opts: WorkspaceImageRelayOptions
           type: "relay.join",
           workspaceId: opts.workspaceId,
           ticket: ticket.ticket,
+          sessionId: opts.sessionId,
+          displayName: opts.displayName,
+          userId: opts.userId,
         });
+        send({ type: "workspace.presence.sync", workspaceId: opts.workspaceId });
         opts.onReady?.();
         resolve();
       });
@@ -116,6 +128,15 @@ export function createWorkspaceImageRelayClient(opts: WorkspaceImageRelayOptions
           case "asset.ack":
             opts.onAck?.(parsed);
             break;
+          case "workspace.presence.snapshot":
+            opts.onPresenceSnapshot?.(parsed);
+            break;
+          case "workspace.presence.join":
+            opts.onPresenceJoin?.(parsed);
+            break;
+          case "workspace.presence.leave":
+            opts.onPresenceLeave?.(parsed);
+            break;
           case "asset.chunk": {
             const current = partialChunks.get(parsed.assetId) ?? { total: parsed.total, chunks: [] };
             current.total = parsed.total;
@@ -147,10 +168,11 @@ export function createWorkspaceImageRelayClient(opts: WorkspaceImageRelayOptions
   const disconnect = (): void => {
     if (!socket) return;
     try {
-      send({ type: "relay.leave", workspaceId: opts.workspaceId });
+      send({ type: "relay.leave", workspaceId: opts.workspaceId, sessionId: opts.sessionId });
     } finally {
       socket.close();
       socket = undefined;
+      currentTicket = undefined;
       partialChunks.clear();
     }
   };
@@ -162,6 +184,20 @@ export function createWorkspaceImageRelayClient(opts: WorkspaceImageRelayOptions
     sendAsset,
     requestAsset(assetId: string): void {
       send({ type: "asset.request", workspaceId: opts.workspaceId, assetId });
+    },
+    syncPresence(): void {
+      send({ type: "workspace.presence.sync", workspaceId: opts.workspaceId });
+    },
+    announcePresence(displayName: string): void {
+      if (!currentTicket) return;
+      send({
+        type: "relay.join",
+        workspaceId: opts.workspaceId,
+        ticket: currentTicket,
+        sessionId: opts.sessionId,
+        displayName,
+        userId: opts.userId,
+      });
     },
     notifyMissing(assetId: string): void {
       send({ type: "asset.missing", workspaceId: opts.workspaceId, assetId });

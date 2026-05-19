@@ -6,7 +6,7 @@ export function overlayDirtyCollaborativeDocs(
   localCollaborativeDocCache: Map<string, WorkspaceDoc>,
 ): WorkspaceDoc[] {
   return docs.map((doc) => {
-    if (!dirtyDocIds.has(doc.id)) return doc;
+    if (dirtyDocIds.has(doc.id)) return localCollaborativeDocCache.get(doc.id) ?? doc;
     return localCollaborativeDocCache.get(doc.id) ?? doc;
   });
 }

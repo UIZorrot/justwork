@@ -8,7 +8,11 @@ export const STORAGE_KEYS = {
   UI_LOCALE: "justwork.ui.locale.v1",
   /** 最近使用过的工作区（仅本地，用于门页快捷选择） */
   BACKEND_WORKSPACE_RECENTS: "justwork.backend.workspaceRecents.v1",
+  /** 各工作区的本地显示名（用于成员在线状态和 message drawer） */
+  BACKEND_WORKSPACE_NICKNAMES: "justwork.backend.workspaceNicknames.v1",
+  BACKEND_WORKSPACE_MEMBER_DIRECTORY: "justwork.backend.workspaceMembers.v1",
   OFFLINE_MUTATION_QUEUE: "justwork.offline.queue.v1",
+  OFFLINE_DELETE_MUTATION_QUEUE: "justwork.offline.delete-queue.v1",
   BACKEND_DOC_DRAFTS: "justwork.backend.docDrafts.v1",
   COLLABORATIVE_MARKDOWN_SNAPSHOT_PREFIX: "justwork:collaboration:snapshot:",
 } as const;
@@ -18,22 +22,60 @@ export type DocPayloadV2 = {
   revision: number;
 };
 
+export type WorkspaceTableContent = {
+  frozenHeader?: boolean;
+  columns: Array<{ id: string; title: string; type: string; width?: number }>;
+  rows: Array<{ id: string; cells: Record<string, string> }>;
+};
+
+export type WorkspaceBoardTemplateField = {
+  id: string;
+  name: string;
+  defaultValue?: string;
+};
+
+export type WorkspaceBoardCardField = {
+  id: string;
+  templateFieldId?: string | null;
+  name: string;
+  value: string;
+};
+
+export type WorkspaceBoardTemplate = {
+  columnId: string;
+  title: string;
+  cardTitle: string;
+  fields: WorkspaceBoardTemplateField[];
+};
+
+export type WorkspaceBoardContent = {
+  template: WorkspaceBoardTemplate;
+  columns: Array<{ id: string; title: string; color?: string; cardIds: string[] }>;
+  cards: Array<{ id: string; title: string; fields: WorkspaceBoardCardField[] }>;
+};
+
+export type WorkspaceDocContent = WorkspaceTableContent | WorkspaceBoardContent;
+
+export type WorkspaceDocKind = "welcome" | "page" | "folder" | "table" | "board";
+
 export type WorkspaceDoc = {
   id: string;
   title: string;
   markdown: string;
+  content?: WorkspaceDocContent | null;
   revision: number;
   updatedAt: string;
   lastVisitedAt: string;
   parentId: string | null;
   pinned: boolean;
   inTrash: boolean;
-  kind: "welcome" | "page" | "folder";
+  kind: WorkspaceDocKind;
 };
 
 export type WorkspaceDocsState = {
   activeDocId: string;
   docs: WorkspaceDoc[];
+  workspaceTitle: string;
   workspaceDescription: string;
 };
 

@@ -3,6 +3,7 @@ export type DocEditor = {
   readonly root: HTMLElement;
   getMarkdown: () => string;
   setMarkdown: (md: string, clearHistory?: boolean) => void;
+  bindCollaborator: (binding: CollaborativeMarkdownBinding | undefined) => void;
   destroy: () => void;
 };
 
@@ -25,4 +26,10 @@ export type CreateEditorOptions = {
   initialMarkdown?: string;
   onChange?: (markdown: string) => void;
   imageSync?: EditorImageSync;
+  collaboratorBinding?: CollaborativeMarkdownBinding;
+};
+
+export type CollaborativeMarkdownBinding = {
+  collaborator: import("../collaboration/yjs-markdown").MarkdownCollaborator;
+  storageKey: string;
 };

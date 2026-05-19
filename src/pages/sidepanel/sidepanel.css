@@ -55,3 +55,84 @@ body {
 .doc-editor-host.doc-editor--ready {
   border-color: #d9dce0;
 }
+
+/* Keep the Vditor toolbar visually aligned with the rest of the editor chrome. */
+.doc-editor-host .vditor {
+  border: 0;
+  background: transparent;
+  --panel-background-color: transparent;
+  --toolbar-background-color: transparent;
+  --textarea-background-color: transparent;
+}
+
+.doc-editor-host .vditor-toolbar {
+  border-bottom: 0;
+  background: transparent !important;
+  padding: 8px 0 12px;
+  text-align: left !important;
+  width: 100% !important;
+  margin: 0 !important;
+  display: block !important;
+}
+
+.doc-editor-host .vditor-toolbar__item,
+.doc-editor-host .vditor-toolbar__divider {
+  float: left !important;
+}
+
+.doc-editor-host .vditor-toolbar__item .vditor-tooltipped::before,
+.doc-editor-host .vditor-toolbar__item .vditor-tooltipped::after {
+  z-index: 50 !important;
+}
+
+.doc-editor-host .vditor-toolbar__item {
+  border-radius: 6px;
+}
+
+.doc-editor-host .vditor-toolbar__item:hover {
+  background: #f4f4f2;
+}
+
+.doc-editor-host .vditor-content {
+  font-size: 16px;
+  line-height: 1.7;
+}
+
+.doc-editor-host .vditor-reset {
+  padding: 8px 0 26px;
+  background: transparent;
+}
+
+.doc-editor-host .vditor-wysiwyg {
+  padding: 8px 0 26px;
+  background: transparent;
+}
+
+.doc-editor-host .vditor-wysiwyg pre.vditor-reset,
+.doc-editor-host .vditor-sv,
+.doc-editor-host .vditor-ir,
+.doc-editor-host .vditor-preview > .vditor-reset {
+  width: 100% !important;
+  max-width: none !important;
+  margin: 0 !important;
+  text-align: left !important;
+}
+
+.doc-editor-host .vditor-wysiwyg pre.vditor-reset {
+  padding: 8px 0 26px !important;
+}
+
+.doc-editor-host .vditor-content,
+.doc-editor-host .vditor-sv,
+.doc-editor-host .vditor-ir {
+  background: transparent !important;
+}
+
+.doc-editor-host .vditor,
+.doc-editor-host .vditor-wysiwyg,
+.doc-editor-host .vditor-wysiwyg pre.vditor-reset,
+.doc-editor-host .vditor-wysiwyg pre.vditor-reset:focus,
+.doc-editor-host .vditor-content,
+.doc-editor-host .vditor-preview {
+  background-color: transparent !important;
+}

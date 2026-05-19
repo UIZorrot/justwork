@@ -1,0 +1,15 @@
+{
+  "consoleErrors": [
+    "debug: [mount] image sync ready workspace_3b886231920c4dc6a07f0f2ae1733c6a",
+    "debug: [mount] markdown warm complete workspace_3b886231920c4dc6a07f0f2ae1733c6a"
+  ],
+  "badResponses": [
+    "200 http://127.0.0.1:1446/v1/health",
+    "200 http://127.0.0.1:1446/v1/health",
+    "200 http://127.0.0.1:1446/v1/workspaces",
+    "200 http://127.0.0.1:1446/v1/workspaces/workspace_3b886231920c4dc6a07f0f2ae1733c6a/members",
+    "200 http://127.0.0.1:1446/v1/workspaces/workspace_3b886231920c4dc6a07f0f2ae1733c6a/profile",
+    "200 http://127.0.0.1:1446/v1/workspaces/workspace_3b886231920c4dc6a07f0f2ae1733c6a/members"
+  ],
+  "shellVisible": true
+}

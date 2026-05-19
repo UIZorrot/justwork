@@ -1,0 +1,25 @@
+{
+  "ok": true,
+  "steps": [
+    {
+      "step": "workspace",
+      "detail": "mounted"
+    },
+    {
+      "step": "people",
+      "detail": "S\nSmoke Tester\n在线 ·"
+    },
+    {
+      "step": "table",
+      "detail": "Latency check"
+    },
+    {
+      "step": "board",
+      "detail": "dragged"
+    },
+    {
+      "step": "delete",
+      "detail": "未命名页面 -> trash"
+    }
+  ]
+}

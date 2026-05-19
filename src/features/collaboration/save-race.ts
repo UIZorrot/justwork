@@ -1,11 +1,15 @@
+import type { WorkspaceDocContent } from "../../shared/storage-keys";
+
 export type CollaborativeDocState = {
   title: string;
   markdown: string;
+  content?: WorkspaceDocContent | null;
 };
 
 export type CollaborativeSaveRequest = {
   nextTitle: string;
   nextMarkdown: string;
+  content?: WorkspaceDocContent | null;
 };
 
 export type CollaborativeSaveResolution = {
@@ -13,14 +17,23 @@ export type CollaborativeSaveResolution = {
   shouldReseedSnapshot: boolean;
   retainedTitle: string | null;
   retainedMarkdown: string | null;
+  retainedContent: WorkspaceDocContent | null;
 };
+
+function stableContentKey(content: WorkspaceDocContent | null | undefined): string {
+  return JSON.stringify(content ?? null);
+}
 
 export function hasStaleCollaborativeSave(
   liveDoc: CollaborativeDocState | null | undefined,
   request: CollaborativeSaveRequest,
 ): boolean {
   if (!liveDoc) return true;
-  return liveDoc.title !== request.nextTitle || liveDoc.markdown !== request.nextMarkdown;
+  return (
+    liveDoc.title !== request.nextTitle ||
+    liveDoc.markdown !== request.nextMarkdown ||
+    stableContentKey(liveDoc.content) !== stableContentKey(request.content)
+  );
 }
 
 export function reconcileCollaborativeSave(
@@ -34,5 +47,6 @@ export function reconcileCollaborativeSave(
     shouldReseedSnapshot: !shouldKeepDirty,
     retainedTitle: shouldKeepDirty ? liveDoc?.title ?? null : null,
     retainedMarkdown: shouldKeepDirty ? liveDoc?.markdown ?? null : null,
+    retainedContent: shouldKeepDirty ? liveDoc?.content ?? null : null,
   };
 }

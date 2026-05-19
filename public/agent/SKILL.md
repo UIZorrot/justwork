@@ -60,6 +60,21 @@ POST /v1/workspaces/{workspace_id}/tree
 }
 ```
 
+The tree response includes `workspace_title`. This is workspace metadata and is separate from page/folder item titles.
+
+Rename the workspace:
+
+```http
+PUT /v1/workspaces/{workspace_id}/settings
+```
+
+```json
+{
+  "password": "workspace-password",
+  "title": "Project Knowledge Base"
+}
+```
+
 Read one item:
 
 ```http
@@ -143,6 +158,7 @@ PUT /v1/workspaces/{workspace_id}/profile
 - `workspace.create` -> `POST /v1/workspaces`
 - `workspace.unlock` -> password-bearing workspace calls
 - `workspace.tree.get` -> `POST /v1/workspaces/{workspace_id}/tree`
+- `workspace.settings.update` -> `PUT /v1/workspaces/{workspace_id}/settings`
 - `workspace.item.get` -> `POST /v1/workspaces/{workspace_id}/items/{item_id}`
 - `workspace.item.create` -> `POST /v1/workspaces/{workspace_id}/items`
 - `workspace.item.set` -> `PUT /v1/workspaces/{workspace_id}/items/{item_id}`

@@ -63,12 +63,11 @@ uvicorn app.main:app --host 127.0.0.1 --port 1446 --reload
 
 ## Quota Controls (env)
 
-The backend enforces workspace quotas on every persisted write (`create/update/move/trash/restore/hard-delete/patch/revert`):
+The backend enforces workspace quotas on every persisted write (`create/update/move/trash/restore/hard-delete/patch`):
 
 - Workspace payload bytes (decrypted JSON size)
 - Page count (excludes system docs `root`/`welcome`)
 - Folder count (excludes system docs)
-- History max events (auto-trim oldest when exceeded)
 
 Set plan via:
 
@@ -78,16 +77,14 @@ $env:JUSTWORK_QUOTA_PLAN="free"  # free | pro
 
 Defaults:
 
-- Free: `40MB`, pages `300`, folders `100`, history `300`
-- Pro (reserved): `200MB`, pages `1500`, folders `500`, history `1500`
+- Free: `40MB`, pages `300`, folders `100`
+- Pro (reserved): `200MB`, pages `1500`, folders `500`
 
 Override by setting:
 
 - `JUSTWORK_QUOTA_WORKSPACE_MAX_BYTES_FREE|PRO`
 - `JUSTWORK_QUOTA_PAGE_MAX_COUNT_FREE|PRO`
 - `JUSTWORK_QUOTA_FOLDER_MAX_COUNT_FREE|PRO`
-- `JUSTWORK_QUOTA_HISTORY_MAX_EVENTS_FREE|PRO`
-
 When page/folder/payload exceeds, API returns `409` with error codes:
 
 - `workspace_quota_exceeded`
@@ -100,6 +97,7 @@ When page/folder/payload exceeds, API returns `409` with error codes:
 - `POST /v1/workspaces`
 - `POST /v1/workspaces/{workspace_id}/tree`
 - `GET /v1/workspaces/{workspace_id}/quota`
+- `POST /v1/workspaces/{workspace_id}/items/{item_id}/share`
 - `POST /v1/workspaces/{workspace_id}/items/{item_id}`
 - `POST /v1/workspaces/{workspace_id}/items`
 - `PUT /v1/workspaces/{workspace_id}/items/{item_id}`
@@ -113,8 +111,8 @@ When page/folder/payload exceeds, API returns `409` with error codes:
 - `POST /v1/workspaces/{workspace_id}/search`
 - `POST /v1/workspaces/{workspace_id}/items/{item_id}/outline`
 - `POST /v1/workspaces/{workspace_id}/items/{item_id}/patch`
-- `POST /v1/workspaces/{workspace_id}/history`
-- `POST /v1/workspaces/{workspace_id}/history/{event_id}/revert`
+- `GET /shares/{token}` readonly share page (password required)
+- `POST /v1/shares/{token}/view` resolve shared document by workspace password
 - `GET /v1/workspaces/{workspace_id}` legacy encrypted payload fetch
 - `PUT /v1/workspaces/{workspace_id}` legacy encrypted payload upsert
 
@@ -125,7 +123,7 @@ yarn test:backend
 yarn test:e2e:backend
 ```
 
-The backend test verifies that an Agent can use only backend API/OpenAPI-facing paths to create a workspace, reject a wrong password, read the tree, create/update/pin/move/trash/restore/delete items, update profile, search/outline, dry-run/apply patch, list history, and revert a change.
+The backend test verifies that an Agent can use only backend API/OpenAPI-facing paths to create a workspace, reject a wrong password, read the tree, create/update/pin/move/trash/restore/delete items, update profile, search/outline, and dry-run/apply patch.
 
 `yarn test:e2e:backend` starts a real FastAPI process and a headless workbench, switches chrome storage to Backend mode, creates a workspace, saves through the plugin UI, creates a folder/page, pins, trashes, restores, hard-deletes, checks backend state, locks, and unlocks again.
 

@@ -1,26 +1,94 @@
 /** JustWork online workbench: all durable document operations go through the fixed Backend API. */
 
 import { loadOrCreateLocalIdentity } from "@justwork/workspace-runtime";
-import { BackendApiError, createBackendClient, type WorkspaceTreeItem } from "@/features/backend/client";
+import {
+  BackendApiError,
+  createBackendClient,
+  type BackendWorkspaceItemKind,
+  type WorkspaceTreeItem,
+} from "@/features/backend/client";
 import { createWysiwygEditor } from "@/features/editor/vditor/create-editor";
 import type { DocEditor } from "@/features/editor/types";
+import { createCollaborativeTransport } from "@/features/collaboration/collab-transport";
+import { normalizeLegacyWelcomeDoc } from "@/features/docs/repo";
 import {
   buildDocsStateFromTree,
   createBackendWorkspaceSession,
   ROOT_FOLDER_ID,
   type BackendWorkspaceSession,
 } from "@/features/workspace/backend-runtime";
-import { createWorkspaceImageSync, type WorkspaceImageSync } from "@/features/workspace/image-sync";
+import {
+  applyOptimisticRestoreState,
+  applyOptimisticTrashState,
+} from "@/features/workspace/trash-state";
+import {
+  applyOptimisticMove,
+  applyOptimisticPinned,
+} from "@/features/workspace/optimistic-doc-state";
+import {
+  discardPendingDocSave,
+  releasePendingDocSaveBlock,
+  shouldSkipDocSave,
+} from "@/features/workspace/delete-sync";
+import {
+  createWorkspaceImageSync,
+  type WorkspaceCommunityState,
+  type WorkspaceImageSync,
+} from "@/features/workspace/image-sync";
+import { displayTitleOrFallback, normalizeDocTitleInput } from "@/features/workspace/title-policy";
+import { createBoardView, type BoardViewHandle } from "@/features/workspace/board-view";
+import {
+  appendLocalInboxNotification,
+  extractMentionNotifications,
+  loadLocalInboxState,
+  markAllLocalInboxNotificationsRead,
+  markLocalInboxNotificationRead,
+  type LocalInboxState,
+} from "@/features/workspace/local-inbox";
 import { createChromeRuntimeStorage } from "@/features/workspace/local-runtime";
+import {
+  loadWorkspaceJoinedMembers,
+  loadWorkspaceJoinedMembersFromApi,
+  mergeWorkspacePeople,
+  upsertWorkspaceJoinedMembers,
+  type WorkspaceJoinedMember,
+  type WorkspacePeopleEntry,
+} from "@/features/workspace/member-directory";
 import {
   enqueueOfflineMutation,
   loadOfflineMutations,
   removeOfflineMutation,
   type OfflineMutationPatch,
 } from "@/features/workspace/offline-queue";
-import { loadCollaborativeSnapshot, removeCollaborativeSnapshot, saveCollaborativeSnapshot } from "@/features/collaboration/collab-storage";
+import {
+  applyOfflineDeleteMutationsToDocs,
+  enqueueOfflineDeleteMutation,
+  loadOfflineDeleteMutations,
+  removeOfflineDeleteMutation,
+  type OfflineDeleteMutationKind,
+} from "@/features/workspace/offline-delete-queue";
+import {
+  createDefaultBoardContent,
+  createDefaultTableContent,
+  normalizeStructuredDocumentContent,
+  type BoardDocumentContent,
+  type StructuredDocumentContent,
+  type TableDocumentContent,
+} from "@/features/workspace/structured-document";
+import {
+  clearOptimisticCreatePatch,
+  promoteOptimisticCreateDoc,
+  stageOptimisticCreatePatch,
+} from "@/features/workspace/optimistic-create-patches";
+import { createTableView, type TableViewHandle } from "@/features/workspace/table-view";
+import {
+  loadCollaborativeSnapshot,
+  removeCollaborativeSnapshot,
+  saveCollaborativeSnapshot,
+} from "@/features/collaboration/collab-storage";
 import { overlayDirtyCollaborativeDocs } from "@/features/collaboration/dirty-docs";
 import { createMarkdownCollaborator } from "@/features/collaboration/yjs-markdown";
+import { createStructuredCollaborator } from "@/features/collaboration/yjs-structured";
 import { hasStaleCollaborativeSave, reconcileCollaborativeSave } from "@/features/collaboration/save-race";
 import { JUSTWORK_BACKEND_URL } from "@/shared/backend-config";
 import {
@@ -36,12 +104,19 @@ import {
 import {
   STORAGE_KEYS,
   type WorkspaceDoc,
+  type WorkspaceDocContent,
   type WorkspaceDocsState,
 } from "@/shared/storage-keys";
+import {
+  getLocalStorageArea,
+  getSessionStorageArea,
+  sendRuntimeMessage,
+} from "@/shared/browser-platform";
 import { showToast, type ToastVariant } from "@/shared/toast";
 import { formatBackendOrUnknownError } from "@/shared/user-facing-error";
 
 const DRAG_TYPE = "application/x-justwork-doc-id";
+const OPTIMISTIC_DOC_ID_PREFIX = "optimistic_";
 
 const MAX_BACKEND_WORKSPACE_RECENTS = 12;
 
@@ -59,15 +134,42 @@ function languageLabel(locale: Locale): string {
   return LANGUAGE_LABELS[locale] ?? locale;
 }
 
+function isOptimisticDocId(docId: string): boolean {
+  return docId.startsWith(OPTIMISTIC_DOC_ID_PREFIX);
+}
+
+function createClientDocId(): string {
+  return `doc_${crypto.randomUUID().replace(/-/g, "")}`;
+}
+
 function displayDocTitle(doc: WorkspaceDoc): string {
   if (doc.kind === "welcome") return t("doc.welcome");
   if (doc.id === ROOT_FOLDER_ID) return t("doc.root");
-  if (doc.kind === "folder") return doc.title?.trim() || t("editor.untitledFolder");
-  return doc.title?.trim() || t("editor.untitledDocument");
+  if (doc.kind === "folder") return displayTitleOrFallback(doc.title, t("editor.untitledFolder"));
+  if (doc.kind === "table") return displayTitleOrFallback(doc.title, t("editor.untitledTable"));
+  if (doc.kind === "board") return displayTitleOrFallback(doc.title, t("editor.untitledBoard"));
+  return displayTitleOrFallback(doc.title, t("editor.untitledDocument"));
+}
+
+function docKindLabel(doc: WorkspaceDoc): string {
+  if (doc.kind === "table") return t("doc.table");
+  if (doc.kind === "board") return t("doc.board");
+  if (doc.kind === "folder") return t("doc.folder");
+  return t("editor.pageTag");
+}
+
+function defaultTitleForKind(kind: BackendWorkspaceItemKind): string {
+  if (kind === "table") return t("editor.untitledTable");
+  if (kind === "board") return t("editor.untitledBoard");
+  if (kind === "folder") return t("editor.untitledFolder");
+  return t("editor.untitledPage");
 }
 
 function displayDocIcon(doc: WorkspaceDoc): string {
-  return doc.kind === "folder" ? "📁" : "📄";
+  if (doc.kind === "folder") return "\uD83D\uDCC1";
+  if (doc.kind === "table") return "\u25A6";
+  if (doc.kind === "board") return "\u2630";
+  return "\uD83D\uDCC4";
 }
 
 function buildLocalizedWelcomeMarkdown(state: WorkspaceDocsState): string {
@@ -96,28 +198,10 @@ function buildLocalizedWelcomeMarkdown(state: WorkspaceDocsState): string {
   ].join("\n");
 }
 
-/** Recent-workspace label: prefer the first root page title, otherwise a localized fallback. */
-function formatRecentWorkspaceListLabel(items: WorkspaceTreeItem[], unnamedLabel: string): string {
-  const pagesUnderRoot = items.filter(
-    (it) => it.parent_id === ROOT_FOLDER_ID && it.kind === "page" && it.id !== WELCOME_DOC_ID,
-  );
-  pagesUnderRoot.sort((a, b) => a.updated_at.localeCompare(b.updated_at));
-  const primary = pagesUnderRoot[0];
-  const title = primary?.title?.trim() ?? "";
-  if (title) return title;
+function formatWorkspaceTitle(title: string | undefined, unnamedLabel: string): string {
+  const trimmed = title?.trim() ?? "";
+  if (trimmed) return trimmed;
   return unnamedLabel;
-}
-
-function findWorkspaceNameDoc(items: WorkspaceTreeItem[]): WorkspaceTreeItem | null {
-  const pagesUnderRoot = items.filter(
-    (it) => it.parent_id === ROOT_FOLDER_ID && it.kind === "page" && it.id !== WELCOME_DOC_ID,
-  );
-  pagesUnderRoot.sort((a, b) => a.updated_at.localeCompare(b.updated_at));
-  if (pagesUnderRoot.length > 0) return pagesUnderRoot[0]!;
-
-  const fallbackPages = items.filter((it) => it.kind === "page" && it.id !== WELCOME_DOC_ID);
-  fallbackPages.sort((a, b) => a.updated_at.localeCompare(b.updated_at));
-  return fallbackPages[0] ?? null;
 }
 
 type RecentWorkspaceEntry = {
@@ -131,6 +215,7 @@ type BackendDocDraft = {
   itemId: string;
   markdown?: string;
   title?: string;
+  content?: WorkspaceDocContent | null;
   seq: number;
   updatedAt: string;
 };
@@ -143,29 +228,49 @@ function collaborativeMarkdownSnapshotKey(workspaceId: string, itemId: string): 
   return `${workspaceId}::${itemId}`;
 }
 
-function hydrateMarkdownFromCollaborativeSnapshot(
-  workspaceId: string,
-  itemId: string,
-  fallbackMarkdown: string,
-): string {
-  const snapshot = loadCollaborativeSnapshot(collaborativeMarkdownSnapshotKey(workspaceId, itemId));
-  if (snapshot === null) return fallbackMarkdown;
-  const collaborator = createMarkdownCollaborator();
-  try {
-    collaborator.applyRemoteUpdate(snapshot);
-    return collaborator.getMarkdown();
-  } finally {
-    collaborator.destroy();
-  }
+type WorkspaceNicknameMap = Record<string, string>;
+
+function workspaceNicknameStorageKey(): string {
+  return STORAGE_KEYS.BACKEND_WORKSPACE_NICKNAMES;
 }
 
-function persistCollaborativeMarkdownSnapshot(workspaceId: string, itemId: string, markdown: string): void {
-  const collaborator = createMarkdownCollaborator({ initialMarkdown: markdown });
-  try {
-    saveCollaborativeSnapshot(collaborativeMarkdownSnapshotKey(workspaceId, itemId), collaborator.encodeUpdate());
-  } finally {
-    collaborator.destroy();
+function workspaceNicknameMapKey(workspaceId: string, userId: string): string {
+  return `${workspaceId}::${userId}`;
+}
+
+const localStorageArea = getLocalStorageArea() as unknown as chrome.storage.StorageArea;
+const sessionStorageArea = getSessionStorageArea() as unknown as chrome.storage.StorageArea;
+
+async function loadWorkspaceNicknameMap(): Promise<WorkspaceNicknameMap> {
+  const raw = await localStorageArea.get(workspaceNicknameStorageKey());
+  const value = raw[workspaceNicknameStorageKey()];
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const next: WorkspaceNicknameMap = {};
+  for (const [workspaceId, nickname] of Object.entries(value as WorkspaceNicknameMap)) {
+    if (typeof nickname === "string") next[workspaceId] = nickname;
   }
+  return next;
+}
+
+async function getWorkspaceNickname(workspaceId: string, userId: string): Promise<string> {
+  const map = await loadWorkspaceNicknameMap();
+  return map[workspaceNicknameMapKey(workspaceId, userId)]?.trim() ?? "";
+}
+
+async function setWorkspaceNickname(workspaceId: string, userId: string, nickname: string): Promise<void> {
+  const map = await loadWorkspaceNicknameMap();
+  map[workspaceNicknameMapKey(workspaceId, userId)] = nickname.trim();
+  await localStorageArea.set({ [workspaceNicknameStorageKey()]: map });
+}
+
+const WORKSPACE_SESSION_ID_KEY = "justwork.backend.workspaceSessionId.v1";
+
+function getOrCreateWorkspaceSessionId(): string {
+  const existing = sessionStorage.getItem(WORKSPACE_SESSION_ID_KEY);
+  if (existing) return existing;
+  const next = crypto.randomUUID();
+  sessionStorage.setItem(WORKSPACE_SESSION_ID_KEY, next);
+  return next;
 }
 
 type BackendDocDraftSyncMessage = {
@@ -184,9 +289,7 @@ function snapshotBackendDocDraftCache(): Record<string, BackendDocDraft> {
 async function persistBackendDocDraftSnapshot(snapshot: Record<string, BackendDocDraft>): Promise<void> {
   const payload = { [STORAGE_KEYS.BACKEND_DOC_DRAFTS]: snapshot };
   try {
-    if (chrome.storage.session) {
-      await chrome.storage.session.set(payload);
-    }
+    await sessionStorageArea.set(payload);
   } catch {
     // Session storage is best-effort.
   }
@@ -195,9 +298,9 @@ async function persistBackendDocDraftSnapshot(snapshot: Record<string, BackendDo
       type: "justwork.backendDocDraft.sync",
       drafts: snapshot,
     };
-    await chrome.runtime.sendMessage(message);
+    await sendRuntimeMessage(message);
   } catch {
-    await chrome.storage.local.set(payload);
+    await localStorageArea.set(payload);
   }
 }
 
@@ -220,9 +323,7 @@ function nextBackendDocDraftSeq(key: string, currentSeq = 0): number {
 
 async function loadBackendDocDraftMap(): Promise<Record<string, BackendDocDraft>> {
   const merged: Record<string, BackendDocDraft> = {};
-  const areas: chrome.storage.StorageArea[] = [];
-  if (chrome.storage.session) areas.push(chrome.storage.session);
-  areas.push(chrome.storage.local);
+  const areas = [sessionStorageArea, localStorageArea];
   const rawEntries = await Promise.all(areas.map((area) => area.get(STORAGE_KEYS.BACKEND_DOC_DRAFTS)));
   for (const raw of rawEntries) {
     const map = raw[STORAGE_KEYS.BACKEND_DOC_DRAFTS];
@@ -259,7 +360,7 @@ async function getBackendDocDraft(workspaceId: string, itemId: string): Promise<
 async function upsertBackendDocDraft(
   workspaceId: string,
   itemId: string,
-  patch: { markdown?: string; title?: string },
+  patch: { markdown?: string; title?: string; content?: WorkspaceDocContent | null },
 ): Promise<BackendDocDraft> {
   const key = draftMapKey(workspaceId, itemId);
   const prev = backendDocDraftCache.get(key) ?? (await loadBackendDocDraftMap())[key];
@@ -269,6 +370,7 @@ async function upsertBackendDocDraft(
     itemId,
     markdown: patch.markdown ?? prev?.markdown,
     title: patch.title ?? prev?.title,
+    content: patch.content ?? prev?.content,
     seq,
     updatedAt: new Date().toISOString(),
   };
@@ -288,7 +390,7 @@ async function removeBackendDocDraft(workspaceId: string, itemId: string, seq: n
 }
 
 async function loadRecentWorkspaceEntries(): Promise<RecentWorkspaceEntry[]> {
-  const raw = await chrome.storage.local.get(STORAGE_KEYS.BACKEND_WORKSPACE_RECENTS);
+  const raw = await localStorageArea.get(STORAGE_KEYS.BACKEND_WORKSPACE_RECENTS);
   const v = raw[STORAGE_KEYS.BACKEND_WORKSPACE_RECENTS];
   if (!Array.isArray(v)) return [];
   return v.filter((x): x is RecentWorkspaceEntry => {
@@ -299,7 +401,7 @@ async function loadRecentWorkspaceEntries(): Promise<RecentWorkspaceEntry[]> {
 }
 
 async function saveRecentWorkspaceEntries(list: RecentWorkspaceEntry[]): Promise<void> {
-  await chrome.storage.local.set({ [STORAGE_KEYS.BACKEND_WORKSPACE_RECENTS]: list });
+  await localStorageArea.set({ [STORAGE_KEYS.BACKEND_WORKSPACE_RECENTS]: list });
 }
 
 async function touchRecentWorkspaceEntry(workspaceId: string, label: string): Promise<void> {
@@ -328,37 +430,6 @@ function debounce<T extends (...args: unknown[]) => void>(fn: T, ms: number): T 
   }) as T;
 }
 
-function formatHistoryTime(iso: string, locale: string): string {
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return iso;
-  return d.toLocaleString(locale);
-}
-
-function historyEventTitle(op: string): string {
-  switch (op) {
-    case "workspace.item.set":
-      return t("history.modify");
-    case "workspace.item.create":
-      return t("history.create");
-    case "workspace.item.move":
-      return t("history.move");
-    case "workspace.item.pin":
-      return t("history.pin");
-    case "workspace.item.trash":
-      return t("history.trash");
-    case "workspace.item.restore":
-      return t("history.restore");
-    case "workspace.item.hard_delete":
-      return t("history.hardDelete");
-    case "doc.patch":
-      return t("history.patch");
-    case "history.revert":
-      return t("history.revert");
-    default:
-      return op;
-  }
-}
-
 function buildDepthMap(docs: WorkspaceDoc[]): Map<string, number> {
   const map = new Map<string, number>();
   const byId = new Map(docs.map((d) => [d.id, d]));
@@ -378,7 +449,7 @@ function buildDepthMap(docs: WorkspaceDoc[]): Map<string, number> {
   return map;
 }
 
-function flattenTree(docs: WorkspaceDoc[], rootId: string): WorkspaceDoc[] {
+function flattenTree(docs: WorkspaceDoc[], rootId: string, collapsedFolderIds: Set<string> = new Set()): WorkspaceDoc[] {
   const byParent = new Map<string, WorkspaceDoc[]>();
   docs.forEach((d) => {
     const key = d.parentId ?? "";
@@ -398,6 +469,7 @@ function flattenTree(docs: WorkspaceDoc[], rootId: string): WorkspaceDoc[] {
     const cur = docs.find((d) => d.id === id);
     if (!cur) return;
     pushUnique(cur);
+    if (cur.kind === "folder" && collapsedFolderIds.has(cur.id)) return;
     (byParent.get(id) || []).forEach((child) => {
       visit(child.id);
     });
@@ -471,7 +543,10 @@ export async function startBackendWorkbench(): Promise<void> {
   const pinnedList = document.getElementById("pinned-list") as HTMLUListElement | null;
   const docTree = document.getElementById("doc-tree") as HTMLUListElement | null;
   const trashList = document.getElementById("trash-list") as HTMLUListElement | null;
+  const pageKindTag = document.getElementById("page-kind-tag") as HTMLElement | null;
   const newFileBtn = document.getElementById("new-file-btn") as HTMLButtonElement | null;
+  const newTableBtn = document.getElementById("new-table-btn") as HTMLButtonElement | null;
+  const newBoardBtn = document.getElementById("new-board-btn") as HTMLButtonElement | null;
   const newFolderBtn = document.getElementById("new-folder-btn") as HTMLButtonElement | null;
   const pinBtn = document.getElementById("pin-btn") as HTMLButtonElement | null;
   const shareBtn = document.getElementById("share-btn") as HTMLButtonElement | null;
@@ -494,20 +569,32 @@ export async function startBackendWorkbench(): Promise<void> {
   const unlockPasswordInput = document.getElementById("unlock-password-input") as HTMLInputElement | null;
   const setupWorkspaceBtn = document.getElementById("setup-workspace-btn") as HTMLButtonElement | null;
   const unlockWorkspaceBtn = document.getElementById("unlock-workspace-btn") as HTMLButtonElement | null;
+  const createWorkspaceBtn = document.getElementById("create-workspace-btn") as HTMLButtonElement | null;
   const lockWorkspaceBtn = document.getElementById("lock-workspace-btn") as HTMLButtonElement | null;
   const gateError = document.getElementById("workspace-gate-error") as HTMLElement | null;
   const backendTitleSetup = document.getElementById("backend-title-setup-input") as HTMLInputElement | null;
   const backendWorkspaceIdInput = document.getElementById("backend-workspace-id-input") as HTMLInputElement | null;
-  const historyList = document.getElementById("history-list") as HTMLUListElement | null;
-  const historyRefreshBtn = document.getElementById("history-refresh-btn") as HTMLButtonElement | null;
-  const historyDrawerRoot = document.getElementById("history-drawer-root") as HTMLElement | null;
-  const historyDrawerBackdrop = document.getElementById("history-drawer-backdrop") as HTMLElement | null;
-  const historyDrawerCloseBtn = document.getElementById("history-drawer-close-btn") as HTMLButtonElement | null;
-  const historyDrawerOpenBtn = document.getElementById("history-drawer-open-btn") as HTMLButtonElement | null;
   const workspaceInfoDrawerRoot = document.getElementById("workspace-info-drawer-root") as HTMLElement | null;
   const workspaceInfoDrawerBackdrop = document.getElementById("workspace-info-drawer-backdrop") as HTMLElement | null;
   const workspaceInfoDrawerCloseBtn = document.getElementById("workspace-info-drawer-close-btn") as HTMLButtonElement | null;
   const workspaceInfoDrawerOpenBtn = document.getElementById("workspace-info-drawer-open-btn") as HTMLButtonElement | null;
+  const workspaceMessageDrawerRoot = document.getElementById("workspace-message-drawer-root") as HTMLElement | null;
+  const workspaceMessageDrawerBackdrop = document.getElementById("workspace-message-drawer-backdrop") as HTMLElement | null;
+  const workspaceMessageDrawer = document.getElementById("workspace-message-drawer") as HTMLElement | null;
+  const workspaceMessageDrawerOpenBtn = document.getElementById("workspace-message-drawer-open-btn") as HTMLButtonElement | null;
+  const workspaceMessageUnreadBadge = document.getElementById("workspace-message-unread-badge") as HTMLElement | null;
+  const workspaceMessageDrawerCloseBtn = document.getElementById("workspace-message-drawer-close-btn") as HTMLButtonElement | null;
+  const workspaceMessageMarkReadBtn = document.getElementById("workspace-message-mark-read-btn") as HTMLButtonElement | null;
+  const workspaceMessageDrawerCount = document.getElementById("workspace-message-drawer-count") as HTMLElement | null;
+  const workspaceMessageMembers = document.getElementById("workspace-message-members") as HTMLElement | null;
+  const workspaceMessageLog = document.getElementById("workspace-message-log") as HTMLElement | null;
+  const workspacePeopleCount = document.getElementById("workspace-people-count") as HTMLElement | null;
+  const workspacePeopleList = document.getElementById("workspace-people-list") as HTMLElement | null;
+  const workspaceNicknamePromptRoot = document.getElementById("workspace-nickname-prompt-root") as HTMLElement | null;
+  const workspaceNicknamePromptBackdrop = document.getElementById("workspace-nickname-prompt-backdrop") as HTMLElement | null;
+  const workspaceNicknamePrompt = document.getElementById("workspace-nickname-prompt") as HTMLElement | null;
+  const workspaceNicknamePromptInput = document.getElementById("workspace-nickname-prompt-input") as HTMLInputElement | null;
+  const workspaceNicknamePromptSaveBtn = document.getElementById("workspace-nickname-prompt-save-btn") as HTMLButtonElement | null;
   const workspaceInfoIdEl = document.getElementById("workspace-info-id") as HTMLElement | null;
   const workspaceInfoCopyIdBtn = document.getElementById("workspace-info-copy-id-btn") as HTMLButtonElement | null;
   const workspaceInfoUserIdEl = document.getElementById("workspace-info-user-id") as HTMLElement | null;
@@ -530,7 +617,10 @@ export async function startBackendWorkbench(): Promise<void> {
     !pinnedList ||
     !docTree ||
     !trashList ||
+    !pageKindTag ||
     !newFileBtn ||
+    !newTableBtn ||
+    !newBoardBtn ||
     !newFolderBtn ||
     !pinBtn ||
     !shareBtn ||
@@ -553,18 +643,29 @@ export async function startBackendWorkbench(): Promise<void> {
     !unlockPasswordInput ||
     !setupWorkspaceBtn ||
     !unlockWorkspaceBtn ||
+    !createWorkspaceBtn ||
     !lockWorkspaceBtn ||
     !gateError ||
-    !historyList ||
-    !historyRefreshBtn ||
-    !historyDrawerRoot ||
-    !historyDrawerBackdrop ||
-    !historyDrawerCloseBtn ||
-    !historyDrawerOpenBtn ||
     !workspaceInfoDrawerRoot ||
     !workspaceInfoDrawerBackdrop ||
     !workspaceInfoDrawerCloseBtn ||
     !workspaceInfoDrawerOpenBtn ||
+    !workspaceMessageDrawerRoot ||
+    !workspaceMessageDrawerBackdrop ||
+    !workspaceMessageDrawer ||
+    !workspaceMessageDrawerOpenBtn ||
+    !workspaceMessageUnreadBadge ||
+    !workspaceMessageDrawerCloseBtn ||
+    !workspaceMessageDrawerCount ||
+    !workspaceMessageMembers ||
+    !workspaceMessageLog ||
+    !workspacePeopleCount ||
+    !workspacePeopleList ||
+    !workspaceNicknamePromptRoot ||
+    !workspaceNicknamePromptBackdrop ||
+    !workspaceNicknamePrompt ||
+    !workspaceNicknamePromptInput ||
+    !workspaceNicknamePromptSaveBtn ||
     !workspaceInfoIdEl ||
     !workspaceInfoCopyIdBtn ||
     !workspaceInfoUserIdEl ||
@@ -682,7 +783,7 @@ export async function startBackendWorkbench(): Promise<void> {
   const runtimeStorage = createChromeRuntimeStorage();
   const identity = await loadOrCreateLocalIdentity(runtimeStorage);
   const backendClient = createBackendClient({ baseUrl: JUSTWORK_BACKEND_URL, signingIdentity: identity });
-  const savedWsId = (await chrome.storage.local.get(STORAGE_KEYS.LAST_BACKEND_WORKSPACE_ID))[
+  const savedWsId = (await localStorageArea.get(STORAGE_KEYS.LAST_BACKEND_WORKSPACE_ID))[
     STORAGE_KEYS.LAST_BACKEND_WORKSPACE_ID
   ] as string | undefined;
 
@@ -690,12 +791,21 @@ export async function startBackendWorkbench(): Promise<void> {
 
   let editor: DocEditor | undefined;
   let imageSync: WorkspaceImageSync | undefined;
+  const markdownHost = document.createElement("div");
+  markdownHost.className = "doc-editor-surface doc-editor-surface--markdown";
+  const structuredHost = document.createElement("div");
+  structuredHost.className = "doc-editor-surface doc-editor-surface--structured";
+  editorRoot.replaceChildren(markdownHost, structuredHost);
+  let tableView: TableViewHandle | undefined;
+  let boardView: BoardViewHandle | undefined;
   let mounted = false;
   let flushOfflineMutations: () => Promise<void> = async () => {};
   let rerenderActiveWorkbench: (() => void) | undefined;
-  let refreshActiveHistoryPanel: (() => Promise<void>) | undefined;
   let refreshActiveWorkspaceInfoPanel: (() => Promise<void>) | undefined;
   let refreshQuotaBar: (() => Promise<void>) | undefined;
+  let communityState: WorkspaceCommunityState = { members: [] };
+  let closeMessageDrawer: () => void = () => {};
+  let workspaceSyncTimer: number | undefined;
 
   const refreshHealth = async (): Promise<void> => {
     setHealthStatus(backendHealthStatus, "checking", t("status.connecting"));
@@ -721,19 +831,10 @@ export async function startBackendWorkbench(): Promise<void> {
     void refreshHealth();
     void renderGateRecents();
     rerenderActiveWorkbench?.();
-    void refreshActiveHistoryPanel?.();
     void refreshActiveWorkspaceInfoPanel?.();
     void refreshQuotaBar?.();
   };
   const disposeLocaleObserver = observePreferredLocaleChanges(handleLocaleChanged);
-
-  const closeHistoryDrawer = (): void => {
-    const activeEl = document.activeElement as HTMLElement | null;
-    if (activeEl && historyDrawerRoot.contains(activeEl)) activeEl.blur();
-    historyDrawerRoot.classList.remove("is-open");
-    historyDrawerRoot.setAttribute("aria-hidden", "true");
-    historyDrawerOpenBtn.setAttribute("aria-expanded", "false");
-  };
 
   const closeWorkspaceInfoDrawer = (): void => {
     const activeEl = document.activeElement as HTMLElement | null;
@@ -743,22 +844,13 @@ export async function startBackendWorkbench(): Promise<void> {
     workspaceInfoDrawerOpenBtn.setAttribute("aria-expanded", "false");
   };
 
-  const openHistoryDrawer = (): void => {
-    closeWorkspaceInfoDrawer();
-    historyDrawerRoot.classList.add("is-open");
-    historyDrawerRoot.setAttribute("aria-hidden", "false");
-    historyDrawerOpenBtn.setAttribute("aria-expanded", "true");
-  };
-
   const openWorkspaceInfoDrawer = (): void => {
-    closeHistoryDrawer();
+    closeMessageDrawer();
     workspaceInfoDrawerRoot.classList.add("is-open");
     workspaceInfoDrawerRoot.setAttribute("aria-hidden", "false");
     workspaceInfoDrawerOpenBtn.setAttribute("aria-expanded", "true");
   };
 
-  historyDrawerCloseBtn.addEventListener("click", closeHistoryDrawer);
-  historyDrawerBackdrop.addEventListener("click", closeHistoryDrawer);
   workspaceInfoDrawerCloseBtn.addEventListener("click", closeWorkspaceInfoDrawer);
   workspaceInfoDrawerBackdrop.addEventListener("click", closeWorkspaceInfoDrawer);
   document.addEventListener("keydown", (e) => {
@@ -767,8 +859,8 @@ export async function startBackendWorkbench(): Promise<void> {
       closeWorkspaceInfoDrawer();
       return;
     }
-    if (historyDrawerRoot.classList.contains("is-open")) {
-      closeHistoryDrawer();
+    if (workspaceMessageDrawerRoot.classList.contains("is-open")) {
+      closeMessageDrawer();
     }
   });
 
@@ -815,7 +907,7 @@ export async function startBackendWorkbench(): Promise<void> {
       rm.className = "gate-recent-remove";
       rm.setAttribute("aria-label", t("gate.recent.remove"));
       rm.dataset.workspaceId = e.workspaceId;
-      rm.textContent = "×";
+      rm.textContent = "脳";
       li.appendChild(selectBtn);
       li.appendChild(rm);
       gateRecentList.appendChild(li);
@@ -860,15 +952,15 @@ export async function startBackendWorkbench(): Promise<void> {
   });
 
   const showGate = (mode: "setup" | "unlock", message = "", variant: ToastVariant = "error"): void => {
-    closeHistoryDrawer();
     closeWorkspaceInfoDrawer();
+    closeMessageDrawer();
     shell.hidden = true;
     lockWorkspaceBtn.hidden = true;
     pinBtn.hidden = true;
     shareBtn.hidden = true;
     deleteBtn.hidden = true;
-    historyDrawerOpenBtn.hidden = true;
     workspaceInfoDrawerOpenBtn.hidden = true;
+    workspaceMessageDrawerOpenBtn.hidden = true;
     topbarQuota.hidden = true;
     gate.hidden = false;
     setupPanel.hidden = mode !== "setup";
@@ -895,8 +987,8 @@ export async function startBackendWorkbench(): Promise<void> {
     pinBtn.hidden = false;
     shareBtn.hidden = false;
     deleteBtn.hidden = false;
-    historyDrawerOpenBtn.hidden = false;
     workspaceInfoDrawerOpenBtn.hidden = false;
+    workspaceMessageDrawerOpenBtn.hidden = false;
     topbarQuota.hidden = false;
     gateError.textContent = "";
   };
@@ -905,6 +997,7 @@ export async function startBackendWorkbench(): Promise<void> {
     gateRecentSection.classList.toggle("is-disabled", busy);
     setupWorkspaceBtn.disabled = busy;
     unlockWorkspaceBtn.disabled = busy;
+    createWorkspaceBtn.disabled = busy;
     setupPasswordInput.disabled = busy;
     unlockPasswordInput.disabled = busy;
     if (backendTitleSetup) backendTitleSetup.disabled = busy;
@@ -919,17 +1012,87 @@ export async function startBackendWorkbench(): Promise<void> {
     workspaceId: string,
     password: string,
     recentLabelHint?: string,
-    initialTreeData?: { active_item_id: string; items: WorkspaceTreeItem[] },
+    initialTreeData?: { active_item_id: string; workspace_title: string; items: WorkspaceTreeItem[] },
   ): Promise<void> => {
     if (mounted) return;
 
-    await chrome.storage.local.set({ [STORAGE_KEYS.LAST_BACKEND_WORKSPACE_ID]: workspaceId });
+    await localStorageArea.set({ [STORAGE_KEYS.LAST_BACKEND_WORKSPACE_ID]: workspaceId });
 
     const session: BackendWorkspaceSession = createBackendWorkspaceSession({
       baseUrl: JUSTWORK_BACKEND_URL,
       workspaceId,
       password,
       signingIdentity: identity,
+    });
+    const sessionId = getOrCreateWorkspaceSessionId();
+    let participantNickname = (await getWorkspaceNickname(workspaceId, identity.userId)).trim();
+    let resolveNicknamePrompt: ((nickname: string) => void) | undefined;
+
+    const closeNicknamePrompt = (): void => {
+      const focused = document.activeElement;
+      if (focused instanceof HTMLElement && workspaceNicknamePromptRoot.contains(focused)) {
+        focused.blur();
+      }
+      workspaceNicknamePromptRoot.classList.remove("is-open");
+      workspaceNicknamePromptRoot.setAttribute("aria-hidden", "true");
+    };
+
+    const openNicknamePrompt = (initialValue: string): void => {
+      workspaceNicknamePromptInput.value = initialValue;
+      workspaceNicknamePromptRoot.classList.add("is-open");
+      workspaceNicknamePromptRoot.setAttribute("aria-hidden", "false");
+      workspaceNicknamePromptInput.focus();
+      workspaceNicknamePromptInput.select();
+    };
+
+    const persistNickname = async (nickname: string): Promise<void> => {
+      const next = nickname.trim();
+      participantNickname = next;
+      await setWorkspaceNickname(workspaceId, identity.userId, next);
+      await upsertWorkspaceJoinedMembers(localStorageArea, workspaceId, [{
+        displayName: next,
+        userId: identity.userId,
+        source: "local",
+      }]);
+      try {
+        await session.updateProfile(next);
+      } catch {
+        // Local presence should keep working even if the server profile write fails.
+      }
+    };
+
+    const ensureNickname = async (): Promise<string> => {
+      if (participantNickname) return participantNickname;
+      const serverMembers = await session.listMembers().catch(() => []);
+      const currentMember = serverMembers.find((member) => member.user_id === identity.userId);
+      const initial = currentMember?.nickname?.trim() ?? "";
+      return await new Promise<string>((resolve) => {
+        resolveNicknamePrompt = resolve;
+        openNicknamePrompt(initial);
+      });
+    };
+
+    workspaceNicknamePromptBackdrop.addEventListener("click", () => {
+      workspaceNicknamePromptInput.focus();
+    });
+    workspaceNicknamePromptInput.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter") return;
+      event.preventDefault();
+      workspaceNicknamePromptSaveBtn.click();
+    });
+    workspaceNicknamePromptSaveBtn.addEventListener("click", () => {
+      void (async () => {
+        const next = workspaceNicknamePromptInput.value.trim();
+        if (!next) {
+          workspaceNicknamePromptInput.focus();
+          return;
+        }
+        await persistNickname(next);
+        closeNicknamePrompt();
+        resolveNicknamePrompt?.(next);
+        resolveNicknamePrompt = undefined;
+        workspaceMessageDrawerOpenBtn.focus();
+      })();
     });
 
     const renderQuotaBar = (usedBytes: number, limitBytes: number): void => {
@@ -955,14 +1118,21 @@ export async function startBackendWorkbench(): Promise<void> {
     refreshQuotaBar = pullQuota;
 
     let treeData = initialTreeData ?? (await session.loadTree());
-    const recentListLabel = formatRecentWorkspaceListLabel(treeData.items, t("editor.untitled"));
+    const recentListLabel = formatWorkspaceTitle(recentLabelHint || treeData.workspace_title, t("editor.untitled"));
     let workspace: WorkspaceDocsState = buildDocsStateFromTree(
       treeData.items,
       treeData.active_item_id,
+      formatWorkspaceTitle(treeData.workspace_title, recentListLabel),
       t("doc.workspaceBackend"),
     );
+    workspace = applyOfflineDeleteMutationsToDocs(
+      workspace,
+      (await loadOfflineDeleteMutations(localStorageArea)).filter((entry) => entry.workspaceId === workspaceId),
+    );
 
-    let active = workspace.docs.find((d) => d.id === treeData.active_item_id) ?? workspace.docs[0]!;
+    let active = workspace.docs.find((d) => d.id === treeData.active_item_id && !d.inTrash)
+      ?? workspace.docs.find((d) => !d.inTrash)
+      ?? workspace.docs[0]!;
     if (active.kind === "welcome") {
       active = { ...active, markdown: buildLocalizedWelcomeMarkdown(workspace) };
       workspace = {
@@ -970,25 +1140,23 @@ export async function startBackendWorkbench(): Promise<void> {
         docs: workspace.docs.map((d) => (d.id === active.id ? active : d)),
       };
     } else {
-      const fallbackMarkdown = active.title ? `# ${active.title}\n` : "";
-      active = { ...active, markdown: active.markdown || fallbackMarkdown };
+      active = { ...active, markdown: active.markdown || "" };
       workspace = {
         ...workspace,
         docs: workspace.docs.map((d) => (d.id === active.id ? active : d)),
         activeDocId: active.id,
       };
     }
-
-    if (active.kind !== "welcome") {
-      active = hydrateDocWithCollaborativeSnapshot(active);
-      workspace = {
-        ...workspace,
-        docs: workspace.docs.map((d) => (d.id === active.id ? active : d)),
-        activeDocId: active.id,
-      };
-    }
+    const collapsedFolderIds = new Set<string>();
 
     active = await hydrateDocWithLocalDraft(active);
+    if (active.kind === "table" || active.kind === "board") {
+      const fullStructuredActive = await session.loadItem(active.id);
+      active = {
+        ...active,
+        ...fullStructuredActive,
+      };
+    }
     workspace = {
       ...workspace,
       docs: workspace.docs.map((d) => (d.id === active.id ? active : d)),
@@ -996,38 +1164,465 @@ export async function startBackendWorkbench(): Promise<void> {
     };
 
     const localCollaborativeDocCache = new Map<string, WorkspaceDoc>();
+    const optimisticCreatePatches = new Map<string, OfflineMutationPatch>();
+    const creatingDocIds = new Set<string>();
+    const isCreatePendingDocId = (docId: string): boolean => creatingDocIds.has(docId) || isOptimisticDocId(docId);
+    const hydratedDocIds = new Set<string>();
     for (const doc of workspace.docs) {
       localCollaborativeDocCache.set(doc.id, doc);
     }
+    const markDocHydrated = (docId: string): void => {
+      if (docId !== WELCOME_DOC_ID && docId !== ROOT_FOLDER_ID) {
+        hydratedDocIds.add(docId);
+      }
+    };
+    const collaborativeMarkdownDocs = new Map<string, ReturnType<typeof createMarkdownCollaborator>>();
+    const collaborativeStructuredDocs = new Map<string, ReturnType<typeof createStructuredCollaborator>>();
+    const getCollaboratorForDoc = (doc: WorkspaceDoc): ReturnType<typeof createMarkdownCollaborator> => {
+      const existing = collaborativeMarkdownDocs.get(doc.id);
+      if (existing) return existing;
+      const fallbackMarkdown = doc.markdown || "";
+      const collaborator = createMarkdownCollaborator({ initialMarkdown: fallbackMarkdown });
+      const snapshot = loadCollaborativeSnapshot(collaborativeMarkdownSnapshotKey(workspaceId, doc.id));
+      if (snapshot) {
+        collaborator.applyRemoteUpdate(snapshot);
+      }
+      const normalizedMarkdown = stripAutoTitleHeading(collaborator.getMarkdown(), doc.title);
+      if (normalizedMarkdown !== collaborator.getMarkdown()) {
+        collaborator.applyLocalMarkdown(normalizedMarkdown);
+      }
+      collaborativeMarkdownDocs.set(doc.id, collaborator);
+      return collaborator;
+    };
+    const getStructuredCollaboratorForDoc = (
+      doc: WorkspaceDoc,
+    ): ReturnType<typeof createStructuredCollaborator> => {
+      const existing = collaborativeStructuredDocs.get(doc.id);
+      if (existing) return existing;
+      const kind = doc.kind === "table" ? "table" : "board";
+      const fallbackContent = normalizeStructuredDocumentContent(
+        kind,
+        doc.content ?? (kind === "table" ? createDefaultTableContent() : createDefaultBoardContent()),
+      );
+      const collaborator = createStructuredCollaborator({
+        kind,
+        initialContent: fallbackContent,
+      });
+      const snapshot = loadCollaborativeSnapshot(collaborativeMarkdownSnapshotKey(workspaceId, doc.id));
+      if (snapshot) {
+        collaborator.applyRemoteUpdate(snapshot);
+      }
+      collaborativeStructuredDocs.set(doc.id, collaborator);
+      return collaborator;
+    };
+    const collaborativeTransportUrl = (itemId: string, ticket: string): string => {
+      const url = new URL(
+        `/v1/workspaces/${encodeURIComponent(workspaceId)}/items/${encodeURIComponent(itemId)}/collab`,
+        JUSTWORK_BACKEND_URL,
+      );
+      url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+      url.searchParams.set("ticket", ticket);
+      return url.toString();
+    };
+    let activeCollaborativeItemId: string | null = null;
+    let activeCollaborativeTransport: ReturnType<typeof createCollaborativeTransport> | undefined;
+    let activeCollaborativeUnsubscribe: (() => void) | undefined;
+    const stopActiveCollaborativeTransport = (): void => {
+      activeCollaborativeUnsubscribe?.();
+      activeCollaborativeUnsubscribe = undefined;
+      activeCollaborativeTransport?.close();
+      activeCollaborativeTransport = undefined;
+      activeCollaborativeItemId = null;
+    };
+    const startCollaborativeTransport = async (doc: WorkspaceDoc): Promise<void> => {
+      if ((doc.kind !== "page" && doc.kind !== "table" && doc.kind !== "board") || doc.id === WELCOME_DOC_ID) {
+        stopActiveCollaborativeTransport();
+        return;
+      }
+      if (activeCollaborativeItemId === doc.id && activeCollaborativeTransport) return;
+      stopActiveCollaborativeTransport();
+      const join = await session.joinCollaborativeMarkdown(doc.id);
+      const transport = createCollaborativeTransport(collaborativeTransportUrl(doc.id, join.ticket));
+      activeCollaborativeItemId = doc.id;
+      activeCollaborativeTransport = transport;
+      if (doc.kind === "page") {
+        const collaborator = getCollaboratorForDoc(doc);
+        activeCollaborativeUnsubscribe = collaborator.onUpdate((_, origin) => {
+          if (origin !== "local") return;
+          saveCollaborativeSnapshot(collaborativeMarkdownSnapshotKey(workspaceId, doc.id), collaborator.encodeUpdate());
+          transport.sendUpdate(collaborator.encodeUpdate());
+        });
+        transport.onUpdate((update) => {
+          const previousMarkdown = collaborator.getMarkdown();
+          collaborator.applyRemoteUpdate(update);
+          saveCollaborativeSnapshot(collaborativeMarkdownSnapshotKey(workspaceId, doc.id), collaborator.encodeUpdate());
+          const nextMarkdown = collaborator.getMarkdown();
+          const notifications = extractMentionNotifications({
+            previousMarkdown,
+            nextMarkdown,
+            workspaceId,
+            docId: doc.id,
+            docTitle: displayDocTitle(doc),
+            recipientDisplayName: participantNickname,
+          });
+          if (notifications.length > 0) {
+            void (async () => {
+              for (const notification of notifications) {
+                inboxState = await appendLocalInboxNotification(
+                  localStorageArea,
+                  workspaceId,
+                  identity.userId,
+                  notification,
+                );
+              }
+              renderInboxPanel();
+            })();
+          }
+        });
+        transport.sendUpdate(collaborator.encodeUpdate());
+        return;
+      }
+
+      const collaborator = getStructuredCollaboratorForDoc(doc);
+      activeCollaborativeUnsubscribe = collaborator.onUpdate((_, origin) => {
+        if (origin !== "local") return;
+        saveCollaborativeSnapshot(collaborativeMarkdownSnapshotKey(workspaceId, doc.id), collaborator.encodeUpdate());
+        transport.sendUpdate(collaborator.encodeUpdate());
+      });
+      transport.onUpdate((update) => {
+        collaborator.applyRemoteUpdate(update);
+        saveCollaborativeSnapshot(collaborativeMarkdownSnapshotKey(workspaceId, doc.id), collaborator.encodeUpdate());
+        const nextContent = collaborator.getContent();
+        updateDocById(doc.id, (currentDoc) => ({
+          ...currentDoc,
+          content: nextContent,
+          updatedAt: new Date().toISOString(),
+        }));
+        if (active.id === doc.id) {
+          renderStructuredSurface({
+            ...active,
+            content: nextContent,
+          });
+        }
+      });
+      transport.sendUpdate(collaborator.encodeUpdate());
+    };
+    const stripAutoTitleHeading = (markdown: string, title: string): string => {
+      const trimmedTitle = title.trim();
+      if (!trimmedTitle || !markdown.startsWith("# ")) return markdown;
+      const lines = markdown.split(/\r?\n/);
+      if (lines.length === 0) return markdown;
+      if (lines[0].trim() !== `# ${trimmedTitle}`) return markdown;
+      const remainder = lines.slice(1);
+      while (remainder.length > 0 && remainder[0].trim() === "") {
+        remainder.shift();
+      }
+      return remainder.join("\n");
+    };
+    const normalizeLoadedDoc = (doc: WorkspaceDoc): WorkspaceDoc => {
+      const normalized = normalizeLegacyWelcomeDoc(doc);
+      if (
+        normalized.kind !== doc.kind ||
+        normalized.markdown !== doc.markdown ||
+        normalized.title !== doc.title
+      ) {
+        removeCollaborativeSnapshot(doc.id);
+      }
+      if (normalized.kind === "page" && normalized.title.trim()) {
+        const stripped = stripAutoTitleHeading(normalized.markdown, normalized.title);
+        if (stripped !== normalized.markdown) {
+          normalized.markdown = stripped;
+          removeCollaborativeSnapshot(doc.id);
+        }
+      }
+      return normalized;
+    };
+    if (active.kind !== "welcome") {
+      const normalizedActive = normalizeLoadedDoc(active);
+      const collaborator = getCollaboratorForDoc(normalizedActive);
+      markDocHydrated(normalizedActive.id);
+      active = {
+        ...normalizedActive,
+        markdown: collaborator.getMarkdown(),
+      };
+      workspace = {
+        ...workspace,
+        docs: workspace.docs.map((d) => (d.id === active.id ? active : d)),
+        activeDocId: active.id,
+      };
+    }
+
+    participantNickname = await ensureNickname();
+    if (!participantNickname) participantNickname = "Guest";
+    await upsertWorkspaceJoinedMembers(localStorageArea, workspaceId, [{
+      displayName: participantNickname,
+      userId: identity.userId,
+      source: "local",
+    }]);
+
+    let inboxState: LocalInboxState = { notifications: [] };
+    const inboxStatePromise = loadLocalInboxState(localStorageArea, workspaceId, identity.userId);
+    let joinedMembers: WorkspaceJoinedMember[] = await loadWorkspaceJoinedMembers(localStorageArea, workspaceId);
+    let peopleEntries: WorkspacePeopleEntry[] = mergeWorkspacePeople(joinedMembers, communityState.members);
+
+    const rebuildPeopleEntries = (): void => {
+      peopleEntries = mergeWorkspacePeople(joinedMembers, communityState.members);
+    };
+
+    const refreshJoinedMembers = async (): Promise<void> => {
+      try {
+        const apiMembers = await loadWorkspaceJoinedMembersFromApi(session.client, workspaceId, password);
+        if (apiMembers && apiMembers.length > 0) {
+          joinedMembers = await upsertWorkspaceJoinedMembers(
+            localStorageArea,
+            workspaceId,
+            apiMembers.map((member) => ({
+              displayName: member.displayName,
+              userId: member.userId,
+              source: member.source,
+              seenAt: member.lastSeenAt,
+            })),
+          );
+        }
+      } catch {
+        joinedMembers = await loadWorkspaceJoinedMembers(localStorageArea, workspaceId);
+      }
+      rebuildPeopleEntries();
+    };
+
+    await refreshJoinedMembers();
+
+    const renderPeoplePanel = (): void => {
+      rebuildPeopleEntries();
+      workspacePeopleCount.textContent = String(peopleEntries.length);
+      workspacePeopleList.innerHTML = "";
+      if (peopleEntries.length === 0) {
+        const empty = document.createElement("p");
+        empty.className = "workspace-people-empty";
+        empty.textContent = t("sidebar.peopleEmpty");
+        workspacePeopleList.appendChild(empty);
+        return;
+      }
+      for (const member of peopleEntries) {
+        const chip = document.createElement("button");
+        chip.type = "button";
+        chip.className = "workspace-people-chip";
+        chip.title = `@${member.displayName}`;
+        chip.addEventListener("click", () => {
+          void navigator.clipboard.writeText(`@${member.displayName}`).catch(() => undefined);
+          saveStatus(saveStatusEl, t("status.copied"));
+        });
+
+        const avatar = document.createElement("span");
+        avatar.className = "workspace-people-avatar";
+        avatar.textContent = member.displayName.trim().slice(0, 1).toUpperCase() || "?";
+
+        const body = document.createElement("span");
+        body.className = "workspace-people-body";
+        const name = document.createElement("span");
+        name.className = "workspace-people-name";
+        name.textContent = member.displayName;
+        const note = document.createElement("span");
+        note.className = "workspace-people-note";
+        note.textContent = member.isOnline
+          ? `${t("status.online")} · ${t("sidebar.peopleMention")}`
+          : t("sidebar.peopleMention");
+        body.appendChild(name);
+        body.appendChild(note);
+
+        chip.appendChild(avatar);
+        chip.appendChild(body);
+        workspacePeopleList.appendChild(chip);
+      }
+    };
+
+    const renderInboxPanel = (): void => {
+      const unreadCount = inboxState.notifications.filter((notification) => !notification.isRead).length;
+      workspaceMessageDrawerCount.textContent = unreadCount === 1 ? "1 unread" : `${unreadCount} unread`;
+      workspaceMessageUnreadBadge.hidden = unreadCount === 0;
+      workspaceMessageUnreadBadge.textContent = String(unreadCount);
+      renderPeoplePanel();
+
+      workspaceMessageMembers.innerHTML = "";
+      if (peopleEntries.length === 0) {
+        const empty = document.createElement("p");
+        empty.className = "workspace-message-empty";
+        empty.textContent = t("drawer.message.membersEmpty");
+        workspaceMessageMembers.appendChild(empty);
+      } else {
+        for (const member of peopleEntries) {
+          const chip = document.createElement("div");
+          chip.className = "workspace-message-member-chip";
+          const button = document.createElement("button");
+          button.type = "button";
+          button.textContent = member.isOnline ? `${member.displayName} · ${t("status.online")}` : member.displayName;
+          button.addEventListener("click", () => {
+            void navigator.clipboard.writeText(`@${member.displayName}`).catch(() => undefined);
+          });
+          chip.appendChild(button);
+          workspaceMessageMembers.appendChild(chip);
+        }
+      }
+
+      workspaceMessageLog.innerHTML = "";
+      if (inboxState.notifications.length === 0) {
+        const empty = document.createElement("p");
+        empty.className = "workspace-message-empty";
+        empty.textContent = t("drawer.message.empty");
+        workspaceMessageLog.appendChild(empty);
+      } else {
+        for (const notification of inboxState.notifications) {
+          const row = document.createElement("button");
+          row.type = "button";
+          row.className = `workspace-message-row workspace-inbox-row${notification.isRead ? "" : " is-unread"}`;
+          row.addEventListener("click", () => {
+            void (async () => {
+              inboxState = await markLocalInboxNotificationRead(
+                localStorageArea,
+                workspaceId,
+                identity.userId,
+                notification.id,
+              );
+              const targetDoc = workspace.docs.find((doc) => doc.id === notification.docId);
+              if (targetDoc) {
+                switchActiveDoc(targetDoc);
+              }
+              renderInboxPanel();
+              closeMessageDrawer();
+            })();
+          });
+
+          const avatar = document.createElement("div");
+          avatar.className = "workspace-message-avatar";
+          avatar.textContent = notification.docTitle.trim().slice(0, 1).toUpperCase() || "!";
+          const card = document.createElement("div");
+          card.className = "workspace-message-card";
+          const meta = document.createElement("div");
+          meta.className = "workspace-message-meta";
+          const title = document.createElement("span");
+          title.className = "workspace-message-author";
+          title.textContent = notification.docTitle;
+          const timeEl = document.createElement("span");
+          timeEl.textContent = new Date(notification.createdAt).toLocaleTimeString(undefined, {
+            hour: "2-digit",
+            minute: "2-digit",
+          });
+          meta.appendChild(title);
+          meta.appendChild(timeEl);
+          const text = document.createElement("p");
+          text.className = "workspace-message-text";
+          text.textContent = notification.mentionText;
+          card.appendChild(meta);
+          card.appendChild(text);
+          row.appendChild(avatar);
+          row.appendChild(card);
+          workspaceMessageLog.appendChild(row);
+        }
+      }
+      workspaceMessageLog.scrollTop = workspaceMessageLog.scrollHeight;
+    };
+    void inboxStatePromise.then((state) => {
+      inboxState = state;
+      renderInboxPanel();
+    });
+
+    closeMessageDrawer = (): void => {
+      const activeEl = document.activeElement as HTMLElement | null;
+      if (activeEl && workspaceMessageDrawerRoot.contains(activeEl)) activeEl.blur();
+      workspaceMessageDrawerRoot.classList.remove("is-open");
+      workspaceMessageDrawerRoot.setAttribute("aria-hidden", "true");
+      workspaceMessageDrawerOpenBtn.setAttribute("aria-expanded", "false");
+    };
+
+    const openMessageDrawer = (): void => {
+      closeWorkspaceInfoDrawer();
+      workspaceMessageDrawerRoot.classList.add("is-open");
+      workspaceMessageDrawerRoot.setAttribute("aria-hidden", "false");
+      workspaceMessageDrawerOpenBtn.setAttribute("aria-expanded", "true");
+      void refreshJoinedMembers().then(() => renderInboxPanel()).catch(() => renderInboxPanel());
+    };
+
+    workspaceMessageDrawerCloseBtn.addEventListener("click", closeMessageDrawer);
+    workspaceMessageDrawerBackdrop.addEventListener("click", closeMessageDrawer);
+    workspaceMessageMarkReadBtn?.addEventListener("click", () => {
+      void (async () => {
+        inboxState = await markAllLocalInboxNotificationsRead(localStorageArea, workspaceId, identity.userId);
+        renderInboxPanel();
+      })();
+    });
+    workspaceMessageDrawerOpenBtn.addEventListener("click", () => {
+      openMessageDrawer();
+    });
 
     imageSync = await createWorkspaceImageSync({
       workspaceId,
       baseUrl: JUSTWORK_BACKEND_URL,
       joinRelay: () => session.joinRelay(),
+      sessionId,
+      displayName: participantNickname,
+      userId: identity.userId,
       onAssetChanged: () => {
         syncEditorWithActive();
         renderAll();
       },
+      onCommunityStateChange: (nextState) => {
+        communityState = nextState;
+        void upsertWorkspaceJoinedMembers(
+          localStorageArea,
+          workspaceId,
+          nextState.members.map((member) => ({
+            displayName: member.displayName,
+            userId: member.userId ?? null,
+            source: "presence",
+            seenAt: member.joinedAt,
+          })),
+        ).then((nextJoinedMembers) => {
+          joinedMembers = nextJoinedMembers;
+          rebuildPeopleEntries();
+          renderInboxPanel();
+        }).catch(() => {
+          renderInboxPanel();
+        });
+      },
     });
-    await imageSync.warmMarkdowns(workspace.docs.map((doc) => doc.markdown));
+    console.debug("[mount] image sync ready", workspaceId);
+    void imageSync.warmMarkdowns(workspace.docs.map((doc) => doc.markdown)).catch(() => undefined);
+    console.debug("[mount] markdown warm complete", workspaceId);
+    renderInboxPanel();
 
     const replaceDoc = (doc: WorkspaceDoc): void => {
-      active = doc;
-      localCollaborativeDocCache.set(doc.id, doc);
+      const normalized = normalizeLoadedDoc(doc);
+      active = normalized;
+      localCollaborativeDocCache.set(normalized.id, normalized);
       workspace = {
         ...workspace,
-        docs: workspace.docs.some((d) => d.id === doc.id)
-          ? workspace.docs.map((d) => (d.id === doc.id ? doc : d))
-          : [...workspace.docs, doc],
-        activeDocId: doc.id,
+        docs: workspace.docs.some((d) => d.id === normalized.id)
+          ? workspace.docs.map((d) => (d.id === normalized.id ? normalized : d))
+          : [...workspace.docs, normalized],
+        activeDocId: normalized.id,
       };
+    };
+
+    const isFolderCollapsed = (doc: WorkspaceDoc): boolean => (
+      doc.kind === "folder" && collapsedFolderIds.has(doc.id)
+    );
+
+    const toggleFolderCollapsed = (doc: WorkspaceDoc): void => {
+      if (doc.kind !== "folder") return;
+      if (collapsedFolderIds.has(doc.id)) {
+        collapsedFolderIds.delete(doc.id);
+      } else {
+        collapsedFolderIds.add(doc.id);
+      }
+      renderAll();
     };
 
     const updateDocById = (docId: string, update: (doc: WorkspaceDoc) => WorkspaceDoc): WorkspaceDoc | null => {
       const current = workspace.docs.find((doc) => doc.id === docId);
       if (!current) return null;
-      const next = update(current);
+      const next = normalizeLoadedDoc(update(current));
       localCollaborativeDocCache.set(docId, next);
+      markDocHydrated(docId);
       workspace = {
         ...workspace,
         docs: workspace.docs.map((doc) => (doc.id === docId ? next : doc)),
@@ -1038,8 +1633,189 @@ export async function startBackendWorkbench(): Promise<void> {
       return next;
     };
 
+    const snapshotWorkspaceState = (): { workspace: WorkspaceDocsState; active: WorkspaceDoc } => ({
+      workspace: {
+        ...workspace,
+        docs: workspace.docs.map((doc) => ({ ...doc })),
+      },
+      active: { ...active },
+    });
+
+    const restoreWorkspaceState = (snapshot: { workspace: WorkspaceDocsState; active: WorkspaceDoc }): void => {
+      workspace = {
+        ...snapshot.workspace,
+        docs: snapshot.workspace.docs.map((doc) => normalizeLoadedDoc({ ...doc })),
+      };
+      active = workspace.docs.find((doc) => doc.id === snapshot.active.id) ?? normalizeLoadedDoc(snapshot.active);
+    };
+
+    const applyOptimisticTrash = (itemId: string): void => {
+      const updatedAt = new Date().toISOString();
+      workspace = applyOptimisticTrashState(workspace, itemId, updatedAt);
+      for (const doc of workspace.docs) {
+        localCollaborativeDocCache.set(doc.id, doc);
+      }
+      active = workspace.docs.find((doc) => doc.id === workspace.activeDocId) ?? active;
+    };
+
+    const isStructuredDoc = (doc: WorkspaceDoc): boolean => doc.kind === "table" || doc.kind === "board";
+
+    const normalizedContentForDoc = (doc: WorkspaceDoc): WorkspaceDocContent | null => {
+      if (doc.kind === "table") {
+        const collaborator = collaborativeStructuredDocs.get(doc.id);
+        return collaborator?.getContent() ?? normalizeStructuredDocumentContent("table", doc.content ?? createDefaultTableContent());
+      }
+      if (doc.kind === "board") {
+        const collaborator = collaborativeStructuredDocs.get(doc.id);
+        return collaborator?.getContent() ?? normalizeStructuredDocumentContent("board", doc.content ?? createDefaultBoardContent());
+      }
+      return null;
+    };
+
+    const folderChildren = (folderId: string): WorkspaceDoc[] => (
+      workspace.docs
+        .filter((doc) => doc.parentId === folderId && !doc.inTrash)
+        .sort((left, right) => {
+          if (left.kind === "folder" && right.kind !== "folder") return -1;
+          if (left.kind !== "folder" && right.kind === "folder") return 1;
+          return displayDocTitle(left).localeCompare(displayDocTitle(right), i18n.locale);
+        })
+    );
+
+    const renderFolderSurface = (doc: WorkspaceDoc): void => {
+      structuredHost.replaceChildren();
+      const surface = document.createElement("section");
+      surface.className = "folder-surface";
+
+      const children = folderChildren(doc.id);
+      if (children.length === 0) {
+        const empty = document.createElement("p");
+        empty.className = "folder-surface-empty";
+        empty.textContent = i18n.locale === "zh-CN"
+          ? "\u8FD9\u4E2A\u6587\u4EF6\u5939\u91CC\u8FD8\u6CA1\u6709\u5185\u5BB9\u3002"
+          : "This folder is empty.";
+        surface.appendChild(empty);
+        structuredHost.appendChild(surface);
+        return;
+      }
+
+      const list = document.createElement("div");
+      list.className = "folder-surface-list";
+      for (const child of children) {
+        const row = document.createElement("button");
+        row.type = "button";
+        row.className = "folder-surface-item";
+        row.addEventListener("click", () => {
+          switchActiveDoc(child);
+        });
+
+        const icon = document.createElement("span");
+        icon.className = "folder-surface-item-icon";
+        icon.textContent = displayDocIcon(child) || "\u2192";
+        icon.setAttribute("aria-hidden", "true");
+
+        const body = document.createElement("span");
+        body.className = "folder-surface-item-body";
+
+        const title = document.createElement("span");
+        title.className = "folder-surface-item-title";
+        title.textContent = displayDocTitle(child);
+
+        const meta = document.createElement("span");
+        meta.className = "folder-surface-item-meta";
+        meta.textContent = docKindLabel(child);
+
+        body.append(title, meta);
+        row.append(icon, body);
+        list.appendChild(row);
+      }
+
+      surface.appendChild(list);
+      structuredHost.appendChild(surface);
+    };
+
+    const renderStructuredSurface = (doc: WorkspaceDoc): void => {
+      tableView?.destroy?.();
+      boardView?.destroy?.();
+      tableView = undefined;
+      boardView = undefined;
+      structuredHost.replaceChildren();
+      if (doc.kind === "folder") {
+        renderFolderSurface(doc);
+        return;
+      }
+      if (doc.kind === "table") {
+        const content = normalizedContentForDoc(doc) as TableDocumentContent;
+        const view = createTableView({
+          document,
+          content,
+          labels: {
+            addColumn: t("structured.table.addColumn"),
+            addRow: t("structured.table.addRow"),
+            deleteColumn: t("structured.table.deleteColumn"),
+            deleteRow: t("structured.table.deleteRow"),
+            freezeHeader: t("structured.table.freezeHeader"),
+          },
+          onChange: (nextContent) => {
+            if (active.id !== doc.id) return;
+            if (isCreatePendingDocId(doc.id) || isCreatePendingDocId(active.id)) {
+              stageOptimisticCreatePatch(optimisticCreatePatches, doc.id, { content: nextContent });
+              commitLocalEdit(doc.id, { content: nextContent });
+              return;
+            }
+            const expectedRevision = active.revision;
+            const collaborator = getStructuredCollaboratorForDoc(doc);
+            collaborator.applyLocalContent(nextContent);
+            saveCollaborativeSnapshot(collaborativeMarkdownSnapshotKey(workspaceId, doc.id), collaborator.encodeUpdate());
+            const syncedContent = collaborator.getContent();
+            commitLocalEdit(doc.id, { content: syncedContent });
+            scheduleDocSave(doc.id, expectedRevision, { content: syncedContent }, active.title, "", "", 180);
+          },
+        });
+        tableView = view;
+        structuredHost.appendChild(view.element);
+        return;
+      }
+      if (doc.kind === "board") {
+        const content = normalizedContentForDoc(doc) as BoardDocumentContent;
+        const view = createBoardView({
+          document,
+          content,
+          labels: {
+            addColumn: t("structured.board.addColumn"),
+            addCard: t("structured.board.addCard"),
+            deleteColumn: t("structured.board.deleteColumn"),
+            deleteCard: t("structured.board.deleteCard"),
+            addField: t("structured.board.addField"),
+            removeField: t("structured.board.removeField"),
+            template: t("structured.board.template"),
+          },
+          onChange: (nextContent) => {
+            if (active.id !== doc.id) return;
+            if (isCreatePendingDocId(doc.id) || isCreatePendingDocId(active.id)) {
+              stageOptimisticCreatePatch(optimisticCreatePatches, doc.id, { content: nextContent });
+              commitLocalEdit(doc.id, { content: nextContent });
+              return;
+            }
+            const expectedRevision = active.revision;
+            const collaborator = getStructuredCollaboratorForDoc(doc);
+            collaborator.applyLocalContent(nextContent);
+            saveCollaborativeSnapshot(collaborativeMarkdownSnapshotKey(workspaceId, doc.id), collaborator.encodeUpdate());
+            const syncedContent = collaborator.getContent();
+            commitLocalEdit(doc.id, { content: syncedContent });
+            scheduleDocSave(doc.id, expectedRevision, { content: syncedContent }, active.title, "", "", 180);
+          },
+        });
+        boardView = view;
+        structuredHost.appendChild(view.element);
+      }
+    };
+
     const removeDocById = (docId: string): void => {
+      creatingDocIds.delete(docId);
       localCollaborativeDocCache.delete(docId);
+      clearOptimisticCreatePatch(optimisticCreatePatches, docId);
+      hydratedDocIds.delete(docId);
       const nextDocs = workspace.docs.filter((doc) => doc.id !== docId);
       workspace = {
         ...workspace,
@@ -1049,7 +1825,34 @@ export async function startBackendWorkbench(): Promise<void> {
       if (active.id === docId) {
         const fallback = nextDocs.find((doc) => doc.id === workspace.activeDocId) ?? nextDocs[0] ?? active;
         active = fallback;
+        stopActiveCollaborativeTransport();
+        bindEditorToActiveDoc();
       }
+    };
+
+    const bindEditorToActiveDoc = (): void => {
+      if (!editor) return;
+      if (isCreatePendingDocId(active.id)) {
+        editor.bindCollaborator(undefined);
+        stopActiveCollaborativeTransport();
+        return;
+      }
+      if (active.kind === "table" || active.kind === "board") {
+        editor.bindCollaborator(undefined);
+        void startCollaborativeTransport(active).catch(() => undefined);
+        return;
+      }
+      if (active.kind !== "page" || active.id === WELCOME_DOC_ID) {
+        editor.bindCollaborator(undefined);
+        stopActiveCollaborativeTransport();
+        return;
+      }
+      const collaborator = getCollaboratorForDoc(active);
+      void startCollaborativeTransport(active).catch(() => undefined);
+      editor.bindCollaborator({
+        collaborator,
+        storageKey: collaborativeMarkdownSnapshotKey(workspaceId, active.id),
+      });
     };
 
     let treeRefreshTimer: number | undefined;
@@ -1064,9 +1867,6 @@ export async function startBackendWorkbench(): Promise<void> {
           try {
             await persistRefreshTree();
             renderAll();
-            if (historyDrawerRoot.classList.contains("is-open")) {
-              await refreshHistoryPanel();
-            }
           } catch {
             // Background refresh is best-effort; don't interrupt the active editor flow.
           }
@@ -1090,17 +1890,20 @@ export async function startBackendWorkbench(): Promise<void> {
 
     const commitLocalEdit = (itemId: string, patch: OfflineMutationPatch): void => {
       dirtyDocIds.add(itemId);
+      if (isCreatePendingDocId(itemId)) {
+        stageOptimisticCreatePatch(optimisticCreatePatches, itemId, patch);
+      }
       updateDocById(itemId, (doc) => ({
         ...doc,
         title: patch.title ?? doc.title,
         markdown: patch.markdown ?? doc.markdown,
+        content: patch.content ?? doc.content ?? null,
         updatedAt: new Date().toISOString(),
       }));
       if (patch.title !== undefined) {
-        void upsertBackendDocDraft(workspaceId, itemId, { title: patch.title }).catch(() => undefined);
-      }
-      if (patch.markdown !== undefined) {
-        persistCollaborativeMarkdownSnapshot(workspaceId, itemId, patch.markdown);
+        void upsertBackendDocDraft(workspaceId, itemId, patch).catch(() => undefined);
+      } else if (patch.markdown !== undefined || patch.content !== undefined) {
+        void upsertBackendDocDraft(workspaceId, itemId, patch).catch(() => undefined);
       }
       if (active.id === itemId) {
         if (patch.title !== undefined) {
@@ -1110,27 +1913,40 @@ export async function startBackendWorkbench(): Promise<void> {
     };
 
     const queueSaveRequest = (request: PendingSaveRequest): void => {
+      if (isCreatePendingDocId(request.itemId)) {
+        return;
+      }
       saveQueue = saveQueue
         .then(async () => {
+          const currentDoc = workspace.docs.find((doc) => doc.id === request.itemId);
+          if (shouldSkipDocSave(blockedDocSaveIds, request.itemId, currentDoc)) {
+            dirtyDocIds.delete(request.itemId);
+            return;
+          }
           if (request.itemId === active.id) {
             saveStatus(saveStatusEl, t("status.saving"));
           }
           try {
-            const liveRevision = workspace.docs.find((doc) => doc.id === request.itemId)?.revision ?? request.expectedRevision;
+            const liveRevision = currentDoc?.revision ?? request.expectedRevision;
             const next = await session.saveItem(request.itemId, {
               ...request.patch,
               expectedRevision: liveRevision,
             });
+            markDocHydrated(request.itemId);
             const draft = request.usesDraftQueue ? await getBackendDocDraft(workspaceId, request.itemId) : null;
             const hasNewerDraft = request.usesDraftQueue && draft !== null && draft.seq > request.seq;
             const liveDoc = localCollaborativeDocCache.get(request.itemId);
             const isStale = hasStaleCollaborativeSave(liveDoc, {
               nextTitle: request.nextTitle,
               nextMarkdown: request.nextMarkdown,
+              content: request.patch.content,
             });
             const saveResolution = reconcileCollaborativeSave(liveDoc, isStale, hasNewerDraft);
             if (request.usesDraftQueue && !hasNewerDraft) {
               await removeBackendDocDraft(workspaceId, request.itemId, request.seq);
+            }
+            if (!request.usesDraftQueue && !saveResolution.shouldKeepDirty) {
+              await removeBackendDocDraft(workspaceId, request.itemId, Number.MAX_SAFE_INTEGER);
             }
             if (!saveResolution.shouldKeepDirty) {
               dirtyDocIds.delete(request.itemId);
@@ -1141,17 +1957,16 @@ export async function startBackendWorkbench(): Promise<void> {
                 ...doc,
                 title: saveResolution.retainedTitle ?? (saveResolution.shouldKeepDirty ? doc.title : next.title),
                 markdown: saveResolution.retainedMarkdown ?? (saveResolution.shouldKeepDirty ? doc.markdown : next.markdown),
+                content: saveResolution.shouldKeepDirty
+                  ? saveResolution.retainedContent
+                  : (request.patch.content ?? next.content ?? doc.content ?? null),
                 revision: next.revision,
                 updatedAt: next.updatedAt,
               };
             });
 
-            if (request.patch.markdown !== undefined && saveResolution.shouldReseedSnapshot) {
-              persistCollaborativeMarkdownSnapshot(workspaceId, request.itemId, next.markdown);
-            }
-
-            if (imageSync && saveResolution.shouldReseedSnapshot) {
-              await imageSync.updateReferences(request.previousMarkdown, request.nextMarkdown).catch(() => undefined);
+            if (imageSync && request.patch.markdown !== undefined && saveResolution.shouldReseedSnapshot) {
+              void imageSync.updateReferences(request.previousMarkdown, request.nextMarkdown).catch(() => undefined);
             }
             scheduleTreeRefresh();
             if (request.itemId === active.id) {
@@ -1179,21 +1994,15 @@ export async function startBackendWorkbench(): Promise<void> {
         });
     };
 
-    function hydrateDocWithCollaborativeSnapshot(doc: WorkspaceDoc): WorkspaceDoc {
-      if (doc.kind !== "page" || doc.id === WELCOME_DOC_ID) return doc;
-      return {
-        ...doc,
-        markdown: hydrateMarkdownFromCollaborativeSnapshot(workspaceId, doc.id, doc.markdown),
-      };
-    }
-
     async function hydrateDocWithLocalDraft(doc: WorkspaceDoc): Promise<WorkspaceDoc> {
-      if (doc.kind !== "page" || doc.id === WELCOME_DOC_ID) return doc;
+      if (doc.id === WELCOME_DOC_ID || doc.id === ROOT_FOLDER_ID) return doc;
       const draft = await getBackendDocDraft(workspaceId, doc.id);
       if (!draft) return doc;
       return {
         ...doc,
         title: draft.title ?? doc.title,
+        markdown: draft.markdown ?? doc.markdown,
+        content: draft.content ?? doc.content ?? null,
       };
     }
 
@@ -1202,43 +2011,114 @@ export async function startBackendWorkbench(): Promise<void> {
       const nextActiveId = treeData.items.some((item) => item.id === active.id && !item.in_trash)
         ? active.id
         : treeData.active_item_id;
-      workspace = buildDocsStateFromTree(treeData.items, nextActiveId, workspace.workspaceDescription);
+      workspace = buildDocsStateFromTree(
+        treeData.items,
+        nextActiveId,
+        formatWorkspaceTitle(treeData.workspace_title, workspace.workspaceTitle),
+        workspace.workspaceDescription,
+      );
+      workspace = {
+        ...workspace,
+        docs: workspace.docs.map((doc) => normalizeLoadedDoc(doc)),
+      };
       workspace = {
         ...workspace,
         docs: overlayDirtyCollaborativeDocs(workspace.docs, dirtyDocIds, localCollaborativeDocCache),
       };
-      const summary = workspace.docs.find((d) => d.id === nextActiveId) ?? workspace.docs[0]!;
-      const localMarkdown = summary.kind === "welcome"
-        ? summary.markdown
-        : hydrateMarkdownFromCollaborativeSnapshot(workspaceId, summary.id, summary.markdown);
+      workspace = applyOfflineDeleteMutationsToDocs(
+        workspace,
+        (await loadOfflineDeleteMutations(localStorageArea)).filter((entry) => entry.workspaceId === workspaceId),
+      );
+      const summary = workspace.docs.find((d) => d.id === nextActiveId && !d.inTrash)
+        ?? workspace.docs.find((d) => !d.inTrash)
+        ?? workspace.docs[0]!;
+      const collaborator = summary.kind === "page" ? getCollaboratorForDoc(summary) : null;
+      const localMarkdown = summary.kind === "welcome" ? summary.markdown : collaborator?.getMarkdown() ?? summary.markdown;
+      const local = localCollaborativeDocCache.get(summary.id) ?? null;
+      const shouldReloadStructured = (
+        (summary.kind === "table" || summary.kind === "board") &&
+        !dirtyDocIds.has(summary.id) &&
+        (!hydratedDocIds.has(summary.id) || (local?.revision ?? 0) < summary.revision)
+      );
       const full = summary.kind === "welcome"
         ? { ...summary, markdown: buildLocalizedWelcomeMarkdown(workspace) }
-        : await session.loadItem(summary.id);
-      const hydrated = summary.kind === "welcome"
-        ? await hydrateDocWithLocalDraft(full)
-        : await hydrateDocWithLocalDraft({ ...full, markdown: localMarkdown });
-      const local = dirtyDocIds.has(summary.id) ? localCollaborativeDocCache.get(summary.id) ?? null : null;
-      if (dirtyDocIds.has(summary.id)) {
-        if (local) {
-          replaceDoc({
-            ...hydrated,
-            title: local.title,
-            markdown: local.markdown,
-          });
-        } else {
-          replaceDoc(hydrated);
-        }
-      } else {
-        replaceDoc(hydrated);
+        : shouldReloadStructured
+          ? await session.loadItem(summary.id)
+          : hydratedDocIds.has(summary.id)
+          ? (localCollaborativeDocCache.get(summary.id) ?? summary)
+          : await session.loadItem(summary.id);
+      if (summary.kind !== "welcome") {
+        markDocHydrated(summary.id);
       }
-      if (imageSync) await imageSync.warmMarkdowns([local?.markdown ?? hydrated.markdown]);
-      await pullQuota();
+      const hydrated = await hydrateDocWithLocalDraft(
+        summary.kind === "welcome"
+          ? full
+          : {
+              ...full,
+              markdown: localMarkdown,
+            },
+      );
+      if (local) {
+        replaceDoc({
+          ...hydrated,
+          title: local.title,
+          markdown: local.markdown,
+          content: local.content ?? hydrated.content ?? null,
+        });
+      } else {
+        replaceDoc(
+          summary.kind === "welcome"
+            ? hydrated
+            : {
+                ...hydrated,
+                markdown: localMarkdown,
+              },
+        );
+      }
+      if (summary.kind === "page") {
+        void imageSync?.warmMarkdowns([local?.markdown ?? localMarkdown]).catch(() => undefined);
+      }
+      void pullQuota();
     };
 
     const syncEditorWithActive = (): void => {
+      editorRoot.classList.toggle(
+        "doc-editor-host--wide",
+        active.kind === "table" || active.kind === "board" || active.kind === "folder",
+      );
       titleInput.value = displayDocTitle(active);
-      titleInput.readOnly = active.kind === "welcome" || active.id === ROOT_FOLDER_ID;
-      editor?.setMarkdown(active.kind === "welcome" ? buildLocalizedWelcomeMarkdown(workspace) : active.markdown, true);
+      titleInput.readOnly = active.kind === "welcome" || active.id === ROOT_FOLDER_ID || active.kind === "folder";
+      pageKindTag.textContent = docKindLabel(active);
+      if (active.kind === "welcome") {
+        markdownHost.hidden = false;
+        structuredHost.hidden = true;
+        editor?.bindCollaborator(undefined);
+        editor?.setMarkdown(buildLocalizedWelcomeMarkdown(workspace), true);
+        return;
+      }
+      if (active.kind === "table" || active.kind === "board") {
+        markdownHost.hidden = true;
+        structuredHost.hidden = false;
+        editor?.bindCollaborator(undefined);
+        renderStructuredSurface(active);
+        return;
+      }
+      if (active.kind === "folder") {
+        markdownHost.hidden = true;
+        structuredHost.hidden = false;
+        editor?.bindCollaborator(undefined);
+        renderStructuredSurface(active);
+        return;
+      }
+      markdownHost.hidden = false;
+      structuredHost.hidden = true;
+      if (active.kind !== "page" || active.id === ROOT_FOLDER_ID) {
+        editor?.bindCollaborator(undefined);
+        editor?.setMarkdown("", true);
+        return;
+      }
+      bindEditorToActiveDoc();
+      editor?.setMarkdown(active.markdown, true);
     };
 
     const renderAll = (): void => {
@@ -1246,14 +2126,15 @@ export async function startBackendWorkbench(): Promise<void> {
       const alive = workspace.docs.filter((d) => !d.inTrash);
       const pinned = alive.filter((d) => d.pinned);
       const treeSource = alive;
-      const tree = flattenTree(treeSource, ROOT_FOLDER_ID);
+      const tree = flattenTree(treeSource, ROOT_FOLDER_ID, q.trim() ? new Set<string>() : collapsedFolderIds);
       const trash = workspace.docs.filter((d) => d.inTrash);
 
       renderDocRows(pinnedList, pinned, { search: q });
       renderDocRows(docTree, tree, { search: q });
       renderDocRows(trashList, trash, { showTrashActions: true, search: q });
       titleInput.value = displayDocTitle(active);
-      titleInput.readOnly = active.kind === "welcome" || active.id === ROOT_FOLDER_ID;
+      titleInput.readOnly = active.kind === "welcome" || active.id === ROOT_FOLDER_ID || active.kind === "folder";
+      pageKindTag.textContent = docKindLabel(active);
       setSidebarActionLabel(pinBtn, active.pinned ? t("sidebar.unpin") : t("sidebar.pin"));
       pinBtn.disabled = active.kind === "welcome" || active.id === ROOT_FOLDER_ID || active.inTrash;
       pinBtn.title = pinBtn.disabled ? t("doc.protected") : t("sidebar.pin");
@@ -1263,68 +2144,6 @@ export async function startBackendWorkbench(): Promise<void> {
       deleteBtn.title = deleteBtn.disabled ? t("doc.protected") : t("doc.trash");
     };
 
-    const refreshHistoryPanel = async (): Promise<void> => {
-      try {
-        const events = await session.listHistory();
-        historyList.innerHTML = "";
-        for (const ev of events) {
-          const li = document.createElement("li");
-          li.className = "history-item";
-          li.dataset.eventId = ev.id;
-
-          const main = document.createElement("div");
-          main.className = "history-item-main";
-
-          const meta = document.createElement("div");
-          meta.className = "history-item-meta";
-          meta.textContent = `${formatHistoryTime(ev.timestamp, locale)} / ${historyEventTitle(ev.op)}`;
-
-          const docLine = document.createElement("div");
-          docLine.className = "history-item-doc";
-          const actor = ev.actor_user_id ? ` / ${ev.actor_user_id.slice(-8)}` : "";
-          docLine.textContent = `${t("drawer.history.itemLabel")}?${ev.title || t("editor.untitled")}${actor}`;
-
-          const evLine = document.createElement("div");
-          evLine.className = "history-item-event";
-          evLine.textContent = `${t("drawer.history.eventLabel")}?${historyEventTitle(ev.op)}`;
-
-          main.appendChild(meta);
-          main.appendChild(docLine);
-          main.appendChild(evLine);
-
-          const revertBtn = document.createElement("button");
-          revertBtn.type = "button";
-          revertBtn.className = "history-revert-btn";
-          revertBtn.textContent = t("doc.revert");
-          revertBtn.setAttribute("data-testid", "history-revert");
-          revertBtn.addEventListener("click", () => {
-            void (async () => {
-              try {
-                replaceDoc(await session.revertHistoryEvent(ev.id));
-                if (imageSync) {
-                  await imageSync.updateReferences(ev.after_markdown ?? "", ev.before_markdown ?? "").catch(() => undefined);
-                }
-                renderAll();
-                scheduleTreeRefresh();
-                void refreshHistoryPanel();
-                saveStatus(saveStatusEl, t("status.reverted"));
-              } catch (e) {
-                notifyError(e);
-              }
-            })();
-          });
-
-          li.appendChild(main);
-          li.appendChild(revertBtn);
-          historyList.appendChild(li);
-        }
-      } catch (e) {
-        historyList.innerHTML = "";
-        notifyError(e);
-      }
-    };
-
-
     const applyLocalPatch = (itemId: string, patch: OfflineMutationPatch): void => {
       const current = workspace.docs.find((d) => d.id === itemId);
       if (!current) return;
@@ -1332,6 +2151,7 @@ export async function startBackendWorkbench(): Promise<void> {
         ...current,
         title: patch.title ?? current.title,
         markdown: patch.markdown ?? current.markdown,
+        content: patch.content ?? current.content ?? null,
         updatedAt: new Date().toISOString(),
       };
       replaceDoc(next);
@@ -1346,7 +2166,7 @@ export async function startBackendWorkbench(): Promise<void> {
     ): Promise<void> => {
       const previousMarkdown = workspace.docs.find((doc) => doc.id === itemId)?.markdown ?? "";
       const nextMarkdown = patch.markdown ?? previousMarkdown;
-      await enqueueOfflineMutation(chrome.storage.local, {
+      await enqueueOfflineMutation(localStorageArea, {
         id: mutationId(),
         workspaceId,
         itemId,
@@ -1358,14 +2178,65 @@ export async function startBackendWorkbench(): Promise<void> {
       if (patch.title !== undefined) {
         renderAll();
       }
-      await imageSync?.updateReferences(previousMarkdown, nextMarkdown).catch(() => undefined);
+      if (patch.markdown !== undefined) {
+        await imageSync?.updateReferences(previousMarkdown, nextMarkdown).catch(() => undefined);
+      }
+      setHealthStatus(backendHealthStatus, "offline", t("status.offline"));
+      saveStatus(saveStatusEl, t("status.offlinePending"));
+    };
+
+    const queueOfflineDeleteAction = async (
+      itemId: string,
+      kind: OfflineDeleteMutationKind,
+    ): Promise<void> => {
+      await enqueueOfflineDeleteMutation(localStorageArea, {
+        id: mutationId(),
+        workspaceId,
+        itemId,
+        kind,
+        createdAt: new Date().toISOString(),
+      });
       setHealthStatus(backendHealthStatus, "offline", t("status.offline"));
       saveStatus(saveStatusEl, t("status.offlinePending"));
     };
 
     flushOfflineMutations = async (): Promise<void> => {
-      const pending = (await loadOfflineMutations(chrome.storage.local)).filter((entry) => entry.workspaceId === workspaceId);
-      if (pending.length === 0) return;
+      const pendingDeleteMutations = (await loadOfflineDeleteMutations(localStorageArea))
+        .filter((entry) => entry.workspaceId === workspaceId);
+      for (const mutation of pendingDeleteMutations) {
+        try {
+          if (mutation.kind === "trash") {
+            await session.trashItem(mutation.itemId);
+          } else if (mutation.kind === "restore") {
+            await session.restoreItem(mutation.itemId);
+          } else {
+            await session.hardDeleteItem(mutation.itemId);
+          }
+          await removeOfflineDeleteMutation(localStorageArea, mutation.id);
+        } catch (e) {
+          if (e instanceof BackendApiError && e.code === "not_found") {
+            await removeOfflineDeleteMutation(localStorageArea, mutation.id);
+            continue;
+          }
+          if (shouldQueueAsOfflinePending(e)) {
+            setHealthStatus(backendHealthStatus, "offline", t("status.offline"));
+            saveStatus(saveStatusEl, t("status.offlinePending"));
+            return;
+          }
+          notifyError(e);
+          return;
+        }
+      }
+
+      const pending = (await loadOfflineMutations(localStorageArea)).filter((entry) => entry.workspaceId === workspaceId);
+      if (pending.length === 0) {
+        if (pendingDeleteMutations.length > 0) {
+          scheduleTreeRefresh();
+          renderAll();
+          saveStatus(saveStatusEl, t("status.synced"));
+        }
+        return;
+      }
       const revisionByItem = new Map<string, number>();
       for (const doc of workspace.docs) {
         revisionByItem.set(doc.id, doc.revision);
@@ -1373,6 +2244,11 @@ export async function startBackendWorkbench(): Promise<void> {
 
       for (const mutation of pending) {
         try {
+          const currentDoc = workspace.docs.find((doc) => doc.id === mutation.itemId);
+          if (shouldSkipDocSave(blockedDocSaveIds, mutation.itemId, currentDoc)) {
+            await removeOfflineMutation(localStorageArea, mutation.id);
+            continue;
+          }
           const expectedRevision = revisionByItem.get(mutation.itemId) ?? mutation.expectedRevision;
           const saved = await session.saveItem(mutation.itemId, {
             ...mutation.patch,
@@ -1381,10 +2257,13 @@ export async function startBackendWorkbench(): Promise<void> {
           revisionByItem.set(mutation.itemId, saved.revision);
           updateDocById(mutation.itemId, (doc) => ({
             ...doc,
+            title: saved.title,
+            markdown: saved.markdown,
+            content: saved.content ?? doc.content ?? null,
             revision: saved.revision,
             updatedAt: saved.updatedAt,
           }));
-          await removeOfflineMutation(chrome.storage.local, mutation.id);
+          await removeOfflineMutation(localStorageArea, mutation.id);
         } catch (e) {
           if (e instanceof BackendApiError && e.code === "conflict") {
             showToast({ message: t("toast.conflict"), variant: "warning" });
@@ -1402,8 +2281,38 @@ export async function startBackendWorkbench(): Promise<void> {
 
       scheduleTreeRefresh();
       renderAll();
-      void refreshHistoryPanel();
       saveStatus(saveStatusEl, t("status.synced"));
+    };
+
+    const hydrateStructuredDocInPlace = (doc: WorkspaceDoc, cached: WorkspaceDoc): void => {
+      void (async () => {
+        const needsRemoteLoad = !dirtyDocIds.has(doc.id) && (
+          !hydratedDocIds.has(doc.id) || (cached.revision ?? 0) < (doc.revision ?? 0) || cached.content == null
+        );
+        const full = needsRemoteLoad
+          ? await session.loadItem(doc.id)
+          : (localCollaborativeDocCache.get(doc.id) ?? cached);
+        markDocHydrated(doc.id);
+        const normalizedContent = normalizedContentForDoc(full);
+        updateDocById(doc.id, (current) => ({
+          ...current,
+          title: full.title,
+          revision: full.revision,
+          updatedAt: full.updatedAt,
+          content: normalizedContent,
+        }));
+        if (active.id === doc.id) {
+          active = {
+            ...active,
+            title: full.title,
+            revision: full.revision,
+            updatedAt: full.updatedAt,
+            content: normalizedContent,
+          };
+          syncEditorWithActive();
+          renderAll();
+        }
+      })().catch((error) => notifyError(error));
     };
 
     const switchActiveDoc = (doc: WorkspaceDoc): void => {
@@ -1415,40 +2324,87 @@ export async function startBackendWorkbench(): Promise<void> {
         return;
       }
 
-      const cached = workspace.docs.find((item) => item.id === doc.id) ?? doc;
+      if (isStructuredDoc(doc) || doc.kind === "folder") {
+        const cached = localCollaborativeDocCache.get(doc.id) ?? workspace.docs.find((item) => item.id === doc.id) ?? doc;
+        replaceDoc(cached);
+        stopActiveCollaborativeTransport();
+        syncEditorWithActive();
+        renderAll();
+        if (doc.kind === "folder") return;
+        hydrateStructuredDocInPlace(doc, cached);
+        return;
+      }
+
+      const cached = localCollaborativeDocCache.get(doc.id) ?? workspace.docs.find((item) => item.id === doc.id) ?? doc;
+      const collaborator = getCollaboratorForDoc(normalizeLoadedDoc(cached));
+      const initialMarkdown = collaborator.getMarkdown();
       replaceDoc({
-        ...hydrateDocWithCollaborativeSnapshot({
-          ...cached,
-          markdown: cached.markdown || "",
-        }),
+        ...cached,
+        markdown: initialMarkdown,
       });
+      bindEditorToActiveDoc();
+      editor?.setMarkdown(initialMarkdown, true);
       syncEditorWithActive();
       renderAll();
 
       void (async () => {
-        const full = await session.loadItem(doc.id);
-        const hydrated = await hydrateDocWithLocalDraft(hydrateDocWithCollaborativeSnapshot(full));
+        const full = hydratedDocIds.has(doc.id)
+          ? (localCollaborativeDocCache.get(doc.id) ?? cached)
+          : await session.loadItem(doc.id);
+        markDocHydrated(doc.id);
+        const hydrated = normalizeLoadedDoc(await hydrateDocWithLocalDraft(full));
+        const collaborator = getCollaboratorForDoc(doc);
+        const hydratedMarkdown = hydrated.markdown;
         if (!dirtyDocIds.has(doc.id)) {
-          updateDocById(doc.id, () => hydrated);
+          if (collaborator.getMarkdown() !== hydratedMarkdown) {
+            collaborator.applyLocalMarkdown(hydratedMarkdown);
+          }
+          updateDocById(doc.id, (current) => ({
+            ...current,
+            title: hydrated.title,
+            revision: hydrated.revision,
+            updatedAt: hydrated.updatedAt,
+            markdown: hydratedMarkdown,
+          }));
         }
         if (active.id === doc.id && !dirtyDocIds.has(doc.id)) {
-          active = hydrated;
+          active = {
+            ...active,
+            title: hydrated.title,
+            revision: hydrated.revision,
+            updatedAt: hydrated.updatedAt,
+            markdown: hydratedMarkdown,
+          };
+          editor?.setMarkdown(hydratedMarkdown, true);
           syncEditorWithActive();
           renderAll();
         }
-        if (imageSync) await imageSync.warmMarkdowns([hydrated.markdown]);
+        void imageSync?.warmMarkdowns([collaborator.getMarkdown()]).catch(() => undefined);
       })();
     };
 
     const onDropToFolder = (targetFolderId: string | null, draggedId: string) => {
       void (async () => {
+        const previous = workspace.docs.find((doc) => doc.id === draggedId);
+        if (!previous) return;
+        const optimisticUpdatedAt = new Date().toISOString();
+        workspace = applyOptimisticMove(workspace, draggedId, targetFolderId, optimisticUpdatedAt);
+        const optimistic = workspace.docs.find((doc) => doc.id === draggedId);
+        if (!optimistic) return;
+        localCollaborativeDocCache.set(draggedId, optimistic);
+        if (active.id === draggedId) {
+          active = optimistic;
+        }
+        renderAll();
         try {
           replaceDoc(await session.moveItem(draggedId, targetFolderId));
+          markDocHydrated(draggedId);
           renderAll();
           scheduleTreeRefresh();
-          void refreshHistoryPanel();
           saveStatus(saveStatusEl, t("doc.moved"));
         } catch (e) {
+          replaceDoc(previous);
+          renderAll();
           notifyError(e);
         }
       })();
@@ -1472,20 +2428,41 @@ export async function startBackendWorkbench(): Promise<void> {
         const btn = document.createElement("button");
         btn.type = "button";
         btn.className = "doc-list-item";
+        const hasChildren = doc.kind === "folder" && workspace.docs.some((child) => (
+          child.parentId === doc.id && !child.inTrash
+        ));
+        const collapsed = isFolderCollapsed(doc);
+        if (doc.kind === "folder") {
+          btn.classList.add(collapsed ? "is-collapsed" : "is-expanded");
+          btn.setAttribute("aria-expanded", String(!collapsed));
+        }
+        const disclosure = document.createElement("span");
+        disclosure.className = "doc-list-item-disclosure";
+        disclosure.setAttribute("aria-hidden", "true");
+        disclosure.textContent = "";
+        disclosure.classList.add("is-empty");
         const icon = document.createElement("span");
         icon.className = "doc-list-item-icon";
         icon.setAttribute("aria-hidden", "true");
         icon.textContent = displayDocIcon(doc);
+        if (!icon.textContent) {
+          icon.classList.add("is-empty");
+        }
         const label = document.createElement("span");
         label.className = "doc-list-item-label";
         label.textContent = displayDocTitle(doc);
-        btn.replaceChildren(icon, label);
+        btn.replaceChildren(disclosure, icon, label);
         btn.style.paddingLeft = `${8 + (depthMap.get(doc.id) ?? 0) * 14}px`;
         if (doc.id === ROOT_FOLDER_ID) {
           btn.classList.add("doc-root");
         }
         if (doc.id === active.id) btn.classList.add("active");
-        btn.addEventListener("click", () => void switchActiveDoc(doc));
+        btn.addEventListener("click", () => {
+          if (!opts.showTrashActions && doc.kind === "folder") {
+            toggleFolderCollapsed(doc);
+          }
+          switchActiveDoc(doc);
+        });
 
         if (!opts.showTrashActions && doc.kind !== "welcome" && doc.id !== ROOT_FOLDER_ID) {
           btn.draggable = true;
@@ -1519,12 +2496,34 @@ export async function startBackendWorkbench(): Promise<void> {
           restore.addEventListener("click", (e) => {
             e.stopPropagation();
             void (async () => {
+              const previous = workspace.docs.find((current) => current.id === doc.id) ?? doc;
+              const optimistic = {
+                ...previous,
+                updatedAt: new Date().toISOString(),
+              };
+              workspace = applyOptimisticRestoreState(workspace, doc.id, optimistic.updatedAt);
+              const restored = workspace.docs.find((current) => current.id === doc.id);
+              if (!restored) return;
+              localCollaborativeDocCache.set(doc.id, restored);
+              if (active.id === doc.id) {
+                active = restored;
+              }
+              renderAll();
               try {
+                releaseDocSaveBlocksForItem(doc.id);
                 replaceDoc(await session.restoreItem(doc.id));
+                markDocHydrated(doc.id);
                 renderAll();
                 scheduleTreeRefresh();
                 saveStatus(saveStatusEl, t("doc.restored"));
               } catch (err) {
+                if (shouldQueueAsOfflinePending(err)) {
+                  await queueOfflineDeleteAction(doc.id, "restore");
+                  return;
+                }
+                blockDocSavesForItem(doc.id);
+                replaceDoc(previous);
+                renderAll();
                 notifyError(err);
               }
             })();
@@ -1538,18 +2537,28 @@ export async function startBackendWorkbench(): Promise<void> {
             e.stopPropagation();
             void (async () => {
               try {
-                const full = await session.loadItem(doc.id);
+                const full = workspace.docs.find((current) => current.id === doc.id) ?? doc;
+                blockDocSavesForItem(doc.id);
+                removeDocById(doc.id);
+                syncEditorWithActive();
+                renderAll();
                 await session.hardDeleteItem(doc.id);
                 if (imageSync) {
                   await imageSync.updateReferences(full.markdown ?? "", "").catch(() => undefined);
                 }
                 removeCollaborativeSnapshot(collaborativeMarkdownSnapshotKey(workspaceId, doc.id));
-                removeDocById(doc.id);
-                syncEditorWithActive();
-                renderAll();
                 scheduleTreeRefresh();
                 saveStatus(saveStatusEl, t("doc.hardDeleted"));
               } catch (err) {
+                if (shouldQueueAsOfflinePending(err)) {
+                  removeCollaborativeSnapshot(collaborativeMarkdownSnapshotKey(workspaceId, doc.id));
+                  await queueOfflineDeleteAction(doc.id, "hard-delete");
+                  return;
+                }
+                replaceDoc(doc);
+                releaseDocSaveBlocksForItem(doc.id);
+                syncEditorWithActive();
+                renderAll();
                 notifyError(err);
               }
             })();
@@ -1565,13 +2574,27 @@ export async function startBackendWorkbench(): Promise<void> {
           del.addEventListener("click", (e) => {
             e.stopPropagation();
             void (async () => {
+              const snapshot = snapshotWorkspaceState();
               try {
-                await session.trashItem(doc.id);
-                replaceDoc(await session.loadItem(doc.id));
+                blockDocSavesForItem(doc.id);
+                applyOptimisticTrash(doc.id);
+                syncEditorWithActive();
+                renderAll();
+                const trashed = await session.trashItem(doc.id);
+                updateDocById(doc.id, () => trashed);
+                markDocHydrated(doc.id);
                 renderAll();
                 scheduleTreeRefresh();
                 saveStatus(saveStatusEl, t("doc.trashed"));
               } catch (err) {
+                if (shouldQueueAsOfflinePending(err)) {
+                  await queueOfflineDeleteAction(doc.id, "trash");
+                  return;
+                }
+                restoreWorkspaceState(snapshot);
+                releaseDocSaveBlocksForItem(doc.id);
+                syncEditorWithActive();
+                renderAll();
                 notifyError(err);
               }
             })();
@@ -1595,6 +2618,40 @@ export async function startBackendWorkbench(): Promise<void> {
     };
 
     const pendingDocSaves = new Map<string, PendingDocSave>();
+    const blockedDocSaveIds = new Set<string>();
+
+    const collectAffectedDocIds = (itemId: string): string[] => {
+      const affected = new Set<string>([itemId]);
+      let changed = true;
+      while (changed) {
+        changed = false;
+        for (const doc of workspace.docs) {
+          if (!doc.parentId || affected.has(doc.id) || !affected.has(doc.parentId)) continue;
+          affected.add(doc.id);
+          changed = true;
+        }
+      }
+      return [...affected];
+    };
+
+    const blockDocSavesForItem = (itemId: string): void => {
+      for (const affectedId of collectAffectedDocIds(itemId)) {
+        discardPendingDocSave(pendingDocSaves, blockedDocSaveIds, affectedId, (timer) => window.clearTimeout(timer));
+        dirtyDocIds.delete(affectedId);
+        localCollaborativeDocCache.delete(affectedId);
+        void removeBackendDocDraft(workspaceId, affectedId, Number.MAX_SAFE_INTEGER).catch(() => undefined);
+      }
+    };
+
+    const releaseDocSaveBlock = (itemId: string): void => {
+      releasePendingDocSaveBlock(blockedDocSaveIds, itemId);
+    };
+
+    const releaseDocSaveBlocksForItem = (itemId: string): void => {
+      for (const affectedId of collectAffectedDocIds(itemId)) {
+        releaseDocSaveBlock(affectedId);
+      }
+    };
 
     const scheduleDocSave = (
       itemId: string,
@@ -1605,6 +2662,13 @@ export async function startBackendWorkbench(): Promise<void> {
       nextMarkdown: string,
       delayMs: number,
     ): void => {
+      if (isCreatePendingDocId(itemId)) {
+        return;
+      }
+      const currentDoc = workspace.docs.find((doc) => doc.id === itemId);
+      if (shouldSkipDocSave(blockedDocSaveIds, itemId, currentDoc)) {
+        return;
+      }
       const pending = pendingDocSaves.get(itemId);
       const mergedPatch: OfflineMutationPatch = {
         ...(pending?.patch ?? {}),
@@ -1632,6 +2696,20 @@ export async function startBackendWorkbench(): Promise<void> {
         pendingDocSaves.delete(itemId);
         void (async () => {
           const draftPatch = current.patch;
+          if (draftPatch.content !== undefined) {
+            queueSaveRequest({
+              itemId,
+              seq: 0,
+              expectedRevision: current.expectedRevision,
+              patch: draftPatch,
+              nextTitle: current.nextTitle,
+              previousMarkdown: current.previousMarkdown,
+              nextMarkdown: current.nextMarkdown,
+              doneText: t("status.saved"),
+              usesDraftQueue: false,
+            });
+            return;
+          }
           if (draftPatch.markdown !== undefined) {
             queueSaveRequest({
               itemId,
@@ -1663,13 +2741,38 @@ export async function startBackendWorkbench(): Promise<void> {
     };
 
     editor = createWysiwygEditor({
-      container: editorRoot,
-      initialMarkdown: active.kind === "welcome" ? buildLocalizedWelcomeMarkdown(workspace) : active.markdown,
+      container: markdownHost,
+      initialMarkdown: active.kind === "welcome" ? buildLocalizedWelcomeMarkdown(workspace) : active.kind === "page" ? active.markdown : "",
+      collaboratorBinding:
+        active.kind === "page" && active.id !== WELCOME_DOC_ID
+          ? {
+              collaborator: getCollaboratorForDoc(active),
+              storageKey: collaborativeMarkdownSnapshotKey(workspaceId, active.id),
+            }
+          : undefined,
       onChange: (markdown) => {
         if (active.kind !== "page" || active.id === WELCOME_DOC_ID) return;
         const itemId = active.id;
+        const previousMarkdown = localCollaborativeDocCache.get(itemId)?.markdown
+          ?? workspace.docs.find((doc) => doc.id === itemId)?.markdown
+          ?? "";
+        if (collaborativeMarkdownDocs.has(itemId)) {
+          const nextMarkdown = markdown;
+          const nextDoc = updateDocById(itemId, (doc) => ({
+            ...doc,
+            markdown: nextMarkdown,
+            updatedAt: new Date().toISOString(),
+          }));
+          if (nextDoc) {
+            localCollaborativeDocCache.set(itemId, nextDoc);
+          }
+          void imageSync?.updateReferences(previousMarkdown, nextMarkdown).catch(() => undefined);
+          if (active.id === itemId) {
+            saveStatus(saveStatusEl, t("status.saved"));
+          }
+          return;
+        }
         const expectedRevision = active.revision;
-        const previousMarkdown = workspace.docs.find((doc) => doc.id === itemId)?.markdown ?? "";
         commitLocalEdit(itemId, { markdown });
         scheduleDocSave(itemId, expectedRevision, { markdown }, active.title, previousMarkdown, markdown, 240);
       },
@@ -1690,22 +2793,16 @@ export async function startBackendWorkbench(): Promise<void> {
     });
 
     titleInput.addEventListener("input", () => {
-      if (active.kind !== "page" || active.id === WELCOME_DOC_ID) return;
+      if (active.kind === "welcome" || active.id === ROOT_FOLDER_ID || active.kind === "folder") return;
       const itemId = active.id;
       const expectedRevision = active.revision;
-      const title = titleInput.value.trim() || t("editor.untitledDocument");
+      const title = normalizeDocTitleInput(titleInput.value, defaultTitleForKind(active.kind));
       const currentMarkdown = workspace.docs.find((doc) => doc.id === itemId)?.markdown ?? "";
       commitLocalEdit(itemId, { title });
       renderAll();
       scheduleDocSave(itemId, expectedRevision, { title }, title, currentMarkdown, currentMarkdown, 400);
     });
     searchInput.addEventListener("input", () => renderAll());
-    historyRefreshBtn.addEventListener("click", () => void refreshHistoryPanel());
-
-    historyDrawerOpenBtn.addEventListener("click", () => {
-      openHistoryDrawer();
-      void refreshHistoryPanel();
-    });
 
     const refreshWorkspaceInfoPanel = async (): Promise<void> => {
       workspaceInfoIdEl.textContent = workspaceId;
@@ -1713,15 +2810,16 @@ export async function startBackendWorkbench(): Promise<void> {
       workspaceInfoUserIdEl.title = identity.userId;
       workspaceInfoProfileStatus.textContent = "";
       workspaceInfoWorkspaceNameStatus.textContent = "";
-      const workspaceNameDoc = findWorkspaceNameDoc(treeData.items);
-      workspaceInfoWorkspaceNameInput.disabled = workspaceNameDoc === null;
-      workspaceInfoSaveWorkspaceNameBtn.disabled = workspaceNameDoc === null;
-      workspaceInfoWorkspaceNameInput.value = workspaceNameDoc?.title?.trim() || "";
+      workspaceInfoWorkspaceNameInput.disabled = false;
+      workspaceInfoSaveWorkspaceNameBtn.disabled = false;
+      workspaceInfoWorkspaceNameInput.value = workspace.workspaceTitle.trim();
       try {
-        const r = await session.client.getProfile(workspaceId);
-        workspaceInfoNicknameInput.value = r.profile.nickname ?? "";
-        workspaceInfoProfileStatus.textContent = t("drawer.profile.currentDisplayName", {
-          displayName: r.profile.display_name,
+        await refreshJoinedMembers();
+        const serverMembers = await session.listMembers().catch(() => []);
+        const currentMember = serverMembers.find((member) => member.user_id === identity.userId);
+        workspaceInfoNicknameInput.value = participantNickname || currentMember?.nickname || "";
+        workspaceInfoProfileStatus.textContent = t("drawer.profile.currentNickname", {
+          nickname: workspaceInfoNicknameInput.value.trim() || currentMember?.nickname || "",
         });
       } catch {
         workspaceInfoProfileStatus.textContent = t("drawer.profile.loadingNicknameFailed");
@@ -1729,7 +2827,6 @@ export async function startBackendWorkbench(): Promise<void> {
     };
 
     rerenderActiveWorkbench = renderAll;
-    refreshActiveHistoryPanel = refreshHistoryPanel;
     refreshActiveWorkspaceInfoPanel = refreshWorkspaceInfoPanel;
 
     const copyViaClipboard = async (text: string): Promise<void> => {
@@ -1756,13 +2853,43 @@ export async function startBackendWorkbench(): Promise<void> {
       void (async () => {
         workspaceInfoProfileStatus.textContent = t("drawer.profile.saveInProgress");
         try {
-          const r = await session.client.updateProfile(workspaceId, {
-            nickname: workspaceInfoNicknameInput.value.trim(),
-          });
-          workspaceInfoProfileStatus.textContent = t("drawer.profile.savedDisplayName", {
-            displayName: r.profile.display_name,
-          });
-          saveStatus(saveStatusEl, t("drawer.profile.savedDisplayName", { displayName: r.profile.display_name }));
+          const nextNickname = workspaceInfoNicknameInput.value.trim();
+          if (!nextNickname) {
+            workspaceInfoProfileStatus.textContent = "";
+            workspaceInfoNicknameInput.focus();
+            return;
+          }
+          participantNickname = nextNickname;
+          await setWorkspaceNickname(workspaceId, identity.userId, nextNickname);
+          try {
+            await session.updateProfile(nextNickname);
+          } catch {
+            // The local nickname is the source of truth for presence and inbox mentions.
+          }
+          imageSync?.announcePresence(nextNickname);
+          communityState = {
+            ...communityState,
+            members: [
+              ...communityState.members.filter((member) => member.sessionId !== sessionId),
+              {
+                sessionId,
+                displayName: nextNickname,
+                userId: identity.userId,
+                joinedAt:
+                  communityState.members.find((member) => member.sessionId === sessionId)?.joinedAt ??
+                  new Date().toISOString(),
+              },
+            ],
+          };
+          joinedMembers = await upsertWorkspaceJoinedMembers(localStorageArea, workspaceId, [{
+            displayName: nextNickname,
+            userId: identity.userId,
+            source: "profile",
+          }]);
+          rebuildPeopleEntries();
+          renderInboxPanel();
+          workspaceInfoProfileStatus.textContent = t("drawer.profile.savedNickname");
+          saveStatus(saveStatusEl, t("drawer.profile.savedNickname"));
         } catch (e) {
           workspaceInfoProfileStatus.textContent = "";
           notifyError(e);
@@ -1772,25 +2899,20 @@ export async function startBackendWorkbench(): Promise<void> {
 
     workspaceInfoSaveWorkspaceNameBtn.addEventListener("click", () => {
       void (async () => {
-        const workspaceNameDoc = findWorkspaceNameDoc(treeData.items);
-        if (!workspaceNameDoc) {
-          workspaceInfoWorkspaceNameStatus.textContent = t("drawer.profile.noNameablePage");
-          return;
-        }
         const nextTitle = workspaceInfoWorkspaceNameInput.value.trim();
-        const normalized = nextTitle || t("editor.untitled");
         workspaceInfoWorkspaceNameStatus.textContent = t("drawer.profile.saveInProgress");
         try {
-          await session.saveItem(workspaceNameDoc.id, {
-            title: normalized,
-            expectedRevision: workspaceNameDoc.revision,
-          });
+          const savedTitle = await session.updateWorkspaceTitle(nextTitle);
+          workspace = {
+            ...workspace,
+            workspaceTitle: savedTitle,
+          };
           scheduleTreeRefresh();
           renderAll();
-          const nextLabel = formatRecentWorkspaceListLabel(treeData.items, t("editor.untitled"));
+          const nextLabel = savedTitle;
           await touchRecentWorkspaceEntry(workspaceId, nextLabel);
           void renderGateRecents();
-          workspaceInfoWorkspaceNameInput.value = nextLabel === t("editor.untitled") ? "" : nextLabel;
+          workspaceInfoWorkspaceNameInput.value = nextLabel;
           workspaceInfoWorkspaceNameStatus.textContent = t("drawer.profile.workspaceNameSaved", {
             workspaceName: nextLabel,
           });
@@ -1807,31 +2929,199 @@ export async function startBackendWorkbench(): Promise<void> {
       return active.parentId ?? ROOT_FOLDER_ID;
     };
 
-    const createAndOpen = async (kind: "page" | "folder", title: string): Promise<void> => {
+    const createOptimisticDoc = (kind: BackendWorkspaceItemKind, title: string, parentId: string | null): WorkspaceDoc => {
+      const now = new Date().toISOString();
+      const content = kind === "table"
+        ? normalizeStructuredDocumentContent("table", createDefaultTableContent())
+        : kind === "board"
+          ? normalizeStructuredDocumentContent("board", createDefaultBoardContent())
+          : null;
+      return {
+        id: createClientDocId(),
+        kind,
+        title,
+        markdown: "",
+        content,
+        revision: 0,
+        updatedAt: now,
+        lastVisitedAt: now,
+        parentId,
+        pinned: false,
+        inTrash: false,
+      };
+    };
+
+    const insertOptimisticDoc = (doc: WorkspaceDoc): void => {
+      creatingDocIds.add(doc.id);
+      active = doc;
+      localCollaborativeDocCache.set(doc.id, doc);
+      workspace = {
+        ...workspace,
+        docs: [...workspace.docs, doc],
+        activeDocId: doc.id,
+      };
+    };
+
+    const replaceOptimisticDoc = (optimisticId: string, created: WorkspaceDoc): void => {
+      creatingDocIds.delete(optimisticId);
+      dirtyDocIds.delete(optimisticId);
+      localCollaborativeDocCache.delete(optimisticId);
+      hydratedDocIds.delete(optimisticId);
+      localCollaborativeDocCache.set(created.id, created);
+      workspace = {
+        ...workspace,
+        docs: workspace.docs.map((doc) => (doc.id === optimisticId ? created : doc)),
+        activeDocId: workspace.activeDocId === optimisticId ? created.id : workspace.activeDocId,
+      };
+      if (active.id === optimisticId) {
+        active = created;
+      }
+    };
+
+    const rollbackOptimisticDoc = (optimisticId: string, previousActive: WorkspaceDoc): void => {
+      creatingDocIds.delete(optimisticId);
+      dirtyDocIds.delete(optimisticId);
+      clearOptimisticCreatePatch(optimisticCreatePatches, optimisticId);
+      localCollaborativeDocCache.delete(optimisticId);
+      hydratedDocIds.delete(optimisticId);
+      workspace = {
+        ...workspace,
+        docs: workspace.docs.filter((doc) => doc.id !== optimisticId),
+        activeDocId: previousActive.id,
+      };
+      active = workspace.docs.find((doc) => doc.id === previousActive.id) ?? previousActive;
+    };
+
+    const createAndOpen = async (kind: BackendWorkspaceItemKind, title: string): Promise<void> => {
+      const parentId = currentParentId();
+      const previousActive = active;
+      const optimistic = createOptimisticDoc(kind, title, parentId);
+      insertOptimisticDoc(optimistic);
+      syncEditorWithActive();
+      renderAll();
+      saveStatus(saveStatusEl, i18n.locale === "zh-CN" ? "?????" : "Creating?");
       try {
-        const created = await session.createItem(kind, title, currentParentId());
-        replaceDoc(await hydrateDocWithLocalDraft(hydrateDocWithCollaborativeSnapshot(created)));
+        const created = await session.createItem(kind, title, parentId, optimistic.id);
+        markDocHydrated(created.id);
+        if (created.kind === "page") {
+          const promoted = promoteOptimisticCreateDoc(optimisticCreatePatches, optimistic.id, created);
+          replaceOptimisticDoc(optimistic.id, promoted.doc);
+          if (promoted.patch) {
+            if (promoted.patch.markdown !== undefined) {
+              const collaborator = getCollaboratorForDoc(promoted.doc);
+              if (collaborator.getMarkdown() !== promoted.patch.markdown) {
+                collaborator.applyLocalMarkdown(promoted.patch.markdown);
+              }
+              saveCollaborativeSnapshot(
+                collaborativeMarkdownSnapshotKey(workspaceId, promoted.doc.id),
+                collaborator.encodeUpdate(),
+              );
+            }
+            commitLocalEdit(promoted.doc.id, promoted.patch);
+            const nextTitle = promoted.patch.title ?? promoted.doc.title;
+            const nextMarkdown = promoted.patch.markdown ?? promoted.doc.markdown;
+            scheduleDocSave(
+              promoted.doc.id,
+              promoted.doc.revision,
+              promoted.patch,
+              nextTitle,
+              created.markdown,
+              nextMarkdown,
+              180,
+            );
+          }
+        } else {
+          const promoted = promoteOptimisticCreateDoc(optimisticCreatePatches, optimistic.id, {
+            ...created,
+            content: normalizedContentForDoc(created),
+          });
+          replaceOptimisticDoc(optimistic.id, promoted.doc);
+          if (promoted.patch) {
+            const collaborator = getStructuredCollaboratorForDoc(promoted.doc);
+            if (promoted.patch.content) {
+              const stagedContent = normalizeStructuredDocumentContent(
+                promoted.doc.kind === "table" ? "table" : "board",
+                promoted.patch.content,
+              );
+              collaborator.applyLocalContent(stagedContent);
+              saveCollaborativeSnapshot(
+                collaborativeMarkdownSnapshotKey(workspaceId, promoted.doc.id),
+                collaborator.encodeUpdate(),
+              );
+            }
+            const syncedContent = promoted.patch.content ? collaborator.getContent() : undefined;
+            const savePatch: OfflineMutationPatch = {
+              ...promoted.patch,
+              content: syncedContent ?? promoted.patch.content,
+            };
+            commitLocalEdit(promoted.doc.id, savePatch);
+            scheduleDocSave(
+              promoted.doc.id,
+              promoted.doc.revision,
+              savePatch,
+              savePatch.title ?? promoted.doc.title,
+              "",
+              "",
+              180,
+            );
+          }
+        }
         syncEditorWithActive();
         renderAll();
         scheduleTreeRefresh();
-        saveStatus(saveStatusEl, kind === "folder" ? t("doc.createdFolder") : t("doc.createdFile"));
+        saveStatus(
+          saveStatusEl,
+          kind === "folder"
+            ? t("doc.createdFolder")
+            : kind === "table"
+              ? t("doc.createdTable")
+              : kind === "board"
+                ? t("doc.createdBoard")
+                : t("doc.createdFile"),
+        );
       } catch (e) {
+        rollbackOptimisticDoc(optimistic.id, previousActive);
+        syncEditorWithActive();
+        renderAll();
         notifyError(e);
       }
     };
 
-    newFileBtn.addEventListener("click", () => void createAndOpen("page", t("editor.untitledPage")));
+    newFileBtn.addEventListener("click", () => void createAndOpen("page", defaultTitleForKind("page")));
+    newTableBtn.addEventListener("click", () => void createAndOpen("table", defaultTitleForKind("table")));
+    newBoardBtn.addEventListener("click", () => void createAndOpen("board", defaultTitleForKind("board")));
     newFolderBtn.addEventListener("click", () => void createAndOpen("folder", t("editor.untitledFolder")));
 
     pinBtn.addEventListener("click", () => {
       void (async () => {
         if (pinBtn.disabled) return;
+        const itemId = active.id;
+        const previousDoc = workspace.docs.find((doc) => doc.id === itemId);
+        if (!previousDoc) return;
+        const nextPinned = !previousDoc.pinned;
+        const optimisticUpdatedAt = new Date().toISOString();
+        workspace = applyOptimisticPinned(workspace, itemId, nextPinned, optimisticUpdatedAt);
+        const optimistic = workspace.docs.find((doc) => doc.id === itemId);
+        if (!optimistic) return;
+        localCollaborativeDocCache.set(itemId, optimistic);
+        if (active.id === itemId) {
+          active = optimistic;
+        }
+        renderAll();
+        saveStatus(saveStatusEl, nextPinned ? t("doc.pinned") : t("doc.unpinned"));
         try {
-          replaceDoc(await session.setPinned(active.id, !active.pinned));
-          renderAll();
+          const saved = await session.setPinned(itemId, nextPinned);
+          markDocHydrated(itemId);
+          updateDocById(itemId, (doc) => ({
+            ...doc,
+            pinned: saved.pinned,
+            revision: saved.revision,
+            updatedAt: saved.updatedAt,
+          }));
           scheduleTreeRefresh();
-          saveStatus(saveStatusEl, active.pinned ? t("doc.pinned") : t("doc.unpinned"));
         } catch (e) {
+          updateDocById(itemId, () => previousDoc);
+          renderAll();
           notifyError(e);
         }
       })();
@@ -1864,18 +3154,35 @@ export async function startBackendWorkbench(): Promise<void> {
     deleteBtn.addEventListener("click", () => {
       void (async () => {
         if (deleteBtn.disabled) return;
+        const itemId = active.id;
+        const previous = workspace.docs.find((doc) => doc.id === itemId);
+        if (!previous) return;
+        const snapshot = snapshotWorkspaceState();
+        blockDocSavesForItem(itemId);
+        applyOptimisticTrash(itemId);
+        syncEditorWithActive();
+        renderAll();
         try {
-          await session.trashItem(active.id);
-          replaceDoc(await session.loadItem(active.id));
+          const trashed = await session.trashItem(itemId);
+          updateDocById(trashed.id, () => trashed);
           renderAll();
           scheduleTreeRefresh();
           saveStatus(saveStatusEl, t("doc.trashed"));
         } catch (e) {
+          if (shouldQueueAsOfflinePending(e)) {
+            await queueOfflineDeleteAction(itemId, "trash");
+            return;
+          }
+          restoreWorkspaceState(snapshot);
+          releaseDocSaveBlocksForItem(itemId);
+          syncEditorWithActive();
+          renderAll();
           notifyError(e);
         }
       })();
     });
 
+    syncEditorWithActive();
     renderAll();
     void flushOfflineMutations();
 
@@ -1883,7 +3190,17 @@ export async function startBackendWorkbench(): Promise<void> {
 
     mounted = true;
     showWorkbench();
+    if (active.kind === "table" || active.kind === "board") {
+      const cached = localCollaborativeDocCache.get(active.id) ?? active;
+      hydrateStructuredDocInPlace(active, cached);
+    }
     void pullQuota();
+    if (workspaceSyncTimer !== undefined) {
+      window.clearInterval(workspaceSyncTimer);
+    }
+    workspaceSyncTimer = window.setInterval(() => {
+      void persistRefreshTree().catch(() => undefined);
+    }, 15_000);
 
     void (async () => {
       await touchRecentWorkspaceEntry(workspaceId, recentListLabel);
@@ -1909,6 +3226,7 @@ export async function startBackendWorkbench(): Promise<void> {
         });
         await mountWithPassword(created.workspace.workspace_id, password, title, {
           active_item_id: created.active_item_id,
+          workspace_title: created.workspace_title,
           items: created.items,
         });
       } catch (e) {
@@ -1945,7 +3263,13 @@ export async function startBackendWorkbench(): Promise<void> {
     })();
   });
 
+  createWorkspaceBtn.addEventListener("click", () => {
+    showGate("setup");
+  });
+
   lockWorkspaceBtn.addEventListener("click", () => {
+    tableView?.destroy?.();
+    boardView?.destroy?.();
     editor?.destroy();
     imageSync?.disconnect();
     imageSync = undefined;
@@ -1954,6 +3278,11 @@ export async function startBackendWorkbench(): Promise<void> {
 
   window.addEventListener("beforeunload", () => {
     window.clearInterval(healthTimer);
+    if (workspaceSyncTimer !== undefined) {
+      window.clearInterval(workspaceSyncTimer);
+    }
+    tableView?.destroy?.();
+    boardView?.destroy?.();
     editor?.destroy();
     imageSync?.disconnect();
   });

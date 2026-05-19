@@ -1,8 +1,9 @@
-import { STORAGE_KEYS } from "@/shared/storage-keys";
+import { STORAGE_KEYS, type WorkspaceDocContent } from "@/shared/storage-keys";
 
 export type OfflineMutationPatch = {
   title?: string;
   markdown?: string;
+  content?: WorkspaceDocContent | null;
 };
 
 export type OfflineMutation = {

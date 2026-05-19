@@ -23,6 +23,8 @@ function mapBackendApiError(e: BackendApiError): string {
       return "未找到对应资源。";
     case "conflict":
       return "与其他修改冲突，请刷新或同步后重试。";
+    case "workspace_create_limit_exceeded":
+      return "每个用户最多只能创建 5 个工作区。";
     case "http_error":
       return e.message || "网络请求失败。";
     default:

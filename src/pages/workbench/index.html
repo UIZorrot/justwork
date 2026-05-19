@@ -4,7 +4,6 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title data-i18n="app.workbench.title">JustWork Workspace</title>
-    <link rel="icon" type="image/png" sizes="32x32" href="/icons/icon-32.png" />
     <link rel="stylesheet" href="./workbench.css" />
   </head>
   <body>
@@ -32,15 +31,15 @@
           Profile
         </button>
         <button
-          id="history-drawer-open-btn"
+          id="workspace-message-drawer-open-btn"
           class="ghost-btn"
           type="button"
           hidden
           aria-expanded="false"
-          aria-controls="history-drawer"
-          data-i18n="drawer.history.title"
+          aria-controls="workspace-message-drawer"
         >
-          History
+          <span data-i18n="drawer.message.title">Inbox</span>
+          <span id="workspace-message-unread-badge" class="topbar-pill" hidden>0</span>
         </button>
         <button id="lock-workspace-btn" class="ghost-btn" type="button" hidden data-i18n="status.locked">Locked</button>
         <div class="language-switcher" id="language-switcher">
@@ -119,6 +118,9 @@
             <span class="gate-btn-label" data-i18n="gate.unlock.button">Unlock</span>
             <span class="gate-btn-spinner" aria-hidden="true"></span>
           </button>
+          <button id="create-workspace-btn" class="gate-secondary-btn" type="button" data-i18n="gate.unlock.createWorkspace">
+            Create a new workspace
+          </button>
         </div>
 
         <div id="gate-recent-section" class="gate-recent-section">
@@ -148,19 +150,36 @@
         </div>
         <div class="sidebar-section">
           <button id="new-file-btn" class="sidebar-create-btn has-icon" type="button">
-            <span class="sidebar-btn-icon" aria-hidden="true">📄</span><span data-i18n="sidebar.newFile">New file</span>
+            <span class="sidebar-btn-icon" aria-hidden="true">📄</span><span data-i18n="sidebar.newFile">New document</span>
+          </button>
+          <button id="new-table-btn" class="sidebar-create-btn has-icon" type="button">
+            <span class="sidebar-btn-icon" aria-hidden="true">▦</span><span data-i18n="sidebar.newTable">New sheet</span>
+          </button>
+          <button id="new-board-btn" class="sidebar-create-btn has-icon" type="button">
+            <span class="sidebar-btn-icon" aria-hidden="true">☰</span><span data-i18n="sidebar.newBoard">New table</span>
           </button>
           <button id="new-folder-btn" class="sidebar-create-btn has-icon" type="button">
             <span class="sidebar-btn-icon" aria-hidden="true">📁</span><span data-i18n="sidebar.newFolder">New folder</span>
           </button>
         </div>
-        <div class="sidebar-section">
+        <div class="sidebar-divider" aria-hidden="true"></div>
+        <div class="sidebar-section sidebar-section--actions">
           <button id="pin-btn" class="sidebar-create-btn has-icon" type="button" hidden>
-            <span class="sidebar-btn-icon" aria-hidden="true">📌</span><span data-i18n="sidebar.pin">Pin</span>
+            <span class="sidebar-btn-icon" aria-hidden="true">⬆️</span><span data-i18n="sidebar.pin">Pin</span>
+          </button>
+          <button id="share-btn" class="sidebar-create-btn has-icon" type="button" hidden>
+            <span class="sidebar-btn-icon" aria-hidden="true">🔗</span><span data-i18n="sidebar.share">Share</span>
           </button>
           <button id="delete-btn" class="sidebar-create-btn has-icon" type="button" hidden>
             <span class="sidebar-btn-icon" aria-hidden="true">🗑</span><span data-i18n="sidebar.delete">Delete</span>
           </button>
+        </div>
+        <div class="sidebar-section">
+          <div class="sidebar-title-row">
+            <div class="sidebar-title" data-i18n="sidebar.people">Workspace people</div>
+            <span id="workspace-people-count" class="sidebar-count-pill">0</span>
+          </div>
+          <div id="workspace-people-list" class="workspace-people-list" aria-live="polite"></div>
         </div>
         <div class="sidebar-section">
           <div class="sidebar-title" data-i18n="sidebar.pinned">Pinned</div>
@@ -178,35 +197,35 @@
 
       <section class="content-stage">
         <div class="page-meta">
-          <div class="meta-row"><span class="page-tag-soft" data-i18n="editor.pageTag">Page</span></div>
+          <div class="meta-row"><span id="page-kind-tag" class="page-tag-soft" data-i18n="editor.pageTag">Page</span></div>
           <input id="doc-title-input" class="doc-title-input" value="Untitled document" aria-label="Document title" data-i18n-aria-label="editor.titleInput" />
         </div>
         <div id="editor-root" class="doc-editor-host" aria-label="Document editor" data-i18n-aria-label="app.sidepanel.editorLabel"></div>
       </section>
     </main>
 
-    <div id="workspace-info-drawer-root" class="history-drawer-root" aria-hidden="true">
-      <div id="workspace-info-drawer-backdrop" class="history-drawer-backdrop" tabindex="-1"></div>
+    <div id="workspace-info-drawer-root" class="workspace-info-drawer-root" aria-hidden="true">
+      <div id="workspace-info-drawer-backdrop" class="workspace-info-drawer-backdrop" tabindex="-1"></div>
       <aside
         id="workspace-info-drawer"
-        class="history-drawer"
+        class="workspace-info-drawer"
         role="dialog"
         aria-modal="true"
         aria-labelledby="workspace-info-drawer-title"
       >
-        <div class="history-drawer-header">
-          <h2 id="workspace-info-drawer-title" class="history-drawer-title" data-i18n="drawer.profile.title">Profile</h2>
+        <div class="workspace-info-drawer-header">
+          <h2 id="workspace-info-drawer-title" class="workspace-info-drawer-title" data-i18n="drawer.profile.title">Profile</h2>
           <button
             id="workspace-info-drawer-close-btn"
             type="button"
-            class="history-drawer-close"
+            class="workspace-info-drawer-close"
             aria-label="Close"
             data-i18n-aria-label="common.close"
           >
             ×
           </button>
         </div>
-        <div class="history-drawer-body workspace-info-body">
+        <div class="workspace-info-drawer-body workspace-info-body">
           <section class="workspace-info-section">
             <h3 class="workspace-info-heading" data-i18n="drawer.profile.workspaceHeading">Workspace</h3>
             <h4 class="workspace-info-subheading" data-i18n="drawer.profile.workspaceIdHeading">Workspace ID</h4>
@@ -220,7 +239,7 @@
             <h4 class="workspace-info-subheading workspace-info-subheading--spaced" data-i18n="drawer.profile.workspaceNameHeading">Workspace name</h4>
             <p class="workspace-info-desc">
               <span data-i18n-html="drawer.profile.workspaceNameDesc">
-                Used in the recent-workspaces list. Defaults to <span class="workspace-info-em">work_last4</span> and can be changed at any time.
+                Used in the recent-workspaces list. Defaults to <span class="workspace-info-em">work_last4</span>; spaces are saved as underscores, and can be changed at any time.
               </span>
             </p>
             <input
@@ -247,9 +266,9 @@
               <code id="workspace-info-user-id" class="workspace-info-code"></code>
               <button id="workspace-info-copy-user-id-btn" type="button" class="ghost-btn workspace-info-inline-btn" data-i18n="drawer.profile.copy">Copy</button>
             </div>
-            <h4 class="workspace-info-subheading workspace-info-subheading--spaced" data-i18n="drawer.profile.nicknameHeading">Workspace display name</h4>
+            <h4 class="workspace-info-subheading workspace-info-subheading--spaced" data-i18n="drawer.profile.nicknameHeading">Workspace nickname</h4>
             <p class="workspace-info-desc" data-i18n="drawer.profile.nicknameDesc">
-              Stored on the server. The display name is the nickname plus an identity suffix and can be changed later.
+              Used for presence and inbox mentions in this workspace. It is stored locally and can be changed later.
             </p>
             <input
               id="workspace-info-nickname-input"
@@ -261,7 +280,7 @@
               placeholder="For example: Alice"
             />
             <button id="workspace-info-save-nickname-btn" type="button" class="ghost-btn workspace-info-save-btn" data-i18n="drawer.profile.saveNickname">
-              Save display name
+              Save nickname
             </button>
             <p id="workspace-info-profile-status" class="workspace-info-status" role="status"></p>
           </section>
@@ -269,27 +288,75 @@
       </aside>
     </div>
 
-    <div id="history-drawer-root" class="history-drawer-root" aria-hidden="true">
-      <div id="history-drawer-backdrop" class="history-drawer-backdrop" tabindex="-1"></div>
+    <div id="workspace-message-drawer-root" class="workspace-message-drawer-root" aria-hidden="true">
+      <div id="workspace-message-drawer-backdrop" class="workspace-message-drawer-backdrop" tabindex="-1"></div>
       <aside
-        id="history-drawer"
-        class="history-drawer"
+        id="workspace-message-drawer"
+        class="workspace-message-drawer"
         role="dialog"
         aria-modal="true"
-        aria-labelledby="history-drawer-title"
+        aria-labelledby="workspace-message-drawer-title"
       >
-        <div class="history-drawer-header">
-          <h2 id="history-drawer-title" class="history-drawer-title" data-i18n="drawer.history.title">Activity history</h2>
-          <div class="history-drawer-actions">
-            <button id="history-refresh-btn" type="button" class="ghost-btn" data-i18n="drawer.history.refresh">Refresh</button>
-            <button id="history-drawer-close-btn" type="button" class="history-drawer-close" aria-label="Close" data-i18n-aria-label="common.close">
-              ×
-            </button>
+        <div class="workspace-message-drawer-header">
+          <div>
+            <h2 id="workspace-message-drawer-title" class="workspace-message-drawer-title" data-i18n="drawer.message.title">Inbox</h2>
+            <p id="workspace-message-drawer-count" class="workspace-message-drawer-count">0 unread</p>
           </div>
+          <button
+            id="workspace-message-mark-read-btn"
+            type="button"
+            class="ghost-btn"
+          >
+            Mark all read
+          </button>
+          <button
+            id="workspace-message-drawer-close-btn"
+            type="button"
+            class="workspace-info-drawer-close"
+            aria-label="Close"
+            data-i18n-aria-label="common.close"
+          >
+            ×
+          </button>
         </div>
-        <div class="history-drawer-body">
-          <ul id="history-list" class="history-list" aria-label="Activity history" data-i18n-aria-label="drawer.history.ariaLabel" data-testid="history-list"></ul>
+        <div class="workspace-message-drawer-body">
+          <section class="workspace-message-section">
+            <h3 class="workspace-info-heading" data-i18n="drawer.message.membersHeading">Workspace people</h3>
+            <div id="workspace-message-members" class="workspace-message-members" aria-live="polite"></div>
+          </section>
+          <section class="workspace-message-section workspace-message-section--log">
+            <h3 class="workspace-info-heading" data-i18n="drawer.message.logHeading">Mentions</h3>
+            <div id="workspace-message-log" class="workspace-message-log" aria-live="polite"></div>
+          </section>
         </div>
+      </aside>
+    </div>
+
+    <div id="workspace-nickname-prompt-root" class="workspace-nickname-prompt-root" aria-hidden="true">
+      <div id="workspace-nickname-prompt-backdrop" class="workspace-nickname-prompt-backdrop"></div>
+      <aside
+        id="workspace-nickname-prompt"
+        class="workspace-nickname-prompt"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="workspace-nickname-prompt-title"
+      >
+        <h2 id="workspace-nickname-prompt-title" data-i18n="drawer.message.promptTitle">Choose your nickname</h2>
+        <p data-i18n="drawer.message.promptDesc">
+          This name is shown to other people in the workspace and used for @mentions.
+        </p>
+        <input
+          id="workspace-nickname-prompt-input"
+          class="gate-input workspace-info-input"
+          type="text"
+          maxlength="120"
+          autocomplete="nickname"
+          data-i18n-placeholder="drawer.profile.nicknamePlaceholder"
+          placeholder="For example: Alice"
+        />
+        <button id="workspace-nickname-prompt-save-btn" type="button" class="ghost-btn" data-i18n="drawer.message.promptSave">
+          Continue
+        </button>
       </aside>
     </div>
 

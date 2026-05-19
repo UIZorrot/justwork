@@ -1,4 +1,5 @@
 import { STORAGE_KEYS } from "@/shared/storage-keys";
+import { getLocalStorageArea } from "@/shared/browser-platform";
 
 export const SUPPORTED_LOCALES = ["en", "zh-CN"] as const;
 export type Locale = (typeof SUPPORTED_LOCALES)[number];
@@ -22,6 +23,8 @@ const MESSAGES = {
     "status.online": "Online",
     "status.offline": "Offline",
     "status.saved": "Saved",
+    "status.loading": "Loading",
+    "status.creatingShare": "Creating share link...",
     "status.saving": "Saving",
     "status.synced": "Synced",
     "status.offlinePending": "Offline, waiting to sync",
@@ -44,17 +47,24 @@ const MESSAGES = {
     "gate.unlock.workspaceIdPlaceholder": "Workspace ID",
     "gate.unlock.passwordPlaceholder": "Workspace password",
     "gate.unlock.button": "Unlock",
+    "gate.unlock.createWorkspace": "Create a new workspace",
     "gate.recent.title": "Recent workspaces",
     "gate.recent.empty": "No records yet. Created or unlocked workspaces will appear here.",
     "gate.recent.showMore": "Show more",
     "gate.recent.collapse": "Collapse",
     "gate.recent.remove": "Remove from list",
     "sidebar.searchPlaceholder": "Search / jump to page",
-    "sidebar.newFile": "New file",
+    "sidebar.newFile": "New document",
+    "sidebar.newTable": "New sheet",
+    "sidebar.newBoard": "New table",
     "sidebar.newFolder": "New folder",
     "sidebar.pin": "Pin",
+    "sidebar.share": "Share",
     "sidebar.unpin": "Unpin",
     "sidebar.delete": "Delete",
+    "sidebar.people": "Workspace people",
+    "sidebar.peopleEmpty": "No one has joined this workspace yet.",
+    "sidebar.peopleMention": " ",
     "sidebar.pinned": "Pinned",
     "sidebar.pages": "Pages",
     "sidebar.trash": "Trash",
@@ -62,6 +72,8 @@ const MESSAGES = {
     "editor.pageTag": "Page",
     "editor.untitledDocument": "Untitled document",
     "editor.untitledPage": "Untitled page",
+    "editor.untitledTable": "Untitled sheet",
+    "editor.untitledBoard": "Untitled table",
     "editor.untitled": "Untitled",
     "editor.untitledFolder": "Untitled folder",
     "editor.titleInput": "Document title",
@@ -75,39 +87,38 @@ const MESSAGES = {
     "drawer.profile.copy": "Copy",
     "drawer.profile.workspaceNameHeading": "Workspace name",
     "drawer.profile.workspaceNameDesc":
-      "Used in the recent-workspaces list. Defaults to <span class=\"workspace-info-em\">work_last4</span> and can be changed at any time.",
+      "Used in the recent-workspaces list. Defaults to <span class=\"workspace-info-em\">work_last4</span>; spaces are saved as underscores, and can be changed at any time.",
     "drawer.profile.workspaceNamePlaceholder": "For example: Project docs",
     "drawer.profile.saveWorkspaceName": "Save workspace name",
     "drawer.profile.personalHeading": "Personal info",
     "drawer.profile.userIdHeading": "User ID",
     "drawer.profile.userIdDesc":
       "A local identity used for encryption and backend linkage. It is not shown in the navigation bar.",
-    "drawer.profile.nicknameHeading": "Workspace display name",
+    "drawer.profile.nicknameHeading": "Workspace nickname",
     "drawer.profile.nicknameDesc":
-      "Stored on the server. The display name is the nickname plus an identity suffix and can be changed later.",
+      "Used for presence and inbox mentions in this workspace. It is stored locally and can be changed later.",
     "drawer.profile.nicknamePlaceholder": "For example: Alice",
-    "drawer.profile.saveNickname": "Save display name",
-    "drawer.profile.currentDisplayName": "Current display name: {{displayName}}",
-    "drawer.profile.loadingNicknameFailed": "Unable to load the server nickname for now. Check whether the backend is online.",
+    "drawer.profile.saveNickname": "Save nickname",
+    "drawer.profile.currentNickname": "Current nickname: {{nickname}}",
+    "drawer.profile.loadingNicknameFailed": "Unable to load the nickname for now. Check whether the backend is online.",
     "drawer.profile.saveInProgress": "Saving...",
-    "drawer.profile.savedDisplayName": "Saved. Display name: {{displayName}}",
+    "drawer.profile.savedNickname": "Saved.",
     "drawer.profile.workspaceNameSaved": "Workspace name saved: {{workspaceName}}",
     "drawer.profile.noNameablePage": "No page is available for naming right now.",
-    "drawer.history.title": "Activity history",
-    "drawer.history.refresh": "Refresh",
-    "drawer.history.ariaLabel": "Activity history",
-    "drawer.history.itemLabel": "Document",
-    "drawer.history.eventLabel": "Event",
-    "history.modify": "Modify document",
-    "history.create": "Create item",
-    "history.move": "Move item",
-    "history.pin": "Pin state change",
-    "history.trash": "Move to trash",
-    "history.restore": "Restore from trash",
-    "history.hardDelete": "Hard delete",
-    "history.patch": "Patch replace",
-    "history.revert": "History revert",
+    "drawer.message.title": "Inbox",
+    "drawer.message.membersHeading": "Workspace people",
+    "drawer.message.membersEmpty": "No people found in this workspace yet.",
+    "drawer.message.logHeading": "Mentions",
+    "drawer.message.empty": "No inbox items yet.",
+    "drawer.message.inputPlaceholder": "Inbox",
+    "drawer.message.send": "Open",
+    "drawer.message.promptTitle": "Choose your nickname",
+    "drawer.message.promptDesc":
+      "This name is shown to other people in the workspace and used for @mentions.",
+    "drawer.message.promptSave": "Continue",
     "doc.folder": "Folder",
+    "doc.table": "Sheet",
+    "doc.board": "Table",
     "doc.welcome": "Welcome",
     "doc.protected": "Protected item",
     "doc.welcomeMarkdownTitle": "Welcome to JustWork",
@@ -121,6 +132,8 @@ const MESSAGES = {
     "doc.deleteForever": "Delete",
     "doc.revert": "Revert",
     "doc.createdFile": "File created",
+    "doc.createdTable": "Sheet created",
+    "doc.createdBoard": "Table created",
     "doc.createdFolder": "Folder created",
     "doc.pinned": "Pinned",
     "doc.unpinned": "Unpinned",
@@ -131,6 +144,19 @@ const MESSAGES = {
     "doc.workspaceNameDefault": "work_last4",
     "doc.workspaceBackend": "Backend workspace",
     "doc.workspaceNameSaved": "Workspace name saved",
+    "structured.table.addColumn": "Add column",
+    "structured.table.addRow": "Add row",
+    "structured.table.deleteColumn": "Delete column",
+    "structured.table.deleteRow": "Delete row",
+    "structured.table.freezeHeader": "Freeze header",
+    "structured.board.addColumn": "Add column",
+    "structured.board.addCard": "Add card",
+    "structured.board.deleteColumn": "Delete column",
+    "structured.board.deleteCard": "Delete card",
+    "structured.board.addField": "Add field",
+    "structured.board.removeField": "Remove field",
+    "structured.board.template": "Template",
+    "structured.board.emptyCard": "Select a card to edit",
     "toast.conflict": "Conflict with another change. Refresh or sync before trying again.",
     "toast.invalidPassword": "Please enter a workspace password",
     "toast.invalidWorkspaceId": "Please enter a Workspace ID",
@@ -143,6 +169,7 @@ const MESSAGES = {
     "toast.connectionError": "Connection error",
     "toast.backendNicknameFailed": "Unable to load the server nickname for now. Check whether the backend is online.",
     "toast.locked": "Locked",
+    "toast.shareCreated": "Share link created and copied",
   },
   "zh-CN": {
     "app.title": "JustWork",
@@ -159,6 +186,8 @@ const MESSAGES = {
     "status.online": "在线",
     "status.offline": "离线",
     "status.saved": "已保存",
+    "status.loading": "加载中",
+    "status.creatingShare": "正在创建分享链接…",
     "status.saving": "保存中",
     "status.synced": "已同步",
     "status.offlinePending": "离线，待同步",
@@ -180,6 +209,7 @@ const MESSAGES = {
     "gate.unlock.workspaceIdPlaceholder": "Workspace ID",
     "gate.unlock.passwordPlaceholder": "工作区密码",
     "gate.unlock.button": "解锁",
+    "gate.unlock.createWorkspace": "新建工作区",
     "gate.recent.title": "最近使用的工作区",
     "gate.recent.empty": "暂无记录，创建或解锁成功后会出现在这里。",
     "gate.recent.showMore": "显示更多",
@@ -189,6 +219,7 @@ const MESSAGES = {
     "sidebar.newFile": "新建文件",
     "sidebar.newFolder": "新建文件夹",
     "sidebar.pin": "置顶",
+    "sidebar.share": "分享",
     "sidebar.unpin": "取消置顶",
     "sidebar.delete": "删除",
     "sidebar.pinned": "置顶",
@@ -209,36 +240,32 @@ const MESSAGES = {
     "drawer.profile.workspaceDesc": "解锁与 API 均以此为唯一标识；与工作区标题无关，可多设备共用。",
     "drawer.profile.copy": "复制",
     "drawer.profile.workspaceNameHeading": "工作区名称",
-    "drawer.profile.workspaceNameDesc": "用于最近工作区展示。默认为 <span class=\"workspace-info-em\">work_后四位</span>，可随时修改。",
+    "drawer.profile.workspaceNameDesc": "用于最近工作区展示。默认为 <span class=\"workspace-info-em\">work_后四位</span>；输入空格时，保存会用 _ 替换，可随时修改。",
     "drawer.profile.workspaceNamePlaceholder": "例如：项目文档",
     "drawer.profile.saveWorkspaceName": "保存工作区名称",
     "drawer.profile.personalHeading": "个人信息",
     "drawer.profile.userIdHeading": "用户 ID",
     "drawer.profile.userIdDesc": "本机生成的身份标识，用于加密与后端关联；不会作为导航栏展示。",
-    "drawer.profile.nicknameHeading": "在工作区的名称",
-    "drawer.profile.nicknameDesc": "保存在服务端，展示名为 名称@身份后缀；可随时修改。",
+    "drawer.profile.nicknameHeading": "工作区昵称",
+    "drawer.profile.nicknameDesc": "用于这个工作区里的在线状态和消息，会保存在本地，也可以随时更改。",
     "drawer.profile.nicknamePlaceholder": "例如：张三",
-    "drawer.profile.saveNickname": "保存名称",
-    "drawer.profile.currentDisplayName": "当前展示名：{{displayName}}",
-    "drawer.profile.loadingNicknameFailed": "暂时无法加载服务端昵称（请确认后端在线）",
+    "drawer.profile.saveNickname": "保存昵称",
+    "drawer.profile.currentNickname": "当前昵称：{{nickname}}",
+    "drawer.profile.loadingNicknameFailed": "暂时无法加载昵称（请确认后端在线）",
     "drawer.profile.saveInProgress": "保存中…",
-    "drawer.profile.savedDisplayName": "已保存。展示名：{{displayName}}",
+    "drawer.profile.savedNickname": "已保存。",
     "drawer.profile.workspaceNameSaved": "工作区名称已保存：{{workspaceName}}",
     "drawer.profile.noNameablePage": "暂无可命名页面。",
-    "drawer.history.title": "操作历史",
-    "drawer.history.refresh": "刷新",
-    "drawer.history.ariaLabel": "操作历史",
-    "drawer.history.itemLabel": "文档",
-    "drawer.history.eventLabel": "事件",
-    "history.modify": "修改文档",
-    "history.create": "新建条目",
-    "history.move": "移动条目",
-    "history.pin": "置顶变更",
-    "history.trash": "移入垃圾箱",
-    "history.restore": "从垃圾箱恢复",
-    "history.hardDelete": "彻底删除",
-    "history.patch": "片段替换",
-    "history.revert": "历史回滚",
+    "drawer.message.title": "Inbox",
+    "drawer.message.membersHeading": "在线成员",
+    "drawer.message.membersEmpty": "当前还没有人在线。",
+    "drawer.message.logHeading": "提及",
+    "drawer.message.empty": "还没有 inbox 项目。",
+    "drawer.message.inputPlaceholder": "Inbox",
+    "drawer.message.send": "打开",
+    "drawer.message.promptTitle": "设置你的昵称",
+    "drawer.message.promptDesc": "这个名字会显示给工作区里的其他人，并用于 @ 提及。",
+    "drawer.message.promptSave": "继续",
     "doc.folder": "文件夹",
     "doc.welcome": "欢迎",
     "doc.protected": "受保护条目",
@@ -274,6 +301,7 @@ const MESSAGES = {
     "toast.connectionError": "连接错误",
     "toast.backendNicknameFailed": "暂时无法加载服务端昵称（请确认后端在线）",
     "toast.locked": "已锁定",
+    "toast.shareCreated": "分享链接已创建并复制",
   },
 } as const;
 
@@ -311,12 +339,12 @@ export function detectBrowserLocale(): Locale {
 }
 
 export async function loadPreferredLocale(): Promise<Locale | null> {
-  const raw = await chrome.storage.local.get(STORAGE_KEYS.UI_LOCALE);
+  const raw = await getLocalStorageArea().get(STORAGE_KEYS.UI_LOCALE);
   return normalizeLocaleTag(raw[STORAGE_KEYS.UI_LOCALE] as string | undefined);
 }
 
 export async function savePreferredLocale(locale: Locale): Promise<void> {
-  await chrome.storage.local.set({ [STORAGE_KEYS.UI_LOCALE]: locale });
+  await getLocalStorageArea().set({ [STORAGE_KEYS.UI_LOCALE]: locale });
 }
 
 export async function resolvePreferredLocale(): Promise<Locale> {
@@ -326,7 +354,7 @@ export async function resolvePreferredLocale(): Promise<Locale> {
 export function observePreferredLocaleChanges(onLocale: (locale: Locale) => void): () => void {
   const storage = globalThis.chrome?.storage;
   if (!storage?.onChanged?.addListener || !storage?.onChanged?.removeListener) {
-    return () => {};
+    return () => { };
   }
   const handler = (
     changes: Record<string, chrome.storage.StorageChange>,
@@ -347,7 +375,9 @@ export function createTranslator(locale: Locale): Translator {
   return {
     locale,
     t(key: MessageKey, params?: MessageParams): string {
-      const template = MESSAGES[locale][key];
+      const localeMessages = MESSAGES[locale] as Record<string, string>;
+      const enMessages = MESSAGES.en as Record<string, string>;
+      const template = localeMessages[key] ?? enMessages[key];
       return formatMessage(template, params);
     },
   };

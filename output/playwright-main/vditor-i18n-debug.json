@@ -1,0 +1,18 @@
+{
+  "shellVisible": true,
+  "state": {},
+  "workspaceId": "workspace_6e744d0b7c484c60add2c80e0f74cd14",
+  "consoleMessages": [
+    {
+      "type": "debug",
+      "text": "[mount] image sync ready workspace_6e744d0b7c484c60add2c80e0f74cd14"
+    },
+    {
+      "type": "debug",
+      "text": "[mount] markdown warm complete workspace_6e744d0b7c484c60add2c80e0f74cd14"
+    }
+  ],
+  "pageErrors": [],
+  "requestFailures": [],
+  "responses": []
+}
