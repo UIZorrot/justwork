@@ -52,26 +52,39 @@ test("board columns can all be removed without resetting defaults", async () => 
   }
 
   assert.equal(current.columns.length, 0);
-  assert.equal(current.cards.length, 0);
+  assert.equal(current.cards.length, 1);
+  assert.equal(current.template.cardIds.length, 1);
   assert.equal(current.template.fields.length, 2);
 });
 
-test("adding a board column creates a template-backed starter card", async () => {
+test("adding a board column clones the entire template column card set", async () => {
   const documents = await loadTranspiledModule("src/features/workspace/structured-document.ts");
   const mod = await loadTranspiledModule("src/features/workspace/board-state.ts");
 
   const base = documents.createDefaultBoardContent();
-  const updated = mod.addBoardColumn(base, "Review");
+  const withExtraTemplateCard = mod.addBoardTemplateCard(base);
+  const updated = mod.addBoardColumn(withExtraTemplateCard, "Review");
   const addedColumn = updated.columns.at(-1);
 
   assert.equal(addedColumn.title, "Review");
-  assert.equal(addedColumn.cardIds.length, 1);
-  const starterCardId = addedColumn.cardIds[0];
-  const starterCard = updated.cards.find((card) => card.id === starterCardId);
-  assert.ok(starterCard);
-  assert.equal(starterCard.fields.length, updated.template.fields.length);
+  assert.equal(addedColumn.cardIds.length, withExtraTemplateCard.template.cardIds.length);
+  const clonedCards = addedColumn.cardIds
+    .map((cardId) => updated.cards.find((card) => card.id === cardId))
+    .filter(Boolean);
+  assert.equal(clonedCards.length, withExtraTemplateCard.template.cardIds.length);
   assert.deepEqual(
-    starterCard.fields.map((field) => field.name),
-    updated.template.fields.map((field) => field.name),
+    clonedCards.map((card) => card.title),
+    withExtraTemplateCard.template.cardIds.map((cardId) => withExtraTemplateCard.cards.find((card) => card.id === cardId).title),
   );
+});
+
+test("template lane can add cards independently of normal columns", async () => {
+  const documents = await loadTranspiledModule("src/features/workspace/structured-document.ts");
+  const mod = await loadTranspiledModule("src/features/workspace/board-state.ts");
+
+  const base = documents.createDefaultBoardContent();
+  const updated = mod.addBoardTemplateCard(base);
+
+  assert.equal(updated.template.cardIds.length, base.template.cardIds.length + 1);
+  assert.equal(updated.columns[0].cardIds.length, base.columns[0].cardIds.length);
 });

@@ -25,6 +25,8 @@ class FakeElement {
     this.value = "";
     this.textContent = "";
     this.className = "";
+    this.selectionStart = 0;
+    this.selectionEnd = 0;
     this._rect = { left: 0, top: 0, right: 0, bottom: 0, width: 0, height: 0 };
     this.classList = {
       add: (...tokens) => {
@@ -78,6 +80,15 @@ class FakeElement {
     this.dispatchEvent(new FakeEvent("click"));
   }
 
+  focus() {
+    this.ownerDocument.activeElement = this;
+  }
+
+  setSelectionRange(start, end) {
+    this.selectionStart = start;
+    this.selectionEnd = end;
+  }
+
   closest(selector) {
     if (!selector.startsWith(".")) return null;
     const token = selector.slice(1);
@@ -113,6 +124,10 @@ class FakeElement {
 }
 
 class FakeDocument {
+  constructor() {
+    this.activeElement = null;
+  }
+
   createElement(tagName) {
     return new FakeElement(tagName, this);
   }
@@ -137,7 +152,9 @@ test("board view opens the drawer only after selecting a card and emits changes 
   assert.equal(drawerTitleBeforeSelect, undefined);
 
   const buttons = view.element.querySelectorAll("button");
-  const addCardBtn = buttons.find((button) => button.textContent === "Add card");
+  const addCardBtn = buttons.find((button) =>
+    button.textContent === "Add card" && !button.closest(".structured-board-column--template")
+  );
   assert.ok(addCardBtn);
   addCardBtn.click();
   const newCardId = changes.at(-1).columns[0].cardIds.at(-1);
@@ -175,7 +192,6 @@ test("board view uses a single default card and exposes add-column only as the t
     content: initial,
   });
 
-  assert.equal(initial.cards.length, 1);
   assert.equal(initial.columns[0].cardIds.length, 1);
 
   const buttons = view.element.querySelectorAll("button");
@@ -231,7 +247,7 @@ test("board view uses visual color swatches instead of hex selects", async () =>
   assert.equal(swatches.some((button) => /^#/.test(button.textContent ?? "")), false);
 });
 
-test("board view template can collapse as a whole block and has no title/card title inputs", async () => {
+test("board view template behaves like a column template preview and edits from the drawer", async () => {
   const documents = await loadTranspiledModule("src/features/workspace/structured-document.ts");
   const mod = await loadTranspiledModule("src/features/workspace/board-view.ts");
 
@@ -255,16 +271,29 @@ test("board view template can collapse as a whole block and has no title/card ti
     .filter((element) => element.className === "structured-board-field-value");
   assert.equal(templateTextareasBefore.length, 0);
 
-  const initialInputs = view.element
-    .querySelectorAll("input")
-    .filter((input) => input.className === "structured-board-card-title");
-  assert.equal(initialInputs.length, 0);
   assert.equal(
     view.element
       .querySelectorAll("input")
       .filter((input) => input.className === "structured-board-column-title")
       .length,
     initial.columns.length,
+  );
+  assert.equal(
+    view.element
+      .querySelectorAll("input")
+      .some((input) => input.className === "structured-board-field-name"),
+    false,
+  );
+  const templateCards = view.element
+    .querySelectorAll("article")
+    .filter((element) => element.className.includes("structured-board-card--template"));
+  assert.equal(templateCards.length, 1);
+  assert.equal(
+    view.element
+      .querySelectorAll("button")
+      .filter((button) => button.textContent === "Add card" && button.closest(".structured-board-column--template"))
+      .length,
+    1,
   );
 
   toggle.click();
@@ -301,6 +330,11 @@ test("board view template can collapse as a whole block and has no title/card ti
       ?.textContent,
     "<",
   );
+  const templateCard = view.element
+    .querySelectorAll("article")
+    .find((element) => element.className.includes("structured-board-card--template"));
+  assert.ok(templateCard);
+  templateCard.click();
   const expandedField = view.element
     .querySelectorAll("input")
     .find((input) => input.className === "structured-board-field-name");
@@ -308,6 +342,50 @@ test("board view template can collapse as a whole block and has no title/card ti
   expandedField.value = "Checklist";
   expandedField.dispatchEvent(new FakeEvent("input"));
   assert.equal(changes.at(-1).template.fields[0].name, "Checklist");
+
+  const templateAddCardBtn = view.element
+    .querySelectorAll("button")
+    .find((button) => button.textContent === "Add card" && button.closest(".structured-board-column--template"));
+  assert.ok(templateAddCardBtn);
+  templateAddCardBtn.click();
+  assert.equal(changes.at(-1).template.cardIds.length, 2);
+});
+
+test("board view preserves focus when editing a template field name", async () => {
+  const documents = await loadTranspiledModule("src/features/workspace/structured-document.ts");
+  const mod = await loadTranspiledModule("src/features/workspace/board-view.ts");
+
+  const document = new FakeDocument();
+  const changes = [];
+  const initial = documents.createDefaultBoardContent();
+  const view = mod.createBoardView({
+    document,
+    content: initial,
+    onChange: (next) => changes.push(next),
+  });
+
+  const templateCard = view.element
+    .querySelectorAll("article")
+    .find((element) => element.className.includes("structured-board-card--template"));
+  assert.ok(templateCard);
+  templateCard.click();
+  const expandedField = view.element
+    .querySelectorAll("input")
+    .find((input) => input.className === "structured-board-field-name");
+  assert.ok(expandedField);
+  expandedField.focus();
+  expandedField.value = "Che";
+  expandedField.selectionStart = 3;
+  expandedField.selectionEnd = 3;
+  expandedField.dispatchEvent(new FakeEvent("input"));
+
+  assert.equal(changes.at(-1).template.fields[0].name, "Che");
+  assert.ok(document.activeElement);
+  assert.equal(document.activeElement.className, "structured-board-field-name");
+  assert.equal(document.activeElement.value, "Che");
+  assert.notEqual(document.activeElement.parentNode, null);
+  assert.equal(document.activeElement.selectionStart, 3);
+  assert.equal(document.activeElement.selectionEnd, 3);
 });
 
 test("board view keeps delete card in the drawer and renders delete column at the bottom of each column", async () => {
@@ -349,7 +427,7 @@ test("board view keeps delete card in the drawer and renders delete column at th
   assert.equal(drawerDeleteColumnBtn, undefined);
 
   deleteCardBtn.click();
-  assert.equal(changes.at(-1).cards.length, 0);
+  assert.equal(changes.at(-1).cards.length, 1);
 
   deleteColumnBtn.click();
   assert.equal(changes.at(-1).columns.length, 2);

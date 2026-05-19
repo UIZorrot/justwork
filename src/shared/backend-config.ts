@@ -6,7 +6,7 @@ declare global {
   }
 }
 
-export const DEFAULT_BACKEND_URL = "http://127.0.0.1:1446";
+export const DEFAULT_BACKEND_URL = "https://api.tool.justwork.txzy.net";
 
 function backendUrlFromLocation(): string {
   if (typeof globalThis.location === "undefined") return "";

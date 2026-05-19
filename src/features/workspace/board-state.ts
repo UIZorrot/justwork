@@ -2,6 +2,7 @@ import {
   BOARD_COLUMN_COLORS,
   createStructuredId,
   createBoardCardFromTemplate,
+  cloneBoardCardPrototype,
   reconcileBoardCardWithTemplate,
   type BoardCard,
   type BoardCardField,
@@ -24,6 +25,7 @@ function cloneBoard(content: BoardDocumentContent): BoardDocumentContent {
     kind: "board",
     template: {
       ...content.template,
+      cardIds: [...content.template.cardIds],
       fields: content.template.fields.map((field) => ({ ...field })),
     },
     columns: content.columns.map((column) => ({
@@ -38,9 +40,27 @@ function ensureCard(content: BoardDocumentContent, cardId: string): BoardCard | 
   return content.cards.find((card) => card.id === cardId);
 }
 
+function templateCards(content: BoardDocumentContent): BoardCard[] {
+  return content.template.cardIds
+    .map((cardId) => ensureCard(content, cardId))
+    .filter((card): card is BoardCard => Boolean(card));
+}
+
+function createCardFromTemplateLane(content: BoardDocumentContent, index = 0): BoardCard {
+  const source = templateCards(content)[index] ?? templateCards(content)[0];
+  if (source) {
+    return cloneBoardCardPrototype(source);
+  }
+  return createBoardCardFromTemplate(content.template, content.template.cardTitle || "Untitled card");
+}
+
 export function addBoardCard(content: BoardDocumentContent, columnId: string, title = "Untitled card"): BoardDocumentContent {
   const next = cloneBoard(content);
-  const newCard = createBoardCardFromTemplate(next.template, title);
+  const seededCard = createCardFromTemplateLane(next);
+  const newCard = {
+    ...seededCard,
+    title: title.trim() || seededCard.title,
+  };
   next.cards.push(newCard);
   next.columns = next.columns.map((column) => (
     column.id === columnId ? { ...column, cardIds: [...column.cardIds, newCard.id] } : column
@@ -123,13 +143,13 @@ export function removeBoardCardField(
 
 export function addBoardColumn(content: BoardDocumentContent, title = "New column"): BoardDocumentContent {
   const next = cloneBoard(content);
-  const starterCard = createBoardCardFromTemplate(next.template, next.template.cardTitle || "Untitled card");
-  next.cards.push(starterCard);
+  const starterCards = templateCards(next).map((card) => cloneBoardCardPrototype(card));
+  next.cards.push(...starterCards);
   next.columns.push({
     id: createStructuredId("column"),
     title: title.trim() || "New column",
     color: BOARD_COLUMN_COLORS[next.columns.length % BOARD_COLUMN_COLORS.length],
-    cardIds: [starterCard.id],
+    cardIds: starterCards.map((card) => card.id),
   });
   return next;
 }
@@ -202,6 +222,26 @@ export function renameBoardTemplate(content: BoardDocumentContent, title: string
   const next = cloneBoard(content);
   next.template.title = title.trim() || next.template.title;
   next.template.cardTitle = cardTitle.trim() || next.template.cardTitle;
+  return next;
+}
+
+export function addBoardTemplateCard(content: BoardDocumentContent): BoardDocumentContent {
+  const next = cloneBoard(content);
+  const templateCard = createCardFromTemplateLane(next, next.template.cardIds.length - 1);
+  next.cards.push(templateCard);
+  next.template.cardIds.push(templateCard.id);
+  return next;
+}
+
+export function removeBoardTemplateCard(content: BoardDocumentContent, cardId: string): BoardDocumentContent {
+  if (content.template.cardIds.length <= 1) return cloneBoard(content);
+  const next = cloneBoard(content);
+  next.template.cardIds = next.template.cardIds.filter((id) => id !== cardId);
+  next.cards = next.cards.filter((card) => card.id !== cardId);
+  next.columns = next.columns.map((column) => ({
+    ...column,
+    cardIds: column.cardIds.filter((id) => id !== cardId),
+  }));
   return next;
 }
 

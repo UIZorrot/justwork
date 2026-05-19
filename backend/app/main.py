@@ -18,7 +18,7 @@ if load_dotenv:
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, WebSocket, WebSocketDisconnect, status
 from pydantic import BaseModel
-from fastapi.responses import JSONResponse, HTMLResponse, Response
+from fastapi.responses import JSONResponse, HTMLResponse, PlainTextResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 
 from .db_gateway import DatabaseGateway, DatabaseUnavailableError
@@ -112,6 +112,7 @@ _backend_token = os.getenv("JUSTWORK_BACKEND_TOKEN", "").strip()
 QUOTA_PLAN_FREE = "free"
 QUOTA_PLAN_PRO = "pro"
 MAX_WORKSPACES_PER_OWNER = 5
+AGENT_SKILL_PATH = Path(__file__).resolve().parent.parent / "agent" / "SKILL.md"
 
 
 def _int_env(name: str, default: int) -> int:
@@ -338,6 +339,15 @@ async def database_unavailable_exception_handler(_: Request, exc: DatabaseUnavai
 @app.get("/v1/health", response_model=HealthResponse)
 def health() -> HealthResponse:
     return HealthResponse()
+
+
+@app.get("/agent/SKILL.md", response_class=PlainTextResponse, include_in_schema=False)
+def agent_skill() -> PlainTextResponse:
+    try:
+        body = AGENT_SKILL_PATH.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="agent skill not found")
+    return PlainTextResponse(body, media_type="text/markdown")
 
 
 def summarize_workspace(record: WorkspaceRecord) -> WorkspaceSummary:

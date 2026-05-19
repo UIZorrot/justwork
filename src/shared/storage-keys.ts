@@ -8,6 +8,8 @@ export const STORAGE_KEYS = {
   UI_LOCALE: "justwork.ui.locale.v1",
   /** 最近使用过的工作区（仅本地，用于门页快捷选择） */
   BACKEND_WORKSPACE_RECENTS: "justwork.backend.workspaceRecents.v1",
+  /** 各工作区记住的密码（仅本地，不会同步到后端） */
+  BACKEND_WORKSPACE_PASSWORDS: "justwork.backend.workspacePasswords.v1",
   /** 各工作区的本地显示名（用于成员在线状态和 message drawer） */
   BACKEND_WORKSPACE_NICKNAMES: "justwork.backend.workspaceNicknames.v1",
   BACKEND_WORKSPACE_MEMBER_DIRECTORY: "justwork.backend.workspaceMembers.v1",

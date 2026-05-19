@@ -165,6 +165,30 @@ function defaultTitleForKind(kind: BackendWorkspaceItemKind): string {
   return t("editor.untitledPage");
 }
 
+function buildConnectAgentPrompt(workspaceId: string, password: string, rememberPassword: boolean): string {
+  const backendUrl = JUSTWORK_BACKEND_URL;
+  const skillUrl = new URL("/agent/SKILL.md", JUSTWORK_BACKEND_URL).toString();
+  const openapiUrl = new URL("/openapi.json", JUSTWORK_BACKEND_URL).toString();
+  const passwordValue = rememberPassword ? password : "<replace with workspace password>";
+  const passwordNote = rememberPassword
+    ? "The password was supplied from this browser's local remembered password. The backend does not store it."
+    : "Password was not remembered on this device. Replace the placeholder before sending this setup text to an Agent.";
+  return [
+    "Use the JustWork Agent Skill to join this workspace.",
+    "",
+    `Backend URL: ${backendUrl}`,
+    `Skill URL: ${skillUrl}`,
+    `OpenAPI URL: ${openapiUrl}`,
+    "",
+    `Workspace ID: ${workspaceId}`,
+    `Workspace password: ${passwordValue}`,
+    "",
+    passwordNote,
+    "",
+    "First read the Skill URL and OpenAPI schema. Verify access before doing work. Ask me before mutating workspace data.",
+  ].join("\n");
+}
+
 function displayDocIcon(doc: WorkspaceDoc): string {
   if (doc.kind === "folder") return "\uD83D\uDCC1";
   if (doc.kind === "table") return "\u25A6";
@@ -229,6 +253,7 @@ function collaborativeMarkdownSnapshotKey(workspaceId: string, itemId: string): 
 }
 
 type WorkspaceNicknameMap = Record<string, string>;
+type RememberedWorkspacePasswordMap = Record<string, string>;
 
 function workspaceNicknameStorageKey(): string {
   return STORAGE_KEYS.BACKEND_WORKSPACE_NICKNAMES;
@@ -261,6 +286,40 @@ async function setWorkspaceNickname(workspaceId: string, userId: string, nicknam
   const map = await loadWorkspaceNicknameMap();
   map[workspaceNicknameMapKey(workspaceId, userId)] = nickname.trim();
   await localStorageArea.set({ [workspaceNicknameStorageKey()]: map });
+}
+
+async function loadRememberedWorkspacePasswordMap(): Promise<RememberedWorkspacePasswordMap> {
+  const raw = await localStorageArea.get(STORAGE_KEYS.BACKEND_WORKSPACE_PASSWORDS);
+  const value = raw[STORAGE_KEYS.BACKEND_WORKSPACE_PASSWORDS];
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const next: RememberedWorkspacePasswordMap = {};
+  for (const [workspaceId, password] of Object.entries(value as RememberedWorkspacePasswordMap)) {
+    if (typeof password === "string") next[workspaceId] = password;
+  }
+  return next;
+}
+
+async function getRememberedWorkspacePassword(workspaceId: string): Promise<string> {
+  if (!workspaceId.trim()) return "";
+  const map = await loadRememberedWorkspacePasswordMap();
+  return map[workspaceId] ?? "";
+}
+
+async function setRememberedWorkspacePassword(workspaceId: string, password: string): Promise<void> {
+  const id = workspaceId.trim();
+  if (!id || !password) return;
+  const map = await loadRememberedWorkspacePasswordMap();
+  map[id] = password;
+  await localStorageArea.set({ [STORAGE_KEYS.BACKEND_WORKSPACE_PASSWORDS]: map });
+}
+
+async function removeRememberedWorkspacePassword(workspaceId: string): Promise<void> {
+  const id = workspaceId.trim();
+  if (!id) return;
+  const map = await loadRememberedWorkspacePasswordMap();
+  if (!(id in map)) return;
+  delete map[id];
+  await localStorageArea.set({ [STORAGE_KEYS.BACKEND_WORKSPACE_PASSWORDS]: map });
 }
 
 const WORKSPACE_SESSION_ID_KEY = "justwork.backend.workspaceSessionId.v1";
@@ -567,6 +626,8 @@ export async function startBackendWorkbench(): Promise<void> {
   const unlockPanel = document.getElementById("workspace-unlock-panel") as HTMLElement | null;
   const setupPasswordInput = document.getElementById("setup-password-input") as HTMLInputElement | null;
   const unlockPasswordInput = document.getElementById("unlock-password-input") as HTMLInputElement | null;
+  const setupRememberPasswordInput = document.getElementById("setup-remember-password-input") as HTMLInputElement | null;
+  const unlockRememberPasswordInput = document.getElementById("unlock-remember-password-input") as HTMLInputElement | null;
   const setupWorkspaceBtn = document.getElementById("setup-workspace-btn") as HTMLButtonElement | null;
   const unlockWorkspaceBtn = document.getElementById("unlock-workspace-btn") as HTMLButtonElement | null;
   const createWorkspaceBtn = document.getElementById("create-workspace-btn") as HTMLButtonElement | null;
@@ -590,6 +651,14 @@ export async function startBackendWorkbench(): Promise<void> {
   const workspaceMessageLog = document.getElementById("workspace-message-log") as HTMLElement | null;
   const workspacePeopleCount = document.getElementById("workspace-people-count") as HTMLElement | null;
   const workspacePeopleList = document.getElementById("workspace-people-list") as HTMLElement | null;
+  const connectAgentBtn = document.getElementById("connect-agent-btn") as HTMLButtonElement | null;
+  const connectAgentDialogRoot = document.getElementById("connect-agent-dialog-root") as HTMLElement | null;
+  const connectAgentDialogBackdrop = document.getElementById("connect-agent-dialog-backdrop") as HTMLElement | null;
+  const connectAgentDialogCloseBtn = document.getElementById("connect-agent-dialog-close-btn") as HTMLButtonElement | null;
+  const connectAgentPromptText = document.getElementById("connect-agent-prompt-text") as HTMLTextAreaElement | null;
+  const connectAgentCopyBtn = document.getElementById("connect-agent-copy-btn") as HTMLButtonElement | null;
+  const connectAgentDownloadSkillLink = document.getElementById("connect-agent-download-skill-link") as HTMLAnchorElement | null;
+  const connectAgentBackendSkillLink = document.getElementById("connect-agent-backend-skill-link") as HTMLAnchorElement | null;
   const workspaceNicknamePromptRoot = document.getElementById("workspace-nickname-prompt-root") as HTMLElement | null;
   const workspaceNicknamePromptBackdrop = document.getElementById("workspace-nickname-prompt-backdrop") as HTMLElement | null;
   const workspaceNicknamePrompt = document.getElementById("workspace-nickname-prompt") as HTMLElement | null;
@@ -641,6 +710,8 @@ export async function startBackendWorkbench(): Promise<void> {
     !unlockPanel ||
     !setupPasswordInput ||
     !unlockPasswordInput ||
+    !setupRememberPasswordInput ||
+    !unlockRememberPasswordInput ||
     !setupWorkspaceBtn ||
     !unlockWorkspaceBtn ||
     !createWorkspaceBtn ||
@@ -661,6 +732,14 @@ export async function startBackendWorkbench(): Promise<void> {
     !workspaceMessageLog ||
     !workspacePeopleCount ||
     !workspacePeopleList ||
+    !connectAgentBtn ||
+    !connectAgentDialogRoot ||
+    !connectAgentDialogBackdrop ||
+    !connectAgentDialogCloseBtn ||
+    !connectAgentPromptText ||
+    !connectAgentCopyBtn ||
+    !connectAgentDownloadSkillLink ||
+    !connectAgentBackendSkillLink ||
     !workspaceNicknamePromptRoot ||
     !workspaceNicknamePromptBackdrop ||
     !workspaceNicknamePrompt ||
@@ -787,7 +866,21 @@ export async function startBackendWorkbench(): Promise<void> {
     STORAGE_KEYS.LAST_BACKEND_WORKSPACE_ID
   ] as string | undefined;
 
-  if (backendWorkspaceIdInput && savedWsId) backendWorkspaceIdInput.value = savedWsId;
+  const applyRememberedPasswordForWorkspace = async (workspaceId: string): Promise<void> => {
+    const rememberedPassword = await getRememberedWorkspacePassword(workspaceId);
+    if (rememberedPassword) {
+      unlockPasswordInput.value = rememberedPassword;
+      unlockRememberPasswordInput.checked = true;
+      return;
+    }
+    unlockPasswordInput.value = "";
+    unlockRememberPasswordInput.checked = false;
+  };
+
+  if (backendWorkspaceIdInput && savedWsId) {
+    backendWorkspaceIdInput.value = savedWsId;
+    void applyRememberedPasswordForWorkspace(savedWsId);
+  }
 
   let editor: DocEditor | undefined;
   let imageSync: WorkspaceImageSync | undefined;
@@ -805,6 +898,8 @@ export async function startBackendWorkbench(): Promise<void> {
   let refreshQuotaBar: (() => Promise<void>) | undefined;
   let communityState: WorkspaceCommunityState = { members: [] };
   let closeMessageDrawer: () => void = () => {};
+  let closeConnectAgentDialog: () => void = () => {};
+  let rememberWorkspacePassword = false;
   let workspaceSyncTimer: number | undefined;
 
   const refreshHealth = async (): Promise<void> => {
@@ -846,6 +941,7 @@ export async function startBackendWorkbench(): Promise<void> {
 
   const openWorkspaceInfoDrawer = (): void => {
     closeMessageDrawer();
+    closeConnectAgentDialog();
     workspaceInfoDrawerRoot.classList.add("is-open");
     workspaceInfoDrawerRoot.setAttribute("aria-hidden", "false");
     workspaceInfoDrawerOpenBtn.setAttribute("aria-expanded", "true");
@@ -861,6 +957,10 @@ export async function startBackendWorkbench(): Promise<void> {
     }
     if (workspaceMessageDrawerRoot.classList.contains("is-open")) {
       closeMessageDrawer();
+      return;
+    }
+    if (connectAgentDialogRoot.classList.contains("is-open")) {
+      closeConnectAgentDialog();
     }
   });
 
@@ -933,6 +1033,7 @@ export async function startBackendWorkbench(): Promise<void> {
 
   const applyRecentWorkspaceId = (workspaceId: string): void => {
     if (backendWorkspaceIdInput) backendWorkspaceIdInput.value = workspaceId;
+    void applyRememberedPasswordForWorkspace(workspaceId);
     showGate("unlock");
   };
 
@@ -950,10 +1051,20 @@ export async function startBackendWorkbench(): Promise<void> {
     const id = sel?.dataset.workspaceId;
     if (id) applyRecentWorkspaceId(id);
   });
+  const backendWorkspaceIdInputEl = backendWorkspaceIdInput as HTMLInputElement;
+  backendWorkspaceIdInputEl.addEventListener("change", () => {
+    void applyRememberedPasswordForWorkspace(backendWorkspaceIdInputEl.value.trim());
+  });
+  unlockRememberPasswordInput.addEventListener("change", () => {
+    if (unlockRememberPasswordInput.checked) return;
+    const wsId = backendWorkspaceIdInputEl.value.trim() || savedWsId || "";
+    void removeRememberedWorkspacePassword(wsId);
+  });
 
   const showGate = (mode: "setup" | "unlock", message = "", variant: ToastVariant = "error"): void => {
     closeWorkspaceInfoDrawer();
     closeMessageDrawer();
+    closeConnectAgentDialog();
     shell.hidden = true;
     lockWorkspaceBtn.hidden = true;
     pinBtn.hidden = true;
@@ -1000,6 +1111,8 @@ export async function startBackendWorkbench(): Promise<void> {
     createWorkspaceBtn.disabled = busy;
     setupPasswordInput.disabled = busy;
     unlockPasswordInput.disabled = busy;
+    setupRememberPasswordInput.disabled = busy;
+    unlockRememberPasswordInput.disabled = busy;
     if (backendTitleSetup) backendTitleSetup.disabled = busy;
     if (backendWorkspaceIdInput) backendWorkspaceIdInput.disabled = busy;
     setupWorkspaceBtn.classList.toggle("is-busy", busy && panel === "setup");
@@ -1013,10 +1126,9 @@ export async function startBackendWorkbench(): Promise<void> {
     password: string,
     recentLabelHint?: string,
     initialTreeData?: { active_item_id: string; workspace_title: string; items: WorkspaceTreeItem[] },
+    rememberPassword = false,
   ): Promise<void> => {
     if (mounted) return;
-
-    await localStorageArea.set({ [STORAGE_KEYS.LAST_BACKEND_WORKSPACE_ID]: workspaceId });
 
     const session: BackendWorkspaceSession = createBackendWorkspaceSession({
       baseUrl: JUSTWORK_BACKEND_URL,
@@ -1118,6 +1230,13 @@ export async function startBackendWorkbench(): Promise<void> {
     refreshQuotaBar = pullQuota;
 
     let treeData = initialTreeData ?? (await session.loadTree());
+    await localStorageArea.set({ [STORAGE_KEYS.LAST_BACKEND_WORKSPACE_ID]: workspaceId });
+    rememberWorkspacePassword = rememberPassword;
+    if (rememberPassword) {
+      await setRememberedWorkspacePassword(workspaceId, password);
+    } else {
+      await removeRememberedWorkspacePassword(workspaceId);
+    }
     const recentListLabel = formatWorkspaceTitle(recentLabelHint || treeData.workspace_title, t("editor.untitled"));
     let workspace: WorkspaceDocsState = buildDocsStateFromTree(
       treeData.items,
@@ -1536,6 +1655,7 @@ export async function startBackendWorkbench(): Promise<void> {
 
     const openMessageDrawer = (): void => {
       closeWorkspaceInfoDrawer();
+      closeConnectAgentDialog();
       workspaceMessageDrawerRoot.classList.add("is-open");
       workspaceMessageDrawerRoot.setAttribute("aria-hidden", "false");
       workspaceMessageDrawerOpenBtn.setAttribute("aria-expanded", "true");
@@ -1734,6 +1854,22 @@ export async function startBackendWorkbench(): Promise<void> {
       structuredHost.appendChild(surface);
     };
 
+    const renderStructuredLoadingSurface = (): void => {
+      const surface = document.createElement("div");
+      surface.className = "structured-surface structured-loading-surface";
+      surface.textContent = t("status.loading");
+      structuredHost.appendChild(surface);
+    };
+
+    const shouldRenderStructuredLoading = (doc: WorkspaceDoc): boolean => {
+      if (!isStructuredDoc(doc)) return false;
+      if (isCreatePendingDocId(doc.id)) return false;
+      if (dirtyDocIds.has(doc.id)) return false;
+      if (hydratedDocIds.has(doc.id)) return false;
+      if (collaborativeStructuredDocs.has(doc.id)) return false;
+      return doc.content == null;
+    };
+
     const renderStructuredSurface = (doc: WorkspaceDoc): void => {
       tableView?.destroy?.();
       boardView?.destroy?.();
@@ -1742,6 +1878,10 @@ export async function startBackendWorkbench(): Promise<void> {
       structuredHost.replaceChildren();
       if (doc.kind === "folder") {
         renderFolderSurface(doc);
+        return;
+      }
+      if (shouldRenderStructuredLoading(doc)) {
+        renderStructuredLoadingSurface();
         return;
       }
       if (doc.kind === "table") {
@@ -2841,6 +2981,34 @@ export async function startBackendWorkbench(): Promise<void> {
       }
     };
 
+    closeConnectAgentDialog = (): void => {
+      const activeEl = document.activeElement as HTMLElement | null;
+      if (activeEl && connectAgentDialogRoot.contains(activeEl)) activeEl.blur();
+      connectAgentDialogRoot.classList.remove("is-open");
+      connectAgentDialogRoot.setAttribute("aria-hidden", "true");
+      connectAgentBtn.setAttribute("aria-expanded", "false");
+    };
+
+    const openConnectAgentDialog = (): void => {
+      closeWorkspaceInfoDrawer();
+      closeMessageDrawer();
+      const browserSkillUrl = chrome.runtime.getURL("agent/SKILL.md");
+      const backendSkillUrl = new URL("/agent/SKILL.md", JUSTWORK_BACKEND_URL).toString();
+      connectAgentPromptText.value = buildConnectAgentPrompt(workspaceId, password, rememberWorkspacePassword);
+      connectAgentDownloadSkillLink.href = browserSkillUrl;
+      connectAgentBackendSkillLink.href = backendSkillUrl;
+      connectAgentDialogRoot.classList.add("is-open");
+      connectAgentDialogRoot.setAttribute("aria-hidden", "false");
+      connectAgentBtn.setAttribute("aria-expanded", "true");
+      connectAgentPromptText.focus();
+      connectAgentPromptText.select();
+    };
+
+    connectAgentDialogCloseBtn.addEventListener("click", closeConnectAgentDialog);
+    connectAgentDialogBackdrop.addEventListener("click", closeConnectAgentDialog);
+    connectAgentBtn.addEventListener("click", openConnectAgentDialog);
+    connectAgentCopyBtn.addEventListener("click", () => void copyViaClipboard(connectAgentPromptText.value));
+
     workspaceInfoDrawerOpenBtn.addEventListener("click", () => {
       openWorkspaceInfoDrawer();
       void refreshWorkspaceInfoPanel();
@@ -3228,7 +3396,7 @@ export async function startBackendWorkbench(): Promise<void> {
           active_item_id: created.active_item_id,
           workspace_title: created.workspace_title,
           items: created.items,
-        });
+        }, setupRememberPasswordInput.checked);
       } catch (e) {
         setHealthStatus(backendHealthStatus, "error", t("status.backendError"));
         showGate("setup", formatBackendOrUnknownError(e));
@@ -3253,7 +3421,7 @@ export async function startBackendWorkbench(): Promise<void> {
       setGateBusy(true, "unlock");
       try {
         void refreshHealth();
-        await mountWithPassword(wsId, password);
+        await mountWithPassword(wsId, password, undefined, undefined, unlockRememberPasswordInput.checked);
       } catch (e) {
         setHealthStatus(backendHealthStatus, "error", t("status.backendError"));
         showGate("unlock", formatBackendOrUnknownError(e));

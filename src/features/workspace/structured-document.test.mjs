@@ -18,8 +18,9 @@ test("structured document defaults and normalization cover table and board conte
   assert.equal(board.kind, "board");
   assert.equal(board.columns.length, 3);
   assert.equal(board.template.fields.length, 2);
+  assert.equal(board.template.cardIds.length, 1);
   assert.equal(board.columns[0].title, "To do");
-  assert.equal(board.cards.length, 1);
+  assert.equal(board.cards.length, 2);
 
   const normalizedTable = mod.normalizeStructuredDocumentContent("table", {
     frozenHeader: false,
@@ -37,10 +38,14 @@ test("structured document defaults and normalization cover table and board conte
       columnId: "template_lane",
       title: "Card template",
       cardTitle: "Default card",
+      cardIds: ["template_card"],
       fields: [{ id: "field_a", name: "Summary", defaultValue: "" }],
     },
     columns: [{ id: "doing", title: "Doing", color: "#aabbcc", cardIds: ["card_a", "ghost"] }],
-    cards: [{ id: "card_a", title: "Ship", fields: [{ id: "field_instance", templateFieldId: "field_a", name: "Old", value: "42" }] }],
+    cards: [
+      { id: "template_card", title: "Template seed", fields: [{ id: "template_field_instance", templateFieldId: "field_a", name: "Summary", value: "Seed" }] },
+      { id: "card_a", title: "Ship", fields: [{ id: "field_instance", templateFieldId: "field_a", name: "Old", value: "42" }] },
+    ],
   });
   assert.deepEqual(normalizedBoard, {
     kind: "board",
@@ -48,19 +53,49 @@ test("structured document defaults and normalization cover table and board conte
       columnId: "template_lane",
       title: "Card template",
       cardTitle: "Default card",
+      cardIds: ["template_card"],
       fields: [{ id: "field_a", name: "Summary", defaultValue: "" }],
     },
     columns: [{ id: "doing", title: "Doing", color: "#aabbcc", cardIds: ["card_a"] }],
-    cards: [{
-      id: "card_a",
-      title: "Ship",
-      fields: [{ id: "field_instance", templateFieldId: "field_a", name: "Summary", value: "42" }],
-    }],
+    cards: [
+      {
+        id: "template_card",
+        title: "Template seed",
+        fields: [{ id: "template_field_instance", templateFieldId: "field_a", name: "Summary", value: "Seed" }],
+      },
+      {
+        id: "card_a",
+        title: "Ship",
+        fields: [{ id: "field_instance", templateFieldId: "field_a", name: "Summary", value: "42" }],
+      },
+    ],
   });
 
   assert.equal(mod.isStructuredDocumentContent(normalizedTable), true);
   assert.equal(mod.isStructuredDocumentContent(normalizedBoard), true);
   assert.equal(mod.isStructuredDocumentContent({ kind: "other" }), false);
+});
+
+test("board normalization preserves an explicit empty column set", async () => {
+  const mod = await loadTranspiledModule("src/features/workspace/structured-document.ts");
+
+  const normalized = mod.normalizeStructuredDocumentContent("board", {
+    template: {
+      columnId: "template_lane",
+      title: "Column template",
+      cardTitle: "Default card",
+      cardIds: [],
+      fields: [{ id: "field_a", name: "Summary", defaultValue: "" }],
+    },
+    columns: [],
+    cards: [],
+  });
+
+  assert.equal(normalized.kind, "board");
+  assert.equal(normalized.columns.length, 0);
+  assert.equal(normalized.cards.length, 1);
+  assert.equal(normalized.template.cardIds.length, 1);
+  assert.equal(normalized.template.fields.length, 1);
 });
 
 test("table workbook snapshots round-trip through structured normalization", async () => {

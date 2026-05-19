@@ -29,10 +29,10 @@ export default defineManifest({
     open_in_tab: true,
   },
   permissions: ["storage"],
-  host_permissions: ["http://127.0.0.1/*", "http://localhost/*"],
+  host_permissions: ["https://api.tool.justwork.txzy.net/*", "http://127.0.0.1/*", "http://localhost/*"],
   web_accessible_resources: [
     {
-      resources: ["vendor/vditor/**/*"],
+      resources: ["vendor/vditor/**/*", "agent/SKILL.md"],
       matches: ["<all_urls>"],
     },
   ],

@@ -52,6 +52,7 @@ export type BoardTemplateDefinition = {
   columnId: string;
   title: string;
   cardTitle: string;
+  cardIds: string[];
   fields: BoardTemplateField[];
 };
 
@@ -145,6 +146,19 @@ export function createBoardCardFromTemplate(
     id: createStructuredId("card"),
     title: title.trim() || "Untitled card",
     fields: template.fields.map((field) => cloneBoardTemplateFieldToCardField(field)),
+  };
+}
+
+export function cloneBoardCardPrototype(card: BoardCard): BoardCard {
+  return {
+    id: createStructuredId("card"),
+    title: card.title.trim() || "Untitled card",
+    fields: card.fields.map((field) => ({
+      id: createStructuredId("field"),
+      templateFieldId: field.templateFieldId,
+      name: field.name,
+      value: field.value,
+    })),
   };
 }
 
@@ -457,13 +471,16 @@ export function createDefaultBoardContent(): BoardDocumentContent {
   const template: BoardTemplateDefinition = {
     columnId: "template_lane",
     title: "Card template",
-    cardTitle: "Default card",
+    cardTitle: "Untitled card",
+    cardIds: [],
     fields: [
       { id: "template_summary", name: "Summary", defaultValue: "" },
       { id: "template_details", name: "Details", defaultValue: "" },
     ],
   };
-  const starterCard = createBoardCardFromTemplate(template, "Untitled card");
+  const templateCard = createBoardCardFromTemplate(template, template.cardTitle);
+  template.cardIds = [templateCard.id];
+  const starterCard = cloneBoardCardPrototype(templateCard);
   return {
     kind: "board",
     template,
@@ -472,7 +489,7 @@ export function createDefaultBoardContent(): BoardDocumentContent {
       { id: "doing", title: "Doing", color: BOARD_COLUMN_COLORS[1], cardIds: [] },
       { id: "done", title: "Done", color: BOARD_COLUMN_COLORS[2], cardIds: [] },
     ],
-    cards: [starterCard],
+    cards: [templateCard, starterCard],
   };
 }
 
@@ -568,7 +585,7 @@ function normalizeBoardColumn(value: unknown, index: number, availableCardIds: S
   };
 }
 
-function normalizeBoardTemplate(value: unknown): BoardTemplateDefinition {
+function normalizeBoardTemplateBase(value: unknown): Omit<BoardTemplateDefinition, "cardIds"> {
   const defaults = createDefaultBoardContent().template;
   const record = asRecord(value);
   const fields = (Array.isArray(record.fields) ? record.fields : [])
@@ -577,7 +594,7 @@ function normalizeBoardTemplate(value: unknown): BoardTemplateDefinition {
     columnId: asTrimmedString(record.columnId, defaults.columnId),
     title: asTrimmedString(record.title, defaults.title),
     cardTitle: asTrimmedString(record.cardTitle, defaults.cardTitle),
-    fields: fields.length > 0 ? fields : defaults.fields,
+    fields: fields.length > 0 ? fields : defaults.fields.map((field) => ({ ...field })),
   };
 }
 
@@ -587,17 +604,40 @@ export function normalizeStructuredDocumentContent(
 ): StructuredDocumentContent {
   const record = asRecord(value);
   if (kind === "board") {
-    const template = normalizeBoardTemplate(record.template);
+    const templateRecord = asRecord(record.template);
+    const templateBase = normalizeBoardTemplateBase(templateRecord);
+    const templateSkeleton: BoardTemplateDefinition = {
+      ...templateBase,
+      cardIds: [],
+    };
     const cards = (Array.isArray(record.cards) ? record.cards : [])
-      .map((card, index) => normalizeBoardCard(card, index, template));
-    const cardIds = new Set(cards.map((card) => card.id));
-    const columns = (Array.isArray(record.columns) ? record.columns : [])
-      .map((column, index) => normalizeBoardColumn(column, index, cardIds));
-    const normalizedColumns = columns.length > 0 ? columns : createDefaultBoardContent().columns;
+      .map((card, index) => normalizeBoardCard(card, index, templateSkeleton));
+    const templateCardIds = (Array.isArray(templateRecord.cardIds) ? templateRecord.cardIds : [])
+      .filter((cardId): cardId is string => typeof cardId === "string" && cardId.trim().length > 0);
+    const availableCardIds = new Set(cards.map((card) => card.id));
+    const normalizedTemplateCardIds = templateCardIds.filter((cardId) => availableCardIds.has(cardId));
+    if (normalizedTemplateCardIds.length === 0) {
+      const templateCard = createBoardCardFromTemplate(templateSkeleton, templateBase.cardTitle);
+      cards.unshift(templateCard);
+      availableCardIds.add(templateCard.id);
+      normalizedTemplateCardIds.push(templateCard.id);
+    }
+    const template: BoardTemplateDefinition = {
+      ...templateBase,
+      cardIds: normalizedTemplateCardIds,
+    };
+    const hasColumns = Array.isArray(record.columns);
+    const columnsInput = hasColumns ? (record.columns as unknown[]) : [];
+    const columns = columnsInput
+      .map((column, index) => normalizeBoardColumn(column, index, availableCardIds))
+      .map((column) => ({
+        ...column,
+        cardIds: column.cardIds.filter((cardId) => !normalizedTemplateCardIds.includes(cardId)),
+      }));
     return {
       kind: "board",
       template,
-      columns: normalizedColumns,
+      columns: hasColumns ? columns : createDefaultBoardContent().columns,
       cards,
     };
   }

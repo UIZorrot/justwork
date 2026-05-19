@@ -86,6 +86,13 @@
             data-i18n-placeholder="gate.setup.passwordPlaceholder"
             placeholder="Workspace password"
           />
+          <label class="gate-check-row">
+            <input id="setup-remember-password-input" type="checkbox" />
+            <span data-i18n="gate.rememberPassword">Remember password on this device</span>
+          </label>
+          <p class="gate-check-hint" data-i18n="gate.rememberPasswordHint">
+            Stored locally in this browser only. The backend never stores the workspace password.
+          </p>
           <button id="setup-workspace-btn" class="gate-primary-btn" type="button" data-i18n-aria-label="gate.setup.button" aria-label="Create and unlock">
             <span class="gate-btn-label" data-i18n="gate.setup.button">Create and unlock</span>
             <span class="gate-btn-spinner" aria-hidden="true"></span>
@@ -114,6 +121,13 @@
             data-i18n-placeholder="gate.unlock.passwordPlaceholder"
             placeholder="Workspace password"
           />
+          <label class="gate-check-row">
+            <input id="unlock-remember-password-input" type="checkbox" />
+            <span data-i18n="gate.rememberPassword">Remember password on this device</span>
+          </label>
+          <p class="gate-check-hint" data-i18n="gate.rememberPasswordHint">
+            Stored locally in this browser only. The backend never stores the workspace password.
+          </p>
           <button id="unlock-workspace-btn" class="gate-primary-btn" type="button">
             <span class="gate-btn-label" data-i18n="gate.unlock.button">Unlock</span>
             <span class="gate-btn-spinner" aria-hidden="true"></span>
@@ -192,6 +206,17 @@
         <div class="sidebar-section">
           <div class="sidebar-title" data-i18n="sidebar.trash">Trash</div>
           <ul id="trash-list" class="doc-list"></ul>
+        </div>
+        <div class="sidebar-connect-section">
+          <button
+            id="connect-agent-btn"
+            class="sidebar-connect-btn"
+            type="button"
+            aria-expanded="false"
+            aria-controls="connect-agent-dialog"
+          >
+            <span class="sidebar-btn-icon" aria-hidden="true">↗</span><span data-i18n="sidebar.connectAgent">Connect Agent</span>
+          </button>
         </div>
       </aside>
 
@@ -330,6 +355,63 @@
           </section>
         </div>
       </aside>
+    </div>
+
+    <div id="connect-agent-dialog-root" class="connect-agent-dialog-root" aria-hidden="true">
+      <div id="connect-agent-dialog-backdrop" class="connect-agent-dialog-backdrop" tabindex="-1"></div>
+      <section
+        id="connect-agent-dialog"
+        class="connect-agent-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="connect-agent-dialog-title"
+      >
+        <div class="connect-agent-dialog-header">
+          <div>
+            <h2 id="connect-agent-dialog-title" class="connect-agent-dialog-title" data-i18n="drawer.agent.title">Connect Agent</h2>
+            <p class="connect-agent-dialog-desc" data-i18n="drawer.agent.description">
+              Copy this setup text and send it to your Agent. It includes this workspace ID and password.
+            </p>
+          </div>
+          <button
+            id="connect-agent-dialog-close-btn"
+            type="button"
+            class="workspace-info-drawer-close"
+            aria-label="Close"
+            data-i18n-aria-label="common.close"
+          >
+            ×
+          </button>
+        </div>
+        <div class="connect-agent-dialog-body">
+          <label class="connect-agent-prompt-label" for="connect-agent-prompt-text" data-i18n="drawer.agent.promptLabel">
+            Agent setup text
+          </label>
+          <textarea id="connect-agent-prompt-text" class="connect-agent-prompt-text" readonly spellcheck="false"></textarea>
+          <div class="connect-agent-actions">
+            <button id="connect-agent-copy-btn" type="button" class="ghost-btn" data-i18n="drawer.agent.copy">Copy setup text</button>
+            <a
+              id="connect-agent-download-skill-link"
+              class="ghost-btn connect-agent-link-btn"
+              href="#"
+              download="JustWork-Agent-SKILL.md"
+              data-i18n="drawer.agent.downloadSkill"
+            >
+              Download SKILL.md
+            </a>
+            <a
+              id="connect-agent-backend-skill-link"
+              class="ghost-btn connect-agent-link-btn"
+              href="#"
+              target="_blank"
+              rel="noreferrer"
+              data-i18n="drawer.agent.openBackendSkill"
+            >
+              Open Skill URL
+            </a>
+          </div>
+        </div>
+      </section>
     </div>
 
     <div id="workspace-nickname-prompt-root" class="workspace-nickname-prompt-root" aria-hidden="true">

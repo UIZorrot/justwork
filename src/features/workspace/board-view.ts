@@ -2,12 +2,14 @@ import {
   addBoardCard,
   addBoardCardField,
   addBoardColumn,
+  addBoardTemplateCard,
   addBoardTemplateField,
   moveBoardCard,
   recolorBoardColumn,
   removeBoardCard,
   removeBoardColumn,
   removeBoardCardField,
+  removeBoardTemplateCard,
   removeBoardTemplateField,
   renameBoardColumn,
   updateBoardCardField,
@@ -103,12 +105,14 @@ function createInput(
   value: string,
   onInput: (value: string) => void,
   readOnly = false,
+  focusKey?: string,
 ): HTMLInputElement {
   const input = document.createElement("input") as HTMLInputElement;
   input.type = "text";
   input.className = className;
   input.value = value;
   input.readOnly = readOnly;
+  if (focusKey) input.dataset.focusKey = focusKey;
   input.addEventListener("input", () => onInput(input.value));
   return input;
 }
@@ -118,12 +122,72 @@ function createTextarea(
   className: string,
   value: string,
   onInput: (value: string) => void,
+  focusKey?: string,
 ): HTMLTextAreaElement {
   const textarea = document.createElement("textarea") as HTMLTextAreaElement;
   textarea.className = className;
   textarea.value = value;
+  if (focusKey) textarea.dataset.focusKey = focusKey;
   textarea.addEventListener("input", () => onInput(textarea.value));
   return textarea;
+}
+
+type FocusState = {
+  key: string;
+  selectionStart: number | null;
+  selectionEnd: number | null;
+};
+
+function isDescendant(root: HTMLElement, node: HTMLElement | null): boolean {
+  let current: HTMLElement | null = node;
+  while (current) {
+    if (current === root) return true;
+    current = (current.parentNode as HTMLElement | null) ?? null;
+  }
+  return false;
+}
+
+function captureFocusState(root: HTMLElement): FocusState | null {
+  const ownerDocument = root.ownerDocument as (Document & { activeElement?: Element | null }) | undefined;
+  const activeElement = ownerDocument?.activeElement as (HTMLElement & {
+    dataset?: DOMStringMap;
+    selectionStart?: number | null;
+    selectionEnd?: number | null;
+  }) | null;
+  if (!activeElement || !isDescendant(root, activeElement)) return null;
+  const key = activeElement.dataset?.focusKey?.trim();
+  if (!key) return null;
+  return {
+    key,
+    selectionStart: typeof activeElement.selectionStart === "number" ? activeElement.selectionStart : null,
+    selectionEnd: typeof activeElement.selectionEnd === "number" ? activeElement.selectionEnd : null,
+  };
+}
+
+function findElementByFocusKey(root: HTMLElement, focusKey: string): (HTMLElement & {
+  focus?: () => void;
+  setSelectionRange?: (start: number, end: number) => void;
+}) | null {
+  const children = [...root.children] as HTMLElement[];
+  for (const child of children) {
+    if ((child.dataset?.focusKey ?? "") === focusKey) return child as HTMLElement & {
+      focus?: () => void;
+      setSelectionRange?: (start: number, end: number) => void;
+    };
+    const nested = findElementByFocusKey(child, focusKey);
+    if (nested) return nested;
+  }
+  return null;
+}
+
+function restoreFocusState(root: HTMLElement, state: FocusState | null): void {
+  if (!state) return;
+  const nextActive = findElementByFocusKey(root, state.key);
+  if (!nextActive) return;
+  nextActive.focus?.();
+  if (state.selectionStart != null && state.selectionEnd != null) {
+    nextActive.setSelectionRange?.(state.selectionStart, state.selectionEnd);
+  }
 }
 
 function appendColorSwatches(
@@ -158,6 +222,7 @@ function createCardCount(document: DocumentLike, count: number): HTMLElement {
 export function createBoardView(options: BoardViewOptions): BoardViewHandle {
   let current = normalizeStructuredDocumentContent("board", options.content) as BoardDocumentContent;
   let selectedCardId: string | null = null;
+  let templateEditorOpen = false;
   let templateCollapsed = false;
   let sortables: SortableInstance[] = [];
   let sortableBindToken = 0;
@@ -182,6 +247,10 @@ export function createBoardView(options: BoardViewOptions): BoardViewHandle {
 
   const selectedCard = (): BoardCard | undefined => (
     selectedCardId ? current.cards.find((card) => card.id === selectedCardId) : undefined
+  );
+
+  const isTemplateCard = (cardId: string | null): boolean => (
+    Boolean(cardId && current.template.cardIds.includes(cardId))
   );
 
   const emit = (next: BoardDocumentContent): void => {
@@ -261,45 +330,36 @@ export function createBoardView(options: BoardViewOptions): BoardViewHandle {
       return lane;
     }
 
-    const templateCard = options.document.createElement("div") as HTMLElement;
-    templateCard.className = "structured-board-template-card";
-
-    current.template.fields.forEach((field) => {
-      const row = options.document.createElement("div") as HTMLElement;
-      row.className = "structured-board-field-row";
-      row.append(createInput(options.document, "structured-board-field-name", field.name, (value) => {
-        emit(updateBoardTemplateField(current, field.id, { name: value }));
-      }));
-      if (current.template.fields.length > 1) {
-        row.append(createButton(
-          options.document,
-          "structured-action-btn structured-action-btn--danger",
-          labels.removeField,
-          () => emit(removeBoardTemplateField(current, field.id)),
-        ));
-      }
-      templateCard.append(row);
+    const list = options.document.createElement("div") as HTMLElement;
+    list.className = "structured-board-card-list structured-board-card-list--template";
+    current.template.cardIds.forEach((cardId) => {
+      const card = current.cards.find((entry) => entry.id === cardId);
+      if (card) list.append(renderCard(card, { template: true }));
     });
+    lane.append(list);
 
-    templateCard.append(createButton(
+    lane.append(createButton(
       options.document,
       "structured-action-btn structured-action-btn--subtle",
-      labels.addField,
-      () => emit(addBoardTemplateField(current)),
+      labels.addCard,
+      () => {
+        const next = addBoardTemplateCard(current);
+        selectedCardId = next.template.cardIds.at(-1) ?? null;
+        templateEditorOpen = true;
+        emit(next);
+      },
     ));
-
-    lane.append(templateCard);
     return lane;
   };
 
   const renderDrawer = (): HTMLElement => {
     const shell = options.document.createElement("div") as HTMLElement;
-    shell.className = selectedCard() ? "structured-board-drawer-shell is-open" : "structured-board-drawer-shell";
+    shell.className = templateEditorOpen || selectedCard() ? "structured-board-drawer-shell is-open" : "structured-board-drawer-shell";
 
     const drawer = options.document.createElement("aside") as HTMLElement;
     drawer.className = "structured-board-drawer";
     const card = selectedCard();
-    if (!card) {
+    if (!templateEditorOpen && !card) {
       return shell;
     }
 
@@ -307,8 +367,9 @@ export function createBoardView(options: BoardViewOptions): BoardViewHandle {
     header.className = "structured-board-drawer-header";
     const kicker = options.document.createElement("span") as HTMLElement;
     kicker.className = "structured-board-drawer-kicker";
-    kicker.textContent = "Card";
+    kicker.textContent = templateEditorOpen ? "Column template" : "Card";
     const close = createButton(options.document, "structured-board-drawer-close", "\u00D7", () => {
+      templateEditorOpen = false;
       selectedCardId = null;
       render();
     });
@@ -316,10 +377,90 @@ export function createBoardView(options: BoardViewOptions): BoardViewHandle {
     header.append(kicker, close);
     drawer.append(header);
 
+    if (templateEditorOpen && card) {
+      drawer.append(
+        createInput(
+          options.document,
+          "structured-board-drawer-title",
+          card.title,
+          (value) => {
+            emit(updateBoardCardTitle(current, card.id, value));
+          },
+          false,
+          `card-title:${card.id}`,
+        ),
+      );
+
+      card.fields.forEach((field) => {
+        const row = options.document.createElement("div") as HTMLElement;
+        row.className = "structured-board-field-row";
+        row.append(createInput(
+          options.document,
+          "structured-board-field-name",
+          field.name,
+          (value) => {
+            emit(updateBoardTemplateField(current, field.templateFieldId ?? field.id, { name: value }));
+          },
+          false,
+          `template-field-name:${field.templateFieldId ?? field.id}`,
+        ));
+        row.append(createTextarea(
+          options.document,
+          "structured-board-field-value",
+          field.value,
+          (value) => {
+            emit(updateBoardCardField(current, card.id, field.id, { value }));
+          },
+          `template-field-value:${card.id}:${field.id}`,
+        ));
+        if (current.template.fields.length > 1 && field.templateFieldId) {
+          row.append(createButton(
+            options.document,
+            "structured-action-btn structured-action-btn--danger",
+            labels.removeField,
+            () => emit(removeBoardTemplateField(current, field.templateFieldId!)),
+          ));
+        }
+        drawer.append(row);
+      });
+      drawer.append(createButton(
+        options.document,
+        "structured-action-btn structured-action-btn--subtle",
+        labels.addField,
+        () => emit(addBoardTemplateField(current)),
+      ));
+      if (current.template.cardIds.length > 1) {
+        drawer.append(createButton(
+          options.document,
+          "structured-action-btn structured-action-btn--danger structured-action-btn--full",
+          labels.deleteCard,
+          () => {
+            const next = removeBoardTemplateCard(current, card.id);
+            selectedCardId = next.template.cardIds.at(-1) ?? null;
+            templateEditorOpen = next.template.cardIds.length > 0;
+            emit(next);
+          },
+        ));
+      }
+      shell.append(drawer);
+      return shell;
+    }
+
+    if (!card) {
+      return shell;
+    }
+
     drawer.append(
-      createInput(options.document, "structured-board-drawer-title", card.title, (value) => {
-        emit(updateBoardCardTitle(current, card.id, value));
-      }),
+      createInput(
+        options.document,
+        "structured-board-drawer-title",
+        card.title,
+        (value) => {
+          emit(updateBoardCardTitle(current, card.id, value));
+        },
+        false,
+        `card-title:${card.id}`,
+      ),
     );
 
     card.fields.forEach((field) => {
@@ -335,10 +476,17 @@ export function createBoardView(options: BoardViewOptions): BoardViewHandle {
             emit(updateBoardCardField(current, card.id, field.id, { name: value }));
           },
           Boolean(field.templateFieldId),
+          `card-field-name:${card.id}:${field.id}`,
         ),
-        createTextarea(options.document, "structured-board-field-value", field.value, (value) => {
-          emit(updateBoardCardField(current, card.id, field.id, { value }));
-        }),
+        createTextarea(
+          options.document,
+          "structured-board-field-value",
+          field.value,
+          (value) => {
+            emit(updateBoardCardField(current, card.id, field.id, { value }));
+          },
+          `card-field-value:${card.id}:${field.id}`,
+        ),
       );
       if (!field.templateFieldId) {
         row.append(createButton(
@@ -368,26 +516,33 @@ export function createBoardView(options: BoardViewOptions): BoardViewHandle {
     return shell;
   };
 
-  const renderCard = (card: BoardCard): HTMLElement => {
+  const renderCard = (card: BoardCard, opts?: { template?: boolean }): HTMLElement => {
     const cardEl = options.document.createElement("article") as HTMLElement;
     cardEl.className = card.id === selectedCardId
       ? "structured-board-card structured-board-card--active"
       : "structured-board-card";
+    if (opts?.template) {
+      cardEl.classList.add("structured-board-card--template");
+    }
     cardEl.dataset.cardId = card.id;
     cardEl.addEventListener("click", () => {
+      templateEditorOpen = Boolean(opts?.template);
       selectedCardId = card.id;
       render();
     });
 
     const head = options.document.createElement("div") as HTMLElement;
     head.className = "structured-board-card-head";
-    const grip = options.document.createElement("span") as HTMLElement;
-    grip.className = "structured-board-card-grip";
-    grip.textContent = "\u22EE\u22EE";
     const title = options.document.createElement("h3") as HTMLElement;
     title.className = "structured-board-card-summary-title";
     title.textContent = card.title || "Untitled card";
-    head.append(grip, title);
+    if (!opts?.template) {
+      const grip = options.document.createElement("span") as HTMLElement;
+      grip.className = "structured-board-card-grip";
+      grip.textContent = "\u22EE\u22EE";
+      head.append(grip);
+    }
+    head.append(title);
     cardEl.append(head);
 
     const summaryLines = boardCardSummary(card, 4);
@@ -428,9 +583,16 @@ export function createBoardView(options: BoardViewOptions): BoardViewHandle {
     const meta = options.document.createElement("div") as HTMLElement;
     meta.className = "structured-board-column-meta";
     meta.append(
-      createInput(options.document, "structured-board-column-title", column.title, (value) => {
-        emit(renameBoardColumn(current, column.id, value));
-      }),
+      createInput(
+        options.document,
+        "structured-board-column-title",
+        column.title,
+        (value) => {
+          emit(renameBoardColumn(current, column.id, value));
+        },
+        false,
+        `column-title:${column.id}`,
+      ),
       createCardCount(options.document, column.cardIds.length),
     );
     topRow.append(meta);
@@ -490,6 +652,7 @@ export function createBoardView(options: BoardViewOptions): BoardViewHandle {
 
   const render = (): void => {
     destroySortables();
+    const focusState = captureFocusState(root);
 
     const shell = options.document.createElement("div") as HTMLElement;
     shell.className = "structured-board-shell";
@@ -502,6 +665,7 @@ export function createBoardView(options: BoardViewOptions): BoardViewHandle {
     shell.append(stage);
 
     root.replaceChildren(shell, drawer);
+    restoreFocusState(root, focusState);
 
     const lists = board.querySelectorAll?.(".structured-board-card-list");
     if (lists && typeof lists.length === "number") {
