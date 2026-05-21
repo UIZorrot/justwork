@@ -1,0 +1,242 @@
+{
+  "steps": [
+    {
+      "token": "A1",
+      "expected": "A1",
+      "actual": "A1",
+      "ok": true
+    },
+    {
+      "token": "B2",
+      "expected": "A1B2",
+      "actual": "A1B2",
+      "ok": true
+    },
+    {
+      "token": "C3",
+      "expected": "A1B2C3",
+      "actual": "A1B2",
+      "ok": false
+    }
+  ],
+  "debugEvents": [
+    {
+      "tag": "editor:bindCollaborator",
+      "payload": {
+        "next": "workspace_14ebff6c40fb42b591608ec656f3f303::doc_b11a01ebe93a471eb2c09d325c24bc59",
+        "previous": null
+      },
+      "at": 1779268337155
+    },
+    {
+      "tag": "editor:bindCollaborator:skip",
+      "payload": {
+        "storageKey": "workspace_14ebff6c40fb42b591608ec656f3f303::doc_b11a01ebe93a471eb2c09d325c24bc59"
+      },
+      "at": 1779268337156
+    },
+    {
+      "tag": "editor:syncActive",
+      "payload": {
+        "activeId": "doc_b11a01ebe93a471eb2c09d325c24bc59",
+        "activeRevision": 0,
+        "currentLength": 0,
+        "nextLength": 0,
+        "shouldResync": false,
+        "isActivePageComposing": false
+      },
+      "at": 1779268337156
+    },
+    {
+      "tag": "editor:dispatchMarkdown",
+      "payload": {
+        "length": 3,
+        "preview": "A1\n",
+        "listenerCount": 1
+      },
+      "at": 1779268340453
+    },
+    {
+      "tag": "editor:onChange",
+      "payload": {
+        "itemId": "doc_b11a01ebe93a471eb2c09d325c24bc59",
+        "expectedRevision": 0,
+        "markdownLength": 3,
+        "previousMarkdownLength": 0
+      },
+      "at": 1779268340455
+    },
+    {
+      "tag": "save:request",
+      "payload": {
+        "itemId": "doc_b11a01ebe93a471eb2c09d325c24bc59",
+        "expectedRevision": 0,
+        "patchKeys": [
+          "markdown"
+        ],
+        "markdownLength": 3
+      },
+      "at": 1779268340700
+    },
+    {
+      "tag": "save:response",
+      "payload": {
+        "itemId": "doc_b11a01ebe93a471eb2c09d325c24bc59",
+        "revision": 1,
+        "markdownLength": 3
+      },
+      "at": 1779268340878
+    },
+    {
+      "tag": "editor:dispatchMarkdown",
+      "payload": {
+        "length": 7,
+        "preview": "A1\n\nB2\n",
+        "listenerCount": 1
+      },
+      "at": 1779268341695
+    },
+    {
+      "tag": "editor:onChange",
+      "payload": {
+        "itemId": "doc_b11a01ebe93a471eb2c09d325c24bc59",
+        "expectedRevision": 1,
+        "markdownLength": 7,
+        "previousMarkdownLength": 3
+      },
+      "at": 1779268341696
+    },
+    {
+      "tag": "save:request",
+      "payload": {
+        "itemId": "doc_b11a01ebe93a471eb2c09d325c24bc59",
+        "expectedRevision": 1,
+        "patchKeys": [
+          "markdown"
+        ],
+        "markdownLength": 7
+      },
+      "at": 1779268341944
+    },
+    {
+      "tag": "save:response",
+      "payload": {
+        "itemId": "doc_b11a01ebe93a471eb2c09d325c24bc59",
+        "revision": 2,
+        "markdownLength": 7
+      },
+      "at": 1779268342210
+    },
+    {
+      "tag": "tree:refresh",
+      "payload": {
+        "summaryId": "doc_b11a01ebe93a471eb2c09d325c24bc59",
+        "summaryRevision": 2,
+        "localRevision": 2,
+        "shouldReloadPage": false,
+        "shouldReloadStructured": false,
+        "hydratedRevision": 2,
+        "hydratedMarkdownLength": 7,
+        "dirty": false,
+        "isComposingActivePage": false
+      },
+      "at": 1779268342329
+    },
+    {
+      "tag": "editor:bindCollaborator:skip",
+      "payload": {
+        "storageKey": "workspace_14ebff6c40fb42b591608ec656f3f303::doc_b11a01ebe93a471eb2c09d325c24bc59"
+      },
+      "at": 1779268342329
+    },
+    {
+      "tag": "editor:syncActive",
+      "payload": {
+        "activeId": "doc_b11a01ebe93a471eb2c09d325c24bc59",
+        "activeRevision": 2,
+        "currentLength": 7,
+        "nextLength": 7,
+        "shouldResync": false,
+        "isActivePageComposing": false
+      },
+      "at": 1779268342331
+    },
+    {
+      "tag": "tree:refresh",
+      "payload": {
+        "summaryId": "doc_b11a01ebe93a471eb2c09d325c24bc59",
+        "summaryRevision": 2,
+        "localRevision": 2,
+        "shouldReloadPage": false,
+        "shouldReloadStructured": false,
+        "hydratedRevision": 2,
+        "hydratedMarkdownLength": 7,
+        "dirty": false,
+        "isComposingActivePage": false
+      },
+      "at": 1779268346336
+    },
+    {
+      "tag": "editor:bindCollaborator:skip",
+      "payload": {
+        "storageKey": "workspace_14ebff6c40fb42b591608ec656f3f303::doc_b11a01ebe93a471eb2c09d325c24bc59"
+      },
+      "at": 1779268346337
+    },
+    {
+      "tag": "editor:syncActive",
+      "payload": {
+        "activeId": "doc_b11a01ebe93a471eb2c09d325c24bc59",
+        "activeRevision": 2,
+        "currentLength": 7,
+        "nextLength": 7,
+        "shouldResync": false,
+        "isActivePageComposing": false
+      },
+      "at": 1779268346338
+    },
+    {
+      "tag": "tree:refresh",
+      "payload": {
+        "summaryId": "doc_b11a01ebe93a471eb2c09d325c24bc59",
+        "summaryRevision": 2,
+        "localRevision": 2,
+        "shouldReloadPage": false,
+        "shouldReloadStructured": false,
+        "hydratedRevision": 2,
+        "hydratedMarkdownLength": 7,
+        "dirty": false,
+        "isComposingActivePage": false
+      },
+      "at": 1779268347235
+    },
+    {
+      "tag": "editor:bindCollaborator:skip",
+      "payload": {
+        "storageKey": "workspace_14ebff6c40fb42b591608ec656f3f303::doc_b11a01ebe93a471eb2c09d325c24bc59"
+      },
+      "at": 1779268347235
+    },
+    {
+      "tag": "editor:syncActive",
+      "payload": {
+        "activeId": "doc_b11a01ebe93a471eb2c09d325c24bc59",
+        "activeRevision": 2,
+        "currentLength": 11,
+        "nextLength": 7,
+        "shouldResync": true,
+        "isActivePageComposing": false
+      },
+      "at": 1779268347236
+    },
+    {
+      "tag": "editor:setMarkdown:apply",
+      "payload": {
+        "clearHistory": true,
+        "length": 7,
+        "preview": "A1\n\nB2\n"
+      },
+      "at": 1779268347236
+    }
+  ]
+}

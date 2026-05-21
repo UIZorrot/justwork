@@ -23,6 +23,15 @@ test("workspace sidebar includes a Connect Agent modal with copy and download co
   }
 });
 
+test("Connect Agent appears before New document in the sidebar create section", async () => {
+  const html = await readFile(workbenchHtmlPath, "utf8");
+  const connectIndex = html.indexOf('id="connect-agent-btn"');
+  const newFileIndex = html.indexOf('id="new-file-btn"');
+  assert.notEqual(connectIndex, -1);
+  assert.notEqual(newFileIndex, -1);
+  assert.ok(connectIndex < newFileIndex);
+});
+
 test("Connect Agent prompt only includes the real password when the user remembered it locally", async () => {
   const workbench = await readFile(workbenchTsPath, "utf8");
 

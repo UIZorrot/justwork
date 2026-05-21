@@ -1,0 +1,30 @@
+{
+  "backendUrl": "http://127.0.0.1:24016",
+  "consoleErrors": [],
+  "results": [
+    {
+      "step": 1,
+      "op": "append",
+      "token": "A1",
+      "expected": "A1",
+      "actual": "A1",
+      "ok": true
+    },
+    {
+      "step": 2,
+      "op": "append",
+      "token": "B2",
+      "expected": "A1B2",
+      "actual": "A1B2",
+      "ok": true
+    },
+    {
+      "step": 3,
+      "op": "append",
+      "token": "C3",
+      "expected": "A1B2C3",
+      "actual": "A1B2",
+      "ok": false
+    }
+  ]
+}

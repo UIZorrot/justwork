@@ -61,11 +61,13 @@ test("structured document defaults and normalization cover table and board conte
       {
         id: "template_card",
         title: "Template seed",
+        status: "todo",
         fields: [{ id: "template_field_instance", templateFieldId: "field_a", name: "Summary", value: "Seed" }],
       },
       {
         id: "card_a",
         title: "Ship",
+        status: "todo",
         fields: [{ id: "field_instance", templateFieldId: "field_a", name: "Summary", value: "42" }],
       },
     ],

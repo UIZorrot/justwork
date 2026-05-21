@@ -21,6 +21,7 @@ type BackendDocDraft = {
   content?: WorkspaceDocContent | null;
   seq: number;
   updatedAt: string;
+  baseRevision?: number;
 };
 
 type BackendDocDraftSyncMessage = {

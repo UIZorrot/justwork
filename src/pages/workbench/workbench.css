@@ -1406,6 +1406,12 @@ body {
   z-index: 50 !important;
 }
 
+/* Hide Vditor's WYSIWYG floating panels; they overlap selected document text. */
+.doc-editor-host .vditor-wysiwyg > .vditor-panel.vditor-panel--none {
+  display: none !important;
+  pointer-events: none;
+}
+
 .doc-editor-host .vditor-toolbar__item {
   border-radius: 6px;
 }
@@ -1934,6 +1940,22 @@ body {
   display: flex;
   align-items: flex-start;
   gap: 10px;
+}
+.structured-board-card-status {
+  min-width: 92px;
+  height: 32px;
+  padding: 0 10px;
+  border: 1px solid #dfdfdb;
+  border-radius: 999px;
+  background: #fff;
+  color: #525868;
+  font-size: 12px;
+  font-weight: 600;
+  outline: none;
+}
+.structured-board-card-status:focus {
+  border-color: #7ea4ff;
+  box-shadow: 0 0 0 3px rgba(96, 120, 255, 0.12);
 }
 .structured-board-card-grip {
   color: #9195a1;

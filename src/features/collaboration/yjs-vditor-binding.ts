@@ -20,7 +20,9 @@ export function createVditorMarkdownBinding(
 
   const syncCollaboratorFromEditor = (markdown: string): void => {
     if (suppress) return;
+    suppress = true;
     collaborator.applyLocalMarkdown(markdown);
+    suppress = false;
   };
 
   const syncEditorFromCollaborator = (): void => {

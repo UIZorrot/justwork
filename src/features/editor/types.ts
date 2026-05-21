@@ -3,6 +3,8 @@ export type DocEditor = {
   readonly root: HTMLElement;
   getMarkdown: () => string;
   setMarkdown: (md: string, clearHistory?: boolean) => void;
+  isComposing: () => boolean;
+  isFocused: () => boolean;
   bindCollaborator: (binding: CollaborativeMarkdownBinding | undefined) => void;
   destroy: () => void;
 };

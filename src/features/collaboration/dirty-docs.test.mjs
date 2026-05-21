@@ -42,3 +42,24 @@ test("dirty collaborative docs keep their cached local title after a tree refres
     { id: "b", title: "Local B", markdown: "local b" },
   ]);
 });
+
+test("clean collaborative docs prefer server data unless local revision is newer", async () => {
+  const mod = await importTsModule("src/features/collaboration/dirty-docs.ts");
+
+  const serverDocs = [
+    { id: "a", title: "Server A", markdown: "server a", revision: 3 },
+    { id: "b", title: "Server B", markdown: "server b", revision: 4 },
+  ];
+  const dirtyDocIds = new Set();
+  const localCache = new Map([
+    ["a", { id: "a", title: "Local Older", markdown: "local a", revision: 2 }],
+    ["b", { id: "b", title: "Local Newer", markdown: "local b", revision: 5 }],
+  ]);
+
+  const nextDocs = mod.overlayDirtyCollaborativeDocs(serverDocs, dirtyDocIds, localCache);
+
+  assert.deepEqual(nextDocs, [
+    { id: "a", title: "Server A", markdown: "server a", revision: 3 },
+    { id: "b", title: "Local Newer", markdown: "local b", revision: 5 },
+  ]);
+});

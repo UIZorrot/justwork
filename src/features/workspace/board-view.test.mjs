@@ -226,7 +226,7 @@ test("board view keeps the drawer outside the stage shell and shows no empty pla
   );
 });
 
-test("board view uses visual color swatches instead of hex selects", async () => {
+test("board view uses visual color swatches and reserves selects for card status only", async () => {
   const documents = await loadTranspiledModule("src/features/workspace/structured-document.ts");
   const mod = await loadTranspiledModule("src/features/workspace/board-view.ts");
 
@@ -238,7 +238,15 @@ test("board view uses visual color swatches instead of hex selects", async () =>
   });
 
   const selects = view.element.querySelectorAll("select");
-  assert.equal(selects.length, 0);
+  assert.equal(selects.length >= initial.cards.length, true);
+  assert.equal(
+    selects.every((select) => select.className === "structured-board-card-status"),
+    true,
+  );
+  assert.equal(
+    selects.every((select) => ["todo", "doing", "done", "paused"].includes(select.value)),
+    true,
+  );
 
   const swatches = view.element
     .querySelectorAll("button")
@@ -295,6 +303,16 @@ test("board view template behaves like a column template preview and edits from 
       .length,
     1,
   );
+  const templateLane = view.element
+    .querySelectorAll("section")
+    .find((element) => element.className.includes("structured-board-column--template"));
+  assert.ok(templateLane);
+  const templateChildren = templateLane.children;
+  const templateAddCardBtn = [...templateChildren].find((child) => child.tagName === "BUTTON" && child.textContent === "Add card");
+  const templateList = [...templateChildren].find((child) => child.className === "structured-board-card-list structured-board-card-list--template");
+  assert.ok(templateAddCardBtn);
+  assert.ok(templateList);
+  assert.equal(templateChildren.indexOf(templateAddCardBtn) < templateChildren.indexOf(templateList), true);
 
   toggle.click();
   assert.equal(
@@ -343,11 +361,11 @@ test("board view template behaves like a column template preview and edits from 
   expandedField.dispatchEvent(new FakeEvent("input"));
   assert.equal(changes.at(-1).template.fields[0].name, "Checklist");
 
-  const templateAddCardBtn = view.element
+  const templateAddCardBtn2 = view.element
     .querySelectorAll("button")
     .find((button) => button.textContent === "Add card" && button.closest(".structured-board-column--template"));
-  assert.ok(templateAddCardBtn);
-  templateAddCardBtn.click();
+  assert.ok(templateAddCardBtn2);
+  templateAddCardBtn2.click();
   assert.equal(changes.at(-1).template.cardIds.length, 2);
 });
 

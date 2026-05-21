@@ -1,0 +1,20 @@
+{
+  "logs": [
+    {
+      "type": "debug",
+      "text": "[mount] image sync ready workspace_0b72845cf00e47d7b3ff45c99d4c50ca"
+    },
+    {
+      "type": "debug",
+      "text": "[mount] markdown warm complete workspace_0b72845cf00e47d7b3ff45c99d4c50ca"
+    }
+  ],
+  "extensionId": "nhjffgjdjjepijcdpdnmkgbkkkelinio",
+  "url": "chrome-extension://nhjffgjdjjepijcdpdnmkgbkkkelinio/src/pages/workbench/index.html?backendUrl=http%3A%2F%2F127.0.0.1%3A23430",
+  "body": "JustWork\n/\n工作区\n加载中\n连接错误\n已保存\nInbox\n0\n中文\nJustWork Backend\n创建加密工作区\n\n输入一个工作区密码。内容会加密后同步到 JustWork Backend，密码不会写入数据库。\n\n \nRemember password on this device\n\nStored locally in this browser only. The backend never stores the workspace password.\n\n创建并解锁\n最近使用的工作区\n\n暂无记录，创建或解锁成功后会出现在这里。\n\nCannot read properties of undefined (reading 'VditorDOM2Md')",
+  "shellVisible": 0,
+  "nicknameOpen": 0,
+  "unlockVisible": 0,
+  "setupVisible": 1,
+  "status": "连接错误"
+}

@@ -7,6 +7,7 @@ import { saveCollaborativeSnapshot } from "@/features/collaboration/collab-stora
 import { createVditorMarkdownBinding } from "@/features/collaboration/yjs-vditor-binding";
 import { getRuntimeUrl } from "@/shared/browser-platform";
 import type { CollaborativeMarkdownBinding, CreateEditorOptions, DocEditor, EditorImageUploadResult } from "../types";
+import { createCompositionGate } from "./composition-gate";
 import { getWysiwygToolbar } from "./wysiwyg-toolbar";
 
 type VditorWithInsert = Vditor & {
@@ -47,17 +48,32 @@ export function createWysiwygEditor(options: CreateEditorOptions): DocEditor {
   const markdownInputListeners = new Set<(markdown: string) => void>();
   let lastEmittedMarkdown = initialMarkdown;
   let lastInputMarkdown = initialMarkdown;
+  let lastKnownMarkdown = initialMarkdown;
   let collaboratorObserver: (() => void) | undefined;
   let collaboratorBinding: ReturnType<typeof createVditorMarkdownBinding> | undefined;
   let collaboratorState: CollaborativeMarkdownBinding | undefined;
+  const compositionGate = createCompositionGate();
 
-  const getMarkdown = (): string => vditor?.getValue() ?? "";
+  const getMarkdown = (): string => {
+    if (!editorReady || !vditor) {
+      return pendingMarkdown?.markdown ?? lastKnownMarkdown;
+    }
+    try {
+      const next = imageSync?.fromEditorMarkdown(vditor.getValue()) ?? vditor.getValue();
+      lastKnownMarkdown = next;
+      return next;
+    } catch {
+      return pendingMarkdown?.markdown ?? lastKnownMarkdown;
+    }
+  };
   const applyMarkdown = (markdown: string, clearHistory: boolean): void => {
+    lastKnownMarkdown = markdown;
     vditor?.setValue(imageSync?.toEditorMarkdown(markdown) ?? markdown, clearHistory);
   };
   const setMarkdown = (markdown: string, clearHistory?: boolean): void => {
     const nextClearHistory = clearHistory ?? false;
     if (!editorReady || !vditor) {
+      lastKnownMarkdown = markdown;
       pendingMarkdown = { markdown, clearHistory: nextClearHistory };
       return;
     }
@@ -74,6 +90,23 @@ export function createWysiwygEditor(options: CreateEditorOptions): DocEditor {
     for (const listener of markdownInputListeners) {
       listener(markdown);
     }
+  };
+  const dispatchMarkdown = (markdown: string): void => {
+    if (markdownInputListeners.size > 0) {
+      notifyMarkdownInput(markdown);
+      return;
+    }
+    emitMarkdown(markdown);
+  };
+  const flushComposedMarkdown = (): void => {
+    const markdown = compositionGate.onCompositionEnd(imageSync?.fromEditorMarkdown(getMarkdown()) ?? getMarkdown());
+    if (markdown === null) return;
+    dispatchMarkdown(markdown);
+  };
+  const cancelComposedMarkdown = (): void => {
+    const markdown = compositionGate.onCompositionCancel(imageSync?.fromEditorMarkdown(getMarkdown()) ?? getMarkdown());
+    if (markdown === null) return;
+    dispatchMarkdown(markdown);
   };
 
   const editorSurface = {
@@ -100,6 +133,17 @@ export function createWysiwygEditor(options: CreateEditorOptions): DocEditor {
   };
 
   const bindCollaborator = (binding: CollaborativeMarkdownBinding | undefined): void => {
+    if (
+      binding &&
+      collaboratorState &&
+      collaboratorState.collaborator === binding.collaborator &&
+      collaboratorState.storageKey === binding.storageKey
+    ) {
+      return;
+    }
+    if (!binding && !collaboratorState) {
+      return;
+    }
     unbindCollaborator();
     if (!binding) return;
     collaboratorState = binding;
@@ -118,6 +162,9 @@ export function createWysiwygEditor(options: CreateEditorOptions): DocEditor {
   const startingMarkdown = options.collaboratorBinding?.collaborator.getMarkdown() ?? initialMarkdown;
 
   ensureBundledVditorIcons();
+  container.addEventListener("compositionstart", compositionGate.onCompositionStart, true);
+  container.addEventListener("compositionend", flushComposedMarkdown, true);
+  container.addEventListener("compositioncancel", cancelComposedMarkdown, true);
   vditor = new Vditor(container, {
     cdn: vditorCdnBase(),
     lang: "zh_CN",
@@ -142,11 +189,10 @@ export function createWysiwygEditor(options: CreateEditorOptions): DocEditor {
     value: imageSync?.toEditorMarkdown(startingMarkdown) ?? startingMarkdown,
     input: (value) => {
       const markdown = imageSync?.fromEditorMarkdown(value) ?? value;
-      if (markdownInputListeners.size > 0) {
-        notifyMarkdownInput(markdown);
-        return;
-      }
-      emitMarkdown(markdown);
+      lastKnownMarkdown = markdown;
+      const gatedMarkdown = compositionGate.onInput(markdown);
+      if (gatedMarkdown === null) return;
+      dispatchMarkdown(gatedMarkdown);
     },
     after: () => {
       editorReady = true;
@@ -181,12 +227,17 @@ export function createWysiwygEditor(options: CreateEditorOptions): DocEditor {
     root: container,
     getMarkdown,
     setMarkdown,
+    isComposing: compositionGate.isComposing,
+    isFocused: () => container.contains(document.activeElement),
     bindCollaborator,
     destroy: () => {
       unbindCollaborator();
       vditor?.destroy();
       vditor = undefined;
       imageSync?.dispose?.();
+      container.removeEventListener("compositionstart", compositionGate.onCompositionStart, true);
+      container.removeEventListener("compositionend", flushComposedMarkdown, true);
+      container.removeEventListener("compositioncancel", cancelComposedMarkdown, true);
       container.classList.remove("doc-editor--ready");
     },
   };

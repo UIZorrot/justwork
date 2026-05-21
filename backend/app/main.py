@@ -82,6 +82,7 @@ from .workspace_runtime import (
     make_workspace_id,
     choose_active_item_id,
     ensure_workspace_members,
+    ensure_actor_workspace_member,
     move_doc,
     now_iso,
     normalize_workspace_state,
@@ -419,10 +420,12 @@ def save_state(
     password: str,
     *,
     owner_nickname: str | None = None,
+    actor_user_id: str | None = None,
 ) -> WorkspaceRecord:
     state_payload.pop("history", None)
     next_owner_nickname = record.owner_nickname if owner_nickname is None else owner_nickname
     ensure_workspace_members(state_payload, record.owner_user_id, next_owner_nickname)
+    ensure_actor_workspace_member(state_payload, record.owner_user_id, actor_user_id)
     apply_workspace_quotas_or_raise(state_payload, _quota_plan_for_workspace(record))
     next_record = WorkspaceRecord(
         workspace_id=record.workspace_id,
@@ -747,6 +750,7 @@ def update_profile(
             state_payload,
             password,
             owner_nickname=body.nickname if target_user_id == record.owner_user_id else None,
+            actor_user_id=actor_user_id,
         )
         return ProfileResponse(
             ok=True,
@@ -803,11 +807,11 @@ def update_workspace_settings(
     _: None = Depends(require_backend_token),
     gateway: DatabaseGateway = Depends(get_gateway),
 ) -> WorkspaceSettingsResponse:
-    actor_from_body(body, request, workspace_id, "settings")
+    actor_user_id, _, _ = actor_from_body(body, request, workspace_id, "settings")
     record = require_workspace(gateway, workspace_id)
     state_payload = load_decrypted_state(record, body.password)
     title = update_workspace_title(state_payload, body.title, workspace_id)
-    save_state(gateway, record, state_payload, body.password)
+    save_state(gateway, record, state_payload, body.password, actor_user_id=actor_user_id)
     return WorkspaceSettingsResponse(ok=True, workspace_id=workspace_id, title=title)
 
 
@@ -953,7 +957,7 @@ def create_workspace_item(
         doc = create_doc(state_payload, body.kind, body.title, body.parent_id, body.client_item_id)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-    save_state(gateway, record, state_payload, body.password)
+    save_state(gateway, record, state_payload, body.password, actor_user_id=au)
     return WorkspaceItemResponse(ok=True, workspace_id=workspace_id, item=item_view(doc))
 
 
@@ -981,7 +985,7 @@ def update_workspace_item(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="item not found") from exc
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-    save_state(gateway, record, state_payload, body.password)
+    save_state(gateway, record, state_payload, body.password, actor_user_id=au)
     return WorkspaceItemResponse(ok=True, workspace_id=workspace_id, item=item_view(doc))
 
 
@@ -1004,7 +1008,7 @@ def pin_workspace_item(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="item not found") from exc
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-    save_state(gateway, record, state_payload, body.password)
+    save_state(gateway, record, state_payload, body.password, actor_user_id=au)
     return WorkspaceItemResponse(ok=True, workspace_id=workspace_id, item=item_view(doc))
 
 
@@ -1027,7 +1031,7 @@ def move_workspace_item(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="item not found") from exc
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-    save_state(gateway, record, state_payload, body.password)
+    save_state(gateway, record, state_payload, body.password, actor_user_id=au)
     return WorkspaceItemResponse(ok=True, workspace_id=workspace_id, item=item_view(doc))
 
 
@@ -1050,7 +1054,7 @@ def trash_workspace_item(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="item not found") from exc
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-    save_state(gateway, record, state_payload, body.password)
+    save_state(gateway, record, state_payload, body.password, actor_user_id=au)
     return WorkspaceItemResponse(ok=True, workspace_id=workspace_id, item=item_view(doc))
 
 
@@ -1073,7 +1077,7 @@ def restore_workspace_item(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="item not found") from exc
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-    save_state(gateway, record, state_payload, body.password)
+    save_state(gateway, record, state_payload, body.password, actor_user_id=au)
     return WorkspaceItemResponse(ok=True, workspace_id=workspace_id, item=item_view(doc))
 
 
@@ -1097,7 +1101,7 @@ def hard_delete_workspace_item(
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     get_collab_relay_hub().delete_snapshot(workspace_id, item_id)
-    save_state(gateway, record, state_payload, body.password)
+    save_state(gateway, record, state_payload, body.password, actor_user_id=au)
     return WorkspaceItemResponse(ok=True, workspace_id=workspace_id, item=item_view(doc))
 
 
@@ -1171,7 +1175,7 @@ def patch_workspace_item(
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     if not body.dry_run and changed:
-        save_state(gateway, record, state_payload, body.password)
+        save_state(gateway, record, state_payload, body.password, actor_user_id=au)
     return WorkspacePatchResponse(
         ok=True,
         workspace_id=workspace_id,

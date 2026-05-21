@@ -1,0 +1,14 @@
+{
+  "backendUrl": "http://127.0.0.1:24148",
+  "consoleErrors": [],
+  "results": [
+    {
+      "step": 1,
+      "op": "append",
+      "token": " [1]",
+      "expected": " [1]",
+      "actual": "[1]",
+      "ok": false
+    }
+  ]
+}

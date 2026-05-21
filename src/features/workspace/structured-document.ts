@@ -35,9 +35,12 @@ export type BoardCardField = {
   value: string;
 };
 
+export type BoardCardStatus = "todo" | "doing" | "done" | "paused";
+
 export type BoardCard = {
   id: string;
   title: string;
+  status: BoardCardStatus;
   fields: BoardCardField[];
 };
 
@@ -73,6 +76,8 @@ export const BOARD_COLUMN_COLORS = [
   "#c7b8ff",
   "#ffb38a",
 ] as const;
+
+export const BOARD_CARD_STATUSES: BoardCardStatus[] = ["todo", "doing", "done", "paused"];
 
 const DEFAULT_TABLE_COLUMN_WIDTH = 140;
 const DEFAULT_TABLE_WORKBOOK_NAME = "Sheet";
@@ -145,6 +150,7 @@ export function createBoardCardFromTemplate(
   return {
     id: createStructuredId("card"),
     title: title.trim() || "Untitled card",
+    status: "todo",
     fields: template.fields.map((field) => cloneBoardTemplateFieldToCardField(field)),
   };
 }
@@ -153,6 +159,7 @@ export function cloneBoardCardPrototype(card: BoardCard): BoardCard {
   return {
     id: createStructuredId("card"),
     title: card.title.trim() || "Untitled card",
+    status: card.status,
     fields: card.fields.map((field) => ({
       id: createStructuredId("field"),
       templateFieldId: field.templateFieldId,
@@ -160,6 +167,10 @@ export function cloneBoardCardPrototype(card: BoardCard): BoardCard {
       value: field.value,
     })),
   };
+}
+
+function normalizeBoardCardStatus(value: unknown): BoardCardStatus {
+  return value === "doing" || value === "done" || value === "paused" ? value : "todo";
 }
 
 export function reconcileBoardCardWithTemplate(
@@ -564,6 +575,7 @@ function normalizeBoardCard(value: unknown, index: number, template: BoardTempla
     {
       id: asTrimmedString(record.id, `card_${index + 1}`),
       title: typeof record.title === "string" ? record.title : "",
+      status: normalizeBoardCardStatus(record.status),
       fields,
     },
     template,

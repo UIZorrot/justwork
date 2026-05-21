@@ -67,6 +67,7 @@ test("vditor binding syncs markdown both ways without dropping the local snapsho
 
   editor.emitInput("## Edited\n");
   assert.equal(collaborator.getMarkdown(), "## Edited\n");
+  assert.deepEqual(editor.getSetMarkdownCalls(), []);
 
   collaborator.applyLocalMarkdown("### Remote\n");
   assert.equal(editor.getMarkdown(), "### Remote\n");

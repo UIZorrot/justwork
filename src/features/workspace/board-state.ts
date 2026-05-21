@@ -1,5 +1,6 @@
 import {
   BOARD_COLUMN_COLORS,
+  type BoardCardStatus,
   createStructuredId,
   createBoardCardFromTemplate,
   cloneBoardCardPrototype,
@@ -72,6 +73,18 @@ export function updateBoardCardTitle(content: BoardDocumentContent, cardId: stri
   const next = cloneBoard(content);
   next.cards = next.cards.map((card) => (
     card.id === cardId ? { ...card, title } : card
+  ));
+  return next;
+}
+
+export function updateBoardCardStatus(
+  content: BoardDocumentContent,
+  cardId: string,
+  status: BoardCardStatus,
+): BoardDocumentContent {
+  const next = cloneBoard(content);
+  next.cards = next.cards.map((card) => (
+    card.id === cardId ? { ...card, status } : card
   ));
   return next;
 }

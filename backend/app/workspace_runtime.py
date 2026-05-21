@@ -185,6 +185,42 @@ def upsert_workspace_member(state: dict, user_id: str, nickname: str) -> dict:
     return current
 
 
+def default_agent_nickname(user_id: str) -> str:
+    compact = re.sub(r"[^a-zA-Z0-9]", "", user_id)
+    suffix = (compact[-6:] if compact else user_id[-6:]).lower()
+    return f"agent_{suffix}"
+
+
+def ensure_actor_workspace_member(state: dict, owner_user_id: str, actor_user_id: str | None) -> bool:
+    actor = (actor_user_id or "").strip()
+    if not actor or actor == owner_user_id:
+        return False
+    members = normalize_workspace_members(state.get("members"))
+    changed = members != state.get("members")
+    current = members.get(actor)
+    if current is None:
+        joined_at = now_iso()
+        members[actor] = {
+            "userId": actor,
+            "nickname": default_agent_nickname(actor),
+            "joinedAt": joined_at,
+            "updatedAt": joined_at,
+        }
+        changed = True
+    elif not str(current.get("nickname", "")).strip():
+        current = dict(current)
+        current["nickname"] = default_agent_nickname(actor)
+        current["updatedAt"] = now_iso()
+        members[actor] = current
+        changed = True
+    if changed:
+        state["members"] = members
+    elif "members" not in state:
+        state["members"] = members
+        changed = True
+    return changed
+
+
 def workspace_member_views(state: dict, owner_user_id: str) -> list[dict]:
     members = normalize_workspace_members(state.get("members"))
     state["members"] = members

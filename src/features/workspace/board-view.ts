@@ -13,14 +13,17 @@ import {
   removeBoardTemplateField,
   renameBoardColumn,
   updateBoardCardField,
+  updateBoardCardStatus,
   updateBoardCardTitle,
   updateBoardTemplateField,
 } from "./board-state";
 import {
   BOARD_COLUMN_COLORS,
+  BOARD_CARD_STATUSES,
   boardCardSummary,
   normalizeStructuredDocumentContent,
   type BoardCard,
+  type BoardCardStatus,
   type BoardDocumentContent,
 } from "./structured-document";
 
@@ -34,6 +37,7 @@ type Labels = {
   addField: string;
   removeField: string;
   template: string;
+  statuses: Record<BoardCardStatus, string>;
 };
 
 export type BoardViewOptions = {
@@ -212,13 +216,6 @@ function appendColorSwatches(
   return palette;
 }
 
-function createCardCount(document: DocumentLike, count: number): HTMLElement {
-  const badge = document.createElement("span") as HTMLElement;
-  badge.className = "structured-board-column-count";
-  badge.textContent = String(count);
-  return badge;
-}
-
 export function createBoardView(options: BoardViewOptions): BoardViewHandle {
   let current = normalizeStructuredDocumentContent("board", options.content) as BoardDocumentContent;
   let selectedCardId: string | null = null;
@@ -235,6 +232,31 @@ export function createBoardView(options: BoardViewOptions): BoardViewHandle {
     addField: options.labels?.addField ?? "Add field",
     removeField: options.labels?.removeField ?? "Remove field",
     template: options.labels?.template ?? "Template",
+    statuses: options.labels?.statuses ?? {
+      todo: "To do",
+      doing: "Doing",
+      done: "Done",
+      paused: "Paused",
+    },
+  };
+
+  const createStatusSelect = (card: BoardCard, focusKey: string): HTMLSelectElement => {
+    const select = options.document.createElement("select") as HTMLSelectElement;
+    select.className = "structured-board-card-status";
+    select.dataset.focusKey = focusKey;
+    select.addEventListener("click", (event) => event.stopPropagation());
+    select.addEventListener("pointerdown", (event) => event.stopPropagation());
+    for (const status of BOARD_CARD_STATUSES) {
+      const option = options.document.createElement("option") as HTMLOptionElement;
+      option.value = status;
+      option.textContent = labels.statuses[status];
+      select.append(option);
+    }
+    select.value = card.status;
+    select.addEventListener("change", () => {
+      emit(updateBoardCardStatus(current, card.id, select.value as BoardCardStatus));
+    });
+    return select;
   };
 
   const root = options.document.createElement("div") as HTMLElement;
@@ -330,14 +352,6 @@ export function createBoardView(options: BoardViewOptions): BoardViewHandle {
       return lane;
     }
 
-    const list = options.document.createElement("div") as HTMLElement;
-    list.className = "structured-board-card-list structured-board-card-list--template";
-    current.template.cardIds.forEach((cardId) => {
-      const card = current.cards.find((entry) => entry.id === cardId);
-      if (card) list.append(renderCard(card, { template: true }));
-    });
-    lane.append(list);
-
     lane.append(createButton(
       options.document,
       "structured-action-btn structured-action-btn--subtle",
@@ -349,6 +363,14 @@ export function createBoardView(options: BoardViewOptions): BoardViewHandle {
         emit(next);
       },
     ));
+
+    const list = options.document.createElement("div") as HTMLElement;
+    list.className = "structured-board-card-list structured-board-card-list--template";
+    current.template.cardIds.forEach((cardId) => {
+      const card = current.cards.find((entry) => entry.id === cardId);
+      if (card) list.append(renderCard(card, { template: true }));
+    });
+    lane.append(list);
     return lane;
   };
 
@@ -390,6 +412,7 @@ export function createBoardView(options: BoardViewOptions): BoardViewHandle {
           `card-title:${card.id}`,
         ),
       );
+      drawer.append(createStatusSelect(card, `card-status:${card.id}`));
 
       card.fields.forEach((field) => {
         const row = options.document.createElement("div") as HTMLElement;
@@ -462,6 +485,7 @@ export function createBoardView(options: BoardViewOptions): BoardViewHandle {
         `card-title:${card.id}`,
       ),
     );
+    drawer.append(createStatusSelect(card, `card-status:${card.id}`));
 
     card.fields.forEach((field) => {
       const row = options.document.createElement("div") as HTMLElement;
@@ -542,7 +566,7 @@ export function createBoardView(options: BoardViewOptions): BoardViewHandle {
       grip.textContent = "\u22EE\u22EE";
       head.append(grip);
     }
-    head.append(title);
+    head.append(title, createStatusSelect(card, `card-status-inline:${card.id}`));
     cardEl.append(head);
 
     const summaryLines = boardCardSummary(card, 4);
@@ -593,7 +617,6 @@ export function createBoardView(options: BoardViewOptions): BoardViewHandle {
         false,
         `column-title:${column.id}`,
       ),
-      createCardCount(options.document, column.cardIds.length),
     );
     topRow.append(meta);
     section.append(topRow);

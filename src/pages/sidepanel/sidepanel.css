@@ -85,6 +85,12 @@ body {
   z-index: 50 !important;
 }
 
+/* Hide Vditor's WYSIWYG floating panels; they overlap selected document text. */
+.doc-editor-host .vditor-wysiwyg > .vditor-panel.vditor-panel--none {
+  display: none !important;
+  pointer-events: none;
+}
+
 .doc-editor-host .vditor-toolbar__item {
   border-radius: 6px;
 }
