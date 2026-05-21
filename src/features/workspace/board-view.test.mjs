@@ -369,6 +369,53 @@ test("board view template behaves like a column template preview and edits from 
   assert.equal(changes.at(-1).template.cardIds.length, 2);
 });
 
+test("board view persists template collapse state through callback and closes template drawer when collapsed", async () => {
+  const documents = await loadTranspiledModule("src/features/workspace/structured-document.ts");
+  const mod = await loadTranspiledModule("src/features/workspace/board-view.ts");
+
+  const document = new FakeDocument();
+  const collapseStates = [];
+  const initial = documents.createDefaultBoardContent();
+  const view = mod.createBoardView({
+    document,
+    content: initial,
+    onTemplateCollapsedChange: (collapsed) => collapseStates.push(collapsed),
+  });
+
+  const templateCard = view.element
+    .querySelectorAll("article")
+    .find((element) => element.className.includes("structured-board-card--template"));
+  assert.ok(templateCard);
+  templateCard.click();
+
+  assert.equal(
+    view.element
+      .querySelectorAll("aside")
+      .some((element) => element.className === "structured-board-drawer"),
+    true,
+  );
+
+  const toggle = view.element
+    .querySelectorAll("button")
+    .find((button) => button.className.includes("structured-board-template-toggle"));
+  assert.ok(toggle);
+  toggle.click();
+
+  assert.deepEqual(collapseStates, [true]);
+  assert.equal(
+    view.element
+      .querySelectorAll("aside")
+      .some((element) => element.className === "structured-board-drawer"),
+    false,
+  );
+
+  const collapsedLane = view.element
+    .querySelectorAll("section")
+    .find((element) => element.className.includes("structured-board-column--template"));
+  assert.ok(collapsedLane);
+  assert.equal(collapsedLane.className.includes("is-collapsed"), true);
+});
+
 test("board view preserves focus when editing a template field name", async () => {
   const documents = await loadTranspiledModule("src/features/workspace/structured-document.ts");
   const mod = await loadTranspiledModule("src/features/workspace/board-view.ts");

@@ -1,10 +1,12 @@
 import { defineManifest } from "@crxjs/vite-plugin";
 
+const isChromeStoreRelease = process.env.JUSTWORK_CHROME_STORE === "1";
+
 export default defineManifest({
   manifest_version: 3,
   name: "JustWork Doc Shell",
   version: "0.0.1",
-  description: "协同文档骨架：独立页面工作台（Vditor 所见即所得）",
+  description: "Encrypted collaborative workspace for documents, sheets, tables, and agents.",
   icons: {
     "16": "justwork_logo.png",
     "32": "justwork_logo.png",
@@ -12,7 +14,7 @@ export default defineManifest({
     "128": "justwork_logo.png",
   },
   action: {
-    default_title: "打开 JustWork",
+    default_title: "Open JustWork",
     default_icon: {
       "16": "justwork_logo.png",
       "32": "justwork_logo.png",
@@ -29,7 +31,9 @@ export default defineManifest({
     open_in_tab: true,
   },
   permissions: ["storage"],
-  host_permissions: ["https://api.tool.justwork.txzy.net/*", "http://127.0.0.1/*", "http://localhost/*"],
+  host_permissions: isChromeStoreRelease
+    ? ["https://api.tool.justwork.txzy.net/*"]
+    : ["https://api.tool.justwork.txzy.net/*", "http://127.0.0.1/*", "http://localhost/*"],
   web_accessible_resources: [
     {
       resources: ["vendor/vditor/**/*", "agent/SKILL.md"],

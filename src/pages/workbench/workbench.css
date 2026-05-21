@@ -546,25 +546,27 @@ body {
   padding: 14px 0 2px;
 }
 .sidebar-connect-btn {
-  width: 100%;
-  min-height: 34px;
-  border: 1px solid #d5d5d0;
-  border-radius: 7px;
-  background: #fff;
-  color: #222;
-  font-size: 12px;
-  font-weight: 600;
-  cursor: pointer;
-  display: inline-flex;
-  align-items: center;
+    width: 100%;
+    min-height: 34px;
+    margin-bottom: 12px;
+    border: 1px solid #141414;
+    border-radius: 7px;
+    background: #141414;
+    color: #fff;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
   justify-content: flex-start;
   gap: 8px;
   padding: 0 10px;
 }
 .sidebar-connect-btn:hover,
 .sidebar-connect-btn[aria-expanded="true"] {
-  background: #eeeeeb;
-}
+    background: #272727;
+    border-color: #272727;
+  }
 .workspace-people-list {
   display: flex;
   flex-direction: column;

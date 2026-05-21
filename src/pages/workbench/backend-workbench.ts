@@ -888,6 +888,7 @@ export async function startBackendWorkbench(): Promise<void> {
   editorRoot.replaceChildren(markdownHost, structuredHost);
   let tableView: TableViewHandle | undefined;
   let boardView: BoardViewHandle | undefined;
+  const boardTemplateCollapsedState = new Map<string, boolean>();
   let mounted = false;
   let flushOfflineMutations: () => Promise<void> = async () => {};
   let rerenderActiveWorkbench: (() => void) | undefined;
@@ -1951,6 +1952,10 @@ export async function startBackendWorkbench(): Promise<void> {
         const view = createBoardView({
           document,
           content,
+          initialTemplateCollapsed: boardTemplateCollapsedState.get(doc.id) ?? false,
+          onTemplateCollapsedChange: (collapsed) => {
+            boardTemplateCollapsedState.set(doc.id, collapsed);
+          },
           labels: {
             addColumn: t("structured.board.addColumn"),
             addCard: t("structured.board.addCard"),
@@ -1999,6 +2004,7 @@ export async function startBackendWorkbench(): Promise<void> {
       localCollaborativeDocCache.delete(docId);
       clearOptimisticCreatePatch(optimisticCreatePatches, docId);
       hydratedDocIds.delete(docId);
+      boardTemplateCollapsedState.delete(docId);
       const nextDocs = workspace.docs.filter((doc) => doc.id !== docId);
       workspace = {
         ...workspace,

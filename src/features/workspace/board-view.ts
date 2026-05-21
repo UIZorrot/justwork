@@ -44,6 +44,8 @@ export type BoardViewOptions = {
   document: DocumentLike;
   content: BoardDocumentContent;
   onChange?: (content: BoardDocumentContent) => void;
+  initialTemplateCollapsed?: boolean;
+  onTemplateCollapsedChange?: (collapsed: boolean) => void;
   labels?: Partial<Labels>;
 };
 
@@ -220,7 +222,7 @@ export function createBoardView(options: BoardViewOptions): BoardViewHandle {
   let current = normalizeStructuredDocumentContent("board", options.content) as BoardDocumentContent;
   let selectedCardId: string | null = null;
   let templateEditorOpen = false;
-  let templateCollapsed = false;
+  let templateCollapsed = options.initialTemplateCollapsed ?? false;
   let sortables: SortableInstance[] = [];
   let sortableBindToken = 0;
 
@@ -339,6 +341,13 @@ export function createBoardView(options: BoardViewOptions): BoardViewHandle {
       templateCollapsed ? ">" : "<",
       () => {
         templateCollapsed = !templateCollapsed;
+        options.onTemplateCollapsedChange?.(templateCollapsed);
+        if (templateCollapsed) {
+          templateEditorOpen = false;
+          if (isTemplateCard(selectedCardId)) {
+            selectedCardId = null;
+          }
+        }
         render();
       },
     );
