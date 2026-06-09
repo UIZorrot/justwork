@@ -30,17 +30,6 @@
         >
           Profile
         </button>
-        <button
-          id="workspace-message-drawer-open-btn"
-          class="ghost-btn"
-          type="button"
-          hidden
-          aria-expanded="false"
-          aria-controls="workspace-message-drawer"
-        >
-          <span data-i18n="drawer.message.title">Inbox</span>
-          <span id="workspace-message-unread-badge" class="topbar-pill" hidden>0</span>
-        </button>
         <button id="lock-workspace-btn" class="ghost-btn" type="button" hidden data-i18n="status.locked">Locked</button>
         <div class="language-switcher" id="language-switcher">
           <button
@@ -183,6 +172,18 @@
           </button>
           <button id="new-folder-btn" class="sidebar-create-btn has-icon" type="button">
             <span class="sidebar-btn-icon" aria-hidden="true">📁</span><span data-i18n="sidebar.newFolder">New folder</span>
+          </button>
+          <button
+            id="workspace-message-drawer-open-btn"
+            class="sidebar-create-btn has-icon"
+            type="button"
+            hidden
+            aria-expanded="false"
+            aria-controls="workspace-message-drawer"
+          >
+            <span class="sidebar-btn-icon" aria-hidden="true">✉</span>
+            <span data-i18n="drawer.message.title">Inbox</span>
+            <span id="workspace-message-unread-badge" class="topbar-pill" hidden>0</span>
           </button>
         </div>
         <div class="sidebar-divider" aria-hidden="true"></div>

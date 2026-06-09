@@ -2086,6 +2086,10 @@ body {
   padding: 0 14px;
 }
 
+#workspace-message-drawer-open-btn[hidden] {
+  display: none;
+}
+
 /* Ollama-inspired design system overrides (docs/design.md) */
 body {
   font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", "Noto Sans", Arial, sans-serif;
