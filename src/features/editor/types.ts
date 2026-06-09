@@ -5,8 +5,17 @@ export type DocEditor = {
   setMarkdown: (md: string, clearHistory?: boolean) => void;
   isComposing: () => boolean;
   isFocused: () => boolean;
+  focus: () => void;
+  replaceActiveMention: (mentionMarkdown: string) => boolean;
   bindCollaborator: (binding: CollaborativeMarkdownBinding | undefined) => void;
   destroy: () => void;
+};
+
+export type EditorMentionQueryState = {
+  query: string;
+  left: number;
+  top: number;
+  lineHeight: number;
 };
 
 export type EditorImageUploadResult = {
@@ -27,6 +36,7 @@ export type CreateEditorOptions = {
   /** Initial markdown stored in the workspace. */
   initialMarkdown?: string;
   onChange?: (markdown: string) => void;
+  onMentionQueryChange?: (state: EditorMentionQueryState | null) => void;
   imageSync?: EditorImageSync;
   collaboratorBinding?: CollaborativeMarkdownBinding;
 };

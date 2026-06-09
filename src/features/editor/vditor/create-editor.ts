@@ -6,13 +6,47 @@ import "vditor/dist/js/i18n/zh_CN.js";
 import { saveCollaborativeSnapshot } from "@/features/collaboration/collab-storage";
 import { createVditorMarkdownBinding } from "@/features/collaboration/yjs-vditor-binding";
 import { getRuntimeUrl } from "@/shared/browser-platform";
-import type { CollaborativeMarkdownBinding, CreateEditorOptions, DocEditor, EditorImageUploadResult } from "../types";
+import type {
+  CollaborativeMarkdownBinding,
+  CreateEditorOptions,
+  DocEditor,
+  EditorImageUploadResult,
+  EditorMentionQueryState,
+} from "../types";
 import { createCompositionGate } from "./composition-gate";
 import { getWysiwygToolbar } from "./wysiwyg-toolbar";
 
 type VditorWithInsert = Vditor & {
   insertValue: (value: string, update?: boolean) => void;
+  insertMD: (markdown: string) => void;
+  focus: () => void;
+  getCursorPosition: () => { left: number; top: number };
 };
+
+type ResolvedMentionQuery = EditorMentionQueryState & {
+  startContainer: Node;
+  startOffset: number;
+};
+
+function resolveSelectionRect(range: Range): { left: number; top: number; height: number } | null {
+  const rect = range.getBoundingClientRect?.();
+  if (rect && (rect.width > 0 || rect.height > 0)) {
+    return {
+      left: rect.left,
+      top: rect.top,
+      height: rect.height || 24,
+    };
+  }
+  const parentRect = range.startContainer.parentElement?.getBoundingClientRect?.();
+  if (parentRect) {
+    return {
+      left: parentRect.left,
+      top: parentRect.top,
+      height: parentRect.height || 24,
+    };
+  }
+  return null;
+}
 
 function vditorCdnBase(): string {
   return getRuntimeUrl("vendor/vditor");
@@ -40,7 +74,7 @@ function insertUploadResults(vditor: Vditor | undefined, results: EditorImageUpl
 }
 
 export function createWysiwygEditor(options: CreateEditorOptions): DocEditor {
-  const { container, initialMarkdown = "", onChange, imageSync } = options;
+  const { container, initialMarkdown = "", onChange, onMentionQueryChange, imageSync } = options;
 
   let vditor: Vditor | undefined;
   let editorReady = false;
@@ -53,6 +87,49 @@ export function createWysiwygEditor(options: CreateEditorOptions): DocEditor {
   let collaboratorBinding: ReturnType<typeof createVditorMarkdownBinding> | undefined;
   let collaboratorState: CollaborativeMarkdownBinding | undefined;
   const compositionGate = createCompositionGate();
+  const clearMentionQuery = (): void => onMentionQueryChange?.(null);
+
+  const resolveMentionQuery = (): ResolvedMentionQuery | null => {
+    if (!editorReady || !vditor || compositionGate.isComposing()) return null;
+    const selection = window.getSelection?.();
+    if (!selection || selection.rangeCount === 0) return null;
+    const range = selection.getRangeAt(0);
+    if (!container.contains(range.startContainer) || range.startContainer.nodeType !== Node.TEXT_NODE) return null;
+    const rawText = range.startContainer.textContent?.slice(0, range.startOffset) ?? "";
+    const match = rawText.match(/(?:^|[\s([{>])@([\p{L}\p{N}_-]*)$/u);
+    if (!match) return null;
+    const startOffset = rawText.lastIndexOf("@");
+    if (startOffset === -1) return null;
+    const selectionRect = resolveSelectionRect(range)
+      ?? (() => {
+        const cursor = (vditor as VditorWithInsert).getCursorPosition?.() ?? { left: 0, top: 0 };
+        return { left: cursor.left, top: cursor.top, height: 24 };
+      })();
+    const lineHeightRaw = Number.parseInt(window.getComputedStyle(container).lineHeight, 10);
+    return {
+      query: match[1] ?? "",
+      left: selectionRect.left,
+      top: selectionRect.top,
+      lineHeight: Number.isFinite(lineHeightRaw) ? lineHeightRaw : selectionRect.height,
+      startContainer: range.startContainer,
+      startOffset,
+    };
+  };
+
+  const notifyMentionQueryChange = (): void => {
+    if (!onMentionQueryChange) return;
+    const query = resolveMentionQuery();
+    if (!query) {
+      onMentionQueryChange(null);
+      return;
+    }
+    onMentionQueryChange({
+      query: query.query,
+      left: query.left,
+      top: query.top,
+      lineHeight: query.lineHeight,
+    });
+  };
 
   const getMarkdown = (): string => {
     if (!editorReady || !vditor) {
@@ -102,11 +179,13 @@ export function createWysiwygEditor(options: CreateEditorOptions): DocEditor {
     const markdown = compositionGate.onCompositionEnd(imageSync?.fromEditorMarkdown(getMarkdown()) ?? getMarkdown());
     if (markdown === null) return;
     dispatchMarkdown(markdown);
+    queueMicrotask(notifyMentionQueryChange);
   };
   const cancelComposedMarkdown = (): void => {
     const markdown = compositionGate.onCompositionCancel(imageSync?.fromEditorMarkdown(getMarkdown()) ?? getMarkdown());
     if (markdown === null) return;
     dispatchMarkdown(markdown);
+    queueMicrotask(notifyMentionQueryChange);
   };
 
   const editorSurface = {
@@ -165,6 +244,9 @@ export function createWysiwygEditor(options: CreateEditorOptions): DocEditor {
   container.addEventListener("compositionstart", compositionGate.onCompositionStart, true);
   container.addEventListener("compositionend", flushComposedMarkdown, true);
   container.addEventListener("compositioncancel", cancelComposedMarkdown, true);
+  container.addEventListener("keyup", notifyMentionQueryChange, true);
+  container.addEventListener("mouseup", notifyMentionQueryChange, true);
+  container.addEventListener("blur", clearMentionQuery, true);
   vditor = new Vditor(container, {
     cdn: vditorCdnBase(),
     lang: "zh_CN",
@@ -191,8 +273,12 @@ export function createWysiwygEditor(options: CreateEditorOptions): DocEditor {
       const markdown = imageSync?.fromEditorMarkdown(value) ?? value;
       lastKnownMarkdown = markdown;
       const gatedMarkdown = compositionGate.onInput(markdown);
-      if (gatedMarkdown === null) return;
+      if (gatedMarkdown === null) {
+        queueMicrotask(notifyMentionQueryChange);
+        return;
+      }
       dispatchMarkdown(gatedMarkdown);
+      queueMicrotask(notifyMentionQueryChange);
     },
     after: () => {
       editorReady = true;
@@ -202,6 +288,7 @@ export function createWysiwygEditor(options: CreateEditorOptions): DocEditor {
         pendingMarkdown = undefined;
         applyMarkdown(markdown, clearHistory);
       }
+      notifyMentionQueryChange();
     },
     upload: imageSync
       ? {
@@ -229,6 +316,24 @@ export function createWysiwygEditor(options: CreateEditorOptions): DocEditor {
     setMarkdown,
     isComposing: compositionGate.isComposing,
     isFocused: () => container.contains(document.activeElement),
+    focus: () => {
+      (vditor as VditorWithInsert | undefined)?.focus?.();
+    },
+    replaceActiveMention: (mentionMarkdown: string) => {
+      if (!vditor || compositionGate.isComposing()) return false;
+      const resolved = resolveMentionQuery();
+      const selection = window.getSelection?.();
+      if (!resolved || !selection || selection.rangeCount === 0) return false;
+      const range = selection.getRangeAt(0);
+      range.setStart(resolved.startContainer, resolved.startOffset);
+      range.deleteContents();
+      selection.removeAllRanges();
+      selection.addRange(range);
+      (vditor as VditorWithInsert).insertMD(`${mentionMarkdown} `);
+      dispatchMarkdown(getMarkdown());
+      queueMicrotask(notifyMentionQueryChange);
+      return true;
+    },
     bindCollaborator,
     destroy: () => {
       unbindCollaborator();
@@ -238,6 +343,9 @@ export function createWysiwygEditor(options: CreateEditorOptions): DocEditor {
       container.removeEventListener("compositionstart", compositionGate.onCompositionStart, true);
       container.removeEventListener("compositionend", flushComposedMarkdown, true);
       container.removeEventListener("compositioncancel", cancelComposedMarkdown, true);
+      container.removeEventListener("keyup", notifyMentionQueryChange, true);
+      container.removeEventListener("mouseup", notifyMentionQueryChange, true);
+      container.removeEventListener("blur", clearMentionQuery, true);
       container.classList.remove("doc-editor--ready");
     },
   };

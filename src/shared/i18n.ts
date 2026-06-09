@@ -115,6 +115,7 @@ const MESSAGES = {
     "drawer.message.empty": "No inbox items yet.",
     "drawer.message.inputPlaceholder": "Inbox",
     "drawer.message.send": "Open",
+    "mention.empty": "No matching people",
     "drawer.message.promptTitle": "Choose your nickname",
     "drawer.message.promptDesc":
       "This name is shown to other people in the workspace and used for @mentions.",

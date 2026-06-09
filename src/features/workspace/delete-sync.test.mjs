@@ -25,3 +25,16 @@ test("shouldSkipDocSave rejects blocked, missing, and trashed docs", async () =>
   assert.equal(mod.shouldSkipDocSave(new Set(), "page-c", { inTrash: true }), true);
   assert.equal(mod.shouldSkipDocSave(new Set(), "page-d", { inTrash: false }), false);
 });
+
+test("waitForPendingDocSavesToSettle waits for save queues and swallows queue failures", async () => {
+  const mod = await loadTranspiledModule("src/features/workspace/delete-sync.ts");
+  const events = [];
+  const queue = Promise.resolve().then(() => {
+    events.push("settled");
+  });
+
+  await mod.waitForPendingDocSavesToSettle(queue);
+  await mod.waitForPendingDocSavesToSettle(Promise.reject(new Error("queue failed")));
+
+  assert.deepEqual(events, ["settled"]);
+});

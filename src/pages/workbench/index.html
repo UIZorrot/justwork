@@ -199,22 +199,40 @@
           </button>
         </div>
         <div class="sidebar-section">
-          <div class="sidebar-title-row">
-            <div class="sidebar-title" data-i18n="sidebar.people">Workspace people</div>
+          <button id="workspace-people-toggle" class="sidebar-section-toggle" type="button" aria-expanded="true">
+            <span class="sidebar-section-toggle-left">
+              <span class="sidebar-section-caret" aria-hidden="true">▾</span>
+              <span class="sidebar-title" data-i18n="sidebar.people">Workspace people</span>
+            </span>
             <span id="workspace-people-count" class="sidebar-count-pill">0</span>
-          </div>
+          </button>
           <div id="workspace-people-list" class="workspace-people-list" aria-live="polite"></div>
         </div>
         <div class="sidebar-section">
-          <div class="sidebar-title" data-i18n="sidebar.pinned">Pinned</div>
+          <button id="pinned-toggle" class="sidebar-section-toggle" type="button" aria-expanded="true">
+            <span class="sidebar-section-toggle-left">
+              <span class="sidebar-section-caret" aria-hidden="true">▾</span>
+              <span class="sidebar-title" data-i18n="sidebar.pinned">Pinned</span>
+            </span>
+          </button>
           <ul id="pinned-list" class="doc-list"></ul>
         </div>
         <div class="sidebar-section">
-          <div class="sidebar-title" data-i18n="sidebar.pages">Pages</div>
+          <button id="pages-toggle" class="sidebar-section-toggle" type="button" aria-expanded="true">
+            <span class="sidebar-section-toggle-left">
+              <span class="sidebar-section-caret" aria-hidden="true">▾</span>
+              <span class="sidebar-title" data-i18n="sidebar.pages">Pages</span>
+            </span>
+          </button>
           <ul id="doc-tree" class="doc-list"></ul>
         </div>
         <div class="sidebar-section">
-          <div class="sidebar-title" data-i18n="sidebar.trash">Trash</div>
+          <button id="trash-toggle" class="sidebar-section-toggle" type="button" aria-expanded="true">
+            <span class="sidebar-section-toggle-left">
+              <span class="sidebar-section-caret" aria-hidden="true">▾</span>
+              <span class="sidebar-title" data-i18n="sidebar.trash">Trash</span>
+            </span>
+          </button>
           <ul id="trash-list" class="doc-list"></ul>
         </div>
       </aside>

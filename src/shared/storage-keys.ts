@@ -13,6 +13,7 @@ export const STORAGE_KEYS = {
   /** 各工作区的本地显示名（用于成员在线状态和 message drawer） */
   BACKEND_WORKSPACE_NICKNAMES: "justwork.backend.workspaceNicknames.v1",
   BACKEND_WORKSPACE_MEMBER_DIRECTORY: "justwork.backend.workspaceMembers.v1",
+  BACKEND_WORKSPACE_INBOX_COOLDOWN: "justwork.backend.workspaceInboxCooldown.v1",
   OFFLINE_MUTATION_QUEUE: "justwork.offline.queue.v1",
   OFFLINE_DELETE_MUTATION_QUEUE: "justwork.offline.delete-queue.v1",
   BACKEND_DOC_DRAFTS: "justwork.backend.docDrafts.v1",

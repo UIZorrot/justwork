@@ -27,3 +27,11 @@ export function shouldSkipDocSave(
 ): boolean {
   return blockedItemIds.has(itemId) || !doc || doc.inTrash;
 }
+
+export async function waitForPendingDocSavesToSettle(saveQueue: Promise<void>): Promise<void> {
+  try {
+    await saveQueue;
+  } catch {
+    // Save queues are best-effort and keep themselves alive after failures.
+  }
+}

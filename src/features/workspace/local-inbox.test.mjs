@@ -1,85 +1,127 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
-import path from "node:path";
 import test from "node:test";
-import ts from "typescript";
+import { loadTranspiledModule } from "./test-module-loader.mjs";
 
-function transpileModule(source, filename) {
-  const output = ts.transpileModule(source, {
-    compilerOptions: {
-      module: ts.ModuleKind.ESNext,
-      target: ts.ScriptTarget.ES2022,
-      moduleResolution: ts.ModuleResolutionKind.NodeNext,
-      esModuleInterop: true,
-      verbatimModuleSyntax: false,
+function createStorage() {
+  const data = new Map();
+  return {
+    async get(key) {
+      const keys = Array.isArray(key) ? key : [key];
+      const result = {};
+      for (const item of keys) {
+        if (data.has(item)) {
+          result[item] = data.get(item);
+        }
+      }
+      return result;
     },
-    fileName: filename,
-  });
-  return `data:text/javascript;charset=utf-8,${encodeURIComponent(output.outputText)}`;
+    async set(items) {
+      for (const [key, value] of Object.entries(items)) {
+        data.set(key, value);
+      }
+    },
+  };
 }
 
-test("local inbox notifications dedupe repeated mention hits", async () => {
-  const source = await readFile(path.resolve("src/features/workspace/local-inbox.ts"), "utf8");
-  const moduleUrl = transpileModule(source, "local-inbox.ts");
-  const mod = await import(moduleUrl);
+test("local inbox notifications dedupe repeated mention hits by mention id", async () => {
+  const mentions = await loadTranspiledModule("src/features/mentions/mention-token.ts");
+  const mod = await loadTranspiledModule("src/features/workspace/local-inbox.ts");
 
   const first = mod.createMentionNotification({
     workspaceId: "ws_1",
     docId: "doc_1",
     docTitle: "Doc",
+    targetUserId: "user_a",
+    mentionId: "m_1",
     mentionText: "@Alice please review",
-    recipientDisplayName: "Alice",
     createdAt: "2026-05-11T00:00:00.000Z",
   });
   const second = mod.createMentionNotification({
     workspaceId: "ws_1",
     docId: "doc_1",
     docTitle: "Doc",
+    targetUserId: "user_a",
+    mentionId: "m_1",
     mentionText: "@Alice please review",
-    recipientDisplayName: "Alice",
     createdAt: "2026-05-11T00:00:01.000Z",
   });
 
   assert.equal(first.dedupeKey, second.dedupeKey);
-  assert.equal(mod.hasMention("hello @Alice", "Alice"), true);
-  assert.equal(mod.hasMention("hello", "Alice"), false);
-  assert.equal(mod.extractMentionSnippet("one\n@Alice please review this\nthree", "Alice"), "@Alice please review this");
-});
 
-test("local inbox mention detection respects name boundaries", async () => {
-  const source = await readFile(path.resolve("src/features/workspace/local-inbox.ts"), "utf8");
-  const moduleUrl = transpileModule(source, "local-inbox.ts");
-  const mod = await import(moduleUrl);
-
-  assert.equal(mod.hasMention("hello @Anna", "Ann"), false);
-  assert.equal(mod.hasMention("hello @Ann", "Ann"), true);
-  assert.equal(mod.hasMention("mail me at ann@example.com", "ann"), false);
-});
-
-test("local inbox emits a new notification when a later mention is genuinely added", async () => {
-  const source = await readFile(path.resolve("src/features/workspace/local-inbox.ts"), "utf8");
-  const moduleUrl = transpileModule(source, "local-inbox.ts");
-  const mod = await import(moduleUrl);
-
-  const firstWave = mod.extractMentionNotifications({
+  const markdown = [
+    "hello",
+    mentions.encodeMentionToken({ mentionId: "m_1", userId: "user_a", displayName: "Alice" }),
+  ].join("\n");
+  const notifications = mod.extractMentionNotifications({
     previousMarkdown: "",
-    nextMarkdown: "hello @Alice\nanother line",
+    nextMarkdown: markdown,
     workspaceId: "ws_1",
     docId: "doc_1",
     docTitle: "Doc",
-    recipientDisplayName: "Alice",
+    recipientUserId: "user_a",
   });
-  assert.equal(firstWave.length, 1);
+  assert.equal(notifications.length, 1);
+  assert.match(notifications[0].mentionText, /@Alice/);
+});
 
-  const secondWave = mod.extractMentionNotifications({
-    previousMarkdown: "hello @Alice\nanother line",
-    nextMarkdown: "hello @Alice\nanother line\nplease check this too, @Alice",
+test("local inbox only reacts to structured mentions for the target user", async () => {
+  const mentions = await loadTranspiledModule("src/features/mentions/mention-token.ts");
+  const mod = await loadTranspiledModule("src/features/workspace/local-inbox.ts");
+
+  const markdown = [
+    mentions.encodeMentionToken({ mentionId: "m_1", userId: "user_a", displayName: "Alice" }),
+    mentions.encodeMentionToken({ mentionId: "m_2", userId: "user_b", displayName: "Bob" }),
+    "@Alice plain text should not count",
+  ].join("\n");
+  const notifications = mod.extractMentionNotifications({
+    previousMarkdown: "",
+    nextMarkdown: markdown,
     workspaceId: "ws_1",
     docId: "doc_1",
     docTitle: "Doc",
-    recipientDisplayName: "Alice",
+    recipientUserId: "user_a",
   });
-  assert.equal(secondWave.length, 1);
-  assert.notEqual(firstWave[0].dedupeKey, secondWave[0].dedupeKey);
-  assert.match(secondWave[0].mentionText, /@Alice/);
+  assert.equal(notifications.length, 1);
+  assert.equal(notifications[0].targetUserId, "user_a");
+  assert.equal(notifications[0].mentionId, "m_1");
+});
+
+test("local inbox cooldown blocks repeated notifications for same doc and user within 24h", async () => {
+  const mod = await loadTranspiledModule("src/features/workspace/local-inbox.ts");
+  const storage = createStorage();
+
+  const first = mod.createMentionNotification({
+    workspaceId: "ws_1",
+    docId: "doc_1",
+    docTitle: "Doc",
+    targetUserId: "user_a",
+    mentionId: "m_1",
+    mentionText: "@Alice",
+    createdAt: "2026-05-21T10:00:00.000Z",
+  });
+  const second = mod.createMentionNotification({
+    workspaceId: "ws_1",
+    docId: "doc_1",
+    docTitle: "Doc",
+    targetUserId: "user_a",
+    mentionId: "m_2",
+    mentionText: "@Alice",
+    createdAt: "2026-05-21T12:00:00.000Z",
+  });
+
+  const firstAppend = await mod.appendMentionNotificationsWithCooldown(storage, "ws_1", "user_a", [first], "2026-05-21T10:00:00.000Z");
+  assert.equal(firstAppend.state.notifications.length, 1);
+
+  const secondAppend = await mod.appendMentionNotificationsWithCooldown(storage, "ws_1", "user_a", [second], "2026-05-21T12:00:00.000Z");
+  assert.equal(secondAppend.state.notifications.length, 1);
+  assert.equal(secondAppend.added.length, 0);
+
+  const dismissed = await mod.dismissLocalInboxNotification(storage, "ws_1", "user_a", first.id);
+  assert.equal(dismissed.notifications.length, 0);
+
+  const thirdAppend = await mod.appendMentionNotificationsWithCooldown(storage, "ws_1", "user_a", [second], "2026-05-21T18:00:00.000Z");
+  assert.equal(thirdAppend.state.notifications.length, 0);
+
+  const afterWindow = await mod.appendMentionNotificationsWithCooldown(storage, "ws_1", "user_a", [second], "2026-05-22T10:00:00.001Z");
+  assert.equal(afterWindow.state.notifications.length, 1);
 });

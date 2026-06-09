@@ -10,6 +10,8 @@ import {
 import { createWysiwygEditor } from "@/features/editor/vditor/create-editor";
 import { shouldResyncEditorMarkdown } from "@/features/editor/editor-resync-policy";
 import type { DocEditor } from "@/features/editor/types";
+import { createMentionPicker } from "@/features/mentions/mention-picker";
+import { encodeMentionToken } from "@/features/mentions/mention-token";
 import { createCollaborativeTransport } from "@/features/collaboration/collab-transport";
 import { normalizeLegacyWelcomeDoc } from "@/features/docs/repo";
 import {
@@ -30,6 +32,7 @@ import {
   discardPendingDocSave,
   releasePendingDocSaveBlock,
   shouldSkipDocSave,
+  waitForPendingDocSavesToSettle,
 } from "@/features/workspace/delete-sync";
 import {
   createWorkspaceImageSync,
@@ -39,11 +42,11 @@ import {
 import { displayTitleOrFallback, normalizeDocTitleInput } from "@/features/workspace/title-policy";
 import { createBoardView, type BoardViewHandle } from "@/features/workspace/board-view";
 import {
-  appendLocalInboxNotification,
+  appendMentionNotificationsWithCooldown,
+  dismissLocalInboxNotification,
   extractMentionNotifications,
   loadLocalInboxState,
   markAllLocalInboxNotificationsRead,
-  markLocalInboxNotificationRead,
   type LocalInboxState,
 } from "@/features/workspace/local-inbox";
 import { createChromeRuntimeStorage } from "@/features/workspace/local-runtime";
@@ -648,6 +651,10 @@ export async function startBackendWorkbench(): Promise<void> {
   const workspaceMessageLog = document.getElementById("workspace-message-log") as HTMLElement | null;
   const workspacePeopleCount = document.getElementById("workspace-people-count") as HTMLElement | null;
   const workspacePeopleList = document.getElementById("workspace-people-list") as HTMLElement | null;
+  const workspacePeopleToggle = document.getElementById("workspace-people-toggle") as HTMLButtonElement | null;
+  const pinnedToggle = document.getElementById("pinned-toggle") as HTMLButtonElement | null;
+  const pagesToggle = document.getElementById("pages-toggle") as HTMLButtonElement | null;
+  const trashToggle = document.getElementById("trash-toggle") as HTMLButtonElement | null;
   const connectAgentBtn = document.getElementById("connect-agent-btn") as HTMLButtonElement | null;
   const connectAgentDialogRoot = document.getElementById("connect-agent-dialog-root") as HTMLElement | null;
   const connectAgentDialogBackdrop = document.getElementById("connect-agent-dialog-backdrop") as HTMLElement | null;
@@ -729,6 +736,10 @@ export async function startBackendWorkbench(): Promise<void> {
     !workspaceMessageLog ||
     !workspacePeopleCount ||
     !workspacePeopleList ||
+    !workspacePeopleToggle ||
+    !pinnedToggle ||
+    !pagesToggle ||
+    !trashToggle ||
     !connectAgentBtn ||
     !connectAgentDialogRoot ||
     !connectAgentDialogBackdrop ||
@@ -1265,6 +1276,45 @@ export async function startBackendWorkbench(): Promise<void> {
       };
     }
     const collapsedFolderIds = new Set<string>();
+    const collapsedSidebarSections = new Set<string>();
+
+    const setSidebarSectionCollapsed = (section: "people" | "pinned" | "pages" | "trash", collapsed: boolean): void => {
+      const toggle = section === "people"
+        ? workspacePeopleToggle
+        : section === "pinned"
+          ? pinnedToggle
+          : section === "pages"
+            ? pagesToggle
+            : trashToggle;
+      const panel = section === "people"
+        ? workspacePeopleList.parentElement
+        : section === "pinned"
+          ? pinnedList.parentElement
+          : section === "pages"
+            ? docTree.parentElement
+            : trashList.parentElement;
+      if (!toggle || !panel) return;
+      if (collapsed) {
+        collapsedSidebarSections.add(section);
+      } else {
+        collapsedSidebarSections.delete(section);
+      }
+      toggle.setAttribute("aria-expanded", collapsed ? "false" : "true");
+      panel.classList.toggle("is-collapsed", collapsed);
+    };
+
+    const toggleSidebarSection = (section: "people" | "pinned" | "pages" | "trash"): void => {
+      setSidebarSectionCollapsed(section, !collapsedSidebarSections.has(section));
+    };
+
+    workspacePeopleToggle.addEventListener("click", () => toggleSidebarSection("people"));
+    pinnedToggle.addEventListener("click", () => toggleSidebarSection("pinned"));
+    pagesToggle.addEventListener("click", () => toggleSidebarSection("pages"));
+    trashToggle.addEventListener("click", () => toggleSidebarSection("trash"));
+    setSidebarSectionCollapsed("people", false);
+    setSidebarSectionCollapsed("pinned", false);
+    setSidebarSectionCollapsed("pages", false);
+    setSidebarSectionCollapsed("trash", false);
 
     if (active.kind === "page" || active.kind === "table" || active.kind === "board") {
       const fullActive = await session.loadItem(active.id);
@@ -1384,33 +1434,18 @@ export async function startBackendWorkbench(): Promise<void> {
             requestTransportRejoin,
           );
         });
-        transport.onUpdate((update) => {
-          const previousMarkdown = collaborator.getMarkdown();
-          collaborator.applyRemoteUpdate(update);
-          saveCollaborativeSnapshot(collaborativeMarkdownSnapshotKey(workspaceId, doc.id), collaborator.encodeUpdate());
-          const nextMarkdown = collaborator.getMarkdown();
-          const notifications = extractMentionNotifications({
-            previousMarkdown,
-            nextMarkdown,
-            workspaceId,
-            docId: doc.id,
-            docTitle: displayDocTitle(doc),
-            recipientDisplayName: participantNickname,
+          transport.onUpdate((update) => {
+            const previousMarkdown = collaborator.getMarkdown();
+            collaborator.applyRemoteUpdate(update);
+            saveCollaborativeSnapshot(collaborativeMarkdownSnapshotKey(workspaceId, doc.id), collaborator.encodeUpdate());
+            const nextMarkdown = collaborator.getMarkdown();
+            syncMentionInboxFromMarkdown({
+              previousMarkdown,
+              nextMarkdown,
+              docId: doc.id,
+              docTitle: displayDocTitle(doc),
+            });
           });
-          if (notifications.length > 0) {
-            void (async () => {
-              for (const notification of notifications) {
-                inboxState = await appendLocalInboxNotification(
-                  localStorageArea,
-                  workspaceId,
-                  identity.userId,
-                  notification,
-                );
-              }
-              renderInboxPanel();
-            })();
-          }
-        });
         safeSendCollaborativeUpdate(
           transport.readyState,
           () => {
@@ -1514,6 +1549,66 @@ export async function startBackendWorkbench(): Promise<void> {
     const inboxStatePromise = loadLocalInboxState(localStorageArea, workspaceId, identity.userId);
     let joinedMembers: WorkspaceJoinedMember[] = await loadWorkspaceJoinedMembers(localStorageArea, workspaceId);
     let peopleEntries: WorkspacePeopleEntry[] = mergeWorkspacePeople(joinedMembers, communityState.members);
+    const mentionPicker = createMentionPicker({
+      document,
+      labels: {
+        empty: t("mention.empty"),
+      },
+      onSelect: (candidate) => {
+        if (!editor || active.kind !== "page" || active.id === WELCOME_DOC_ID) return;
+        const token = encodeMentionToken({
+          mentionId: `m_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
+          userId: candidate.userId,
+          displayName: candidate.displayName,
+        });
+        if (editor.replaceActiveMention(token)) {
+          editor.focus();
+          mentionPicker.close();
+        }
+      },
+    });
+
+    const workspaceMentionCandidates = () => peopleEntries
+      .filter((member) => typeof member.userId === "string" && member.userId.trim())
+      .map((member) => ({
+        userId: member.userId as string,
+        displayName: member.displayName,
+      }));
+
+    const updateMentionPicker = (queryState: { query: string; left: number; top: number; lineHeight: number } | null): void => {
+      if (!queryState || active.kind !== "page" || active.id === WELCOME_DOC_ID) {
+        mentionPicker.close();
+        return;
+      }
+      mentionPicker.open(queryState, workspaceMentionCandidates());
+    };
+
+    const syncMentionInboxFromMarkdown = (params: {
+      previousMarkdown: string;
+      nextMarkdown: string;
+      docId: string;
+      docTitle: string;
+    }): void => {
+      const notifications = extractMentionNotifications({
+        previousMarkdown: params.previousMarkdown,
+        nextMarkdown: params.nextMarkdown,
+        workspaceId,
+        docId: params.docId,
+        docTitle: params.docTitle,
+        recipientUserId: identity.userId,
+      });
+      if (notifications.length === 0) return;
+      void appendMentionNotificationsWithCooldown(
+        localStorageArea,
+        workspaceId,
+        identity.userId,
+        notifications,
+      ).then((result) => {
+        if (result.added.length === 0) return;
+        inboxState = result.state;
+        renderInboxPanel();
+      }).catch(() => undefined);
+    };
 
     const rebuildPeopleEntries = (): void => {
       peopleEntries = mergeWorkspacePeople(joinedMembers, communityState.members);
@@ -1623,20 +1718,20 @@ export async function startBackendWorkbench(): Promise<void> {
       } else {
         for (const notification of inboxState.notifications) {
           const row = document.createElement("button");
-          row.type = "button";
-          row.className = `workspace-message-row workspace-inbox-row${notification.isRead ? "" : " is-unread"}`;
-          row.addEventListener("click", () => {
-            void (async () => {
-              inboxState = await markLocalInboxNotificationRead(
-                localStorageArea,
-                workspaceId,
-                identity.userId,
-                notification.id,
-              );
-              const targetDoc = workspace.docs.find((doc) => doc.id === notification.docId);
-              if (targetDoc) {
-                switchActiveDoc(targetDoc);
-              }
+            row.type = "button";
+            row.className = `workspace-message-row workspace-inbox-row${notification.isRead ? "" : " is-unread"}`;
+            row.addEventListener("click", () => {
+              void (async () => {
+                inboxState = await dismissLocalInboxNotification(
+                  localStorageArea,
+                  workspaceId,
+                  identity.userId,
+                  notification.id,
+                );
+                const targetDoc = workspace.docs.find((doc) => doc.id === notification.docId);
+                if (targetDoc) {
+                  switchActiveDoc(targetDoc);
+                }
               renderInboxPanel();
               closeMessageDrawer();
             })();
@@ -2170,6 +2265,11 @@ export async function startBackendWorkbench(): Promise<void> {
             }
           } catch (e) {
             if (e instanceof BackendApiError && e.code === "conflict") {
+              const latestDoc = workspace.docs.find((doc) => doc.id === request.itemId);
+              if (shouldSkipDocSave(blockedDocSaveIds, request.itemId, latestDoc)) {
+                dirtyDocIds.delete(request.itemId);
+                return;
+              }
               showToast({ message: t("toast.conflict"), variant: "warning" });
               return;
             }
@@ -2285,6 +2385,7 @@ export async function startBackendWorkbench(): Promise<void> {
       titleInput.readOnly = active.kind === "welcome" || active.id === ROOT_FOLDER_ID || active.kind === "folder";
       pageKindTag.textContent = docKindLabel(active);
       if (active.kind === "welcome") {
+        mentionPicker.close();
         markdownHost.hidden = false;
         structuredHost.hidden = true;
         editor?.bindCollaborator(undefined);
@@ -2292,6 +2393,7 @@ export async function startBackendWorkbench(): Promise<void> {
         return;
       }
       if (active.kind === "table" || active.kind === "board") {
+        mentionPicker.close();
         markdownHost.hidden = true;
         structuredHost.hidden = false;
         editor?.bindCollaborator(undefined);
@@ -2299,6 +2401,7 @@ export async function startBackendWorkbench(): Promise<void> {
         return;
       }
       if (active.kind === "folder") {
+        mentionPicker.close();
         markdownHost.hidden = true;
         structuredHost.hidden = false;
         editor?.bindCollaborator(undefined);
@@ -2308,6 +2411,7 @@ export async function startBackendWorkbench(): Promise<void> {
       markdownHost.hidden = false;
       structuredHost.hidden = true;
       if (active.kind !== "page" || active.id === ROOT_FOLDER_ID) {
+        mentionPicker.close();
         editor?.bindCollaborator(undefined);
         editor?.setMarkdown("", true);
         return;
@@ -2431,6 +2535,10 @@ export async function startBackendWorkbench(): Promise<void> {
         .filter((entry) => entry.workspaceId === workspaceId);
       for (const mutation of pendingDeleteMutations) {
         try {
+          if (mutation.kind !== "restore") {
+            blockDocSavesForItem(mutation.itemId);
+            await waitForPendingDocSavesToSettle(saveQueue);
+          }
           if (mutation.kind === "trash") {
             await session.trashItem(mutation.itemId);
           } else if (mutation.kind === "restore") {
@@ -2776,6 +2884,7 @@ export async function startBackendWorkbench(): Promise<void> {
                 removeDocById(doc.id);
                 syncEditorWithActive();
                 renderAll();
+                await waitForPendingDocSavesToSettle(saveQueue);
                 await session.hardDeleteItem(doc.id);
                 if (imageSync) {
                   await imageSync.updateReferences(full.markdown ?? "", "").catch(() => undefined);
@@ -2814,6 +2923,7 @@ export async function startBackendWorkbench(): Promise<void> {
                 applyOptimisticTrash(doc.id);
                 syncEditorWithActive();
                 renderAll();
+                await waitForPendingDocSavesToSettle(saveQueue);
                 const trashed = await session.trashItem(doc.id);
                 updateDocById(doc.id, () => trashed);
                 markDocHydrated(doc.id);
@@ -3036,6 +3146,7 @@ export async function startBackendWorkbench(): Promise<void> {
               storageKey: collaborativeMarkdownSnapshotKey(workspaceId, active.id),
             }
           : undefined,
+      onMentionQueryChange: updateMentionPicker,
       onChange: (markdown) => {
         if (active.kind !== "page" || active.id === WELCOME_DOC_ID) return;
         const itemId = active.id;
@@ -3043,6 +3154,12 @@ export async function startBackendWorkbench(): Promise<void> {
         const previousMarkdown = localCollaborativeDocCache.get(itemId)?.markdown
           ?? workspace.docs.find((doc) => doc.id === itemId)?.markdown
           ?? "";
+        syncMentionInboxFromMarkdown({
+          previousMarkdown,
+          nextMarkdown: markdown,
+          docId: itemId,
+          docTitle: displayDocTitle(active),
+        });
         if (collaborativeMarkdownDocs.has(itemId)) {
           const nextMarkdown = markdown;
           const nextDoc = updateDocById(itemId, (doc) => ({
@@ -3065,6 +3182,11 @@ export async function startBackendWorkbench(): Promise<void> {
       },
       imageSync: imageSync.editorSync,
     });
+    markdownHost.addEventListener("keydown", (event) => {
+      if (mentionPicker.handleKeyDown(event)) {
+        event.stopPropagation();
+      }
+    }, true);
     void imageSync.connect().catch(() => {
       // Relay is best-effort. Local image persistence still works if it is unavailable.
     });
@@ -3478,6 +3600,7 @@ export async function startBackendWorkbench(): Promise<void> {
         syncEditorWithActive();
         renderAll();
         try {
+          await waitForPendingDocSavesToSettle(saveQueue);
           const trashed = await session.trashItem(itemId);
           updateDocById(trashed.id, () => trashed);
           renderAll();

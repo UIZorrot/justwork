@@ -1,3 +1,18 @@
+import {
+  createMentionUserRef,
+  extractMentionSnippet,
+  extractMentionTokenMatches,
+  type MentionToken,
+} from "../mentions/mention-token";
+import {
+  canCreateInboxNotification,
+  clearActiveInboxNotification,
+  loadInboxCooldownLedger,
+  recordInboxNotification,
+  saveInboxCooldownLedger,
+  type InboxCooldownLedger,
+} from "./inbox-cooldown";
+
 const LOCAL_INBOX_STORAGE_PREFIX = "justwork.workspace.inbox.v1";
 
 export type LocalInboxNotification = {
@@ -6,6 +21,8 @@ export type LocalInboxNotification = {
   workspaceId: string;
   docId: string;
   docTitle: string;
+  targetUserId: string;
+  mentionId: string;
   mentionText: string;
   createdAt: string;
   isRead: boolean;
@@ -16,23 +33,17 @@ export type LocalInboxState = {
 };
 
 type InboxStorageArea = Pick<chrome.storage.StorageArea, "get" | "set">;
-type MentionOccurrence = {
-  index: number;
-  line: string;
-  snippet: string;
-  occurrenceKey: string;
-};
 
 function inboxStorageKey(workspaceId: string, userId: string): string {
   return `${LOCAL_INBOX_STORAGE_PREFIX}:${workspaceId}:${userId}`;
 }
 
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
 function makeNotificationId(): string {
   return `inbox_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function notificationDedupeKey(workspaceId: string, docId: string, targetUserId: string, mentionId: string): string {
+  return `${workspaceId}:${docId}:${targetUserId}:${mentionId}`;
 }
 
 function normalizeNotification(value: unknown): LocalInboxNotification | null {
@@ -44,6 +55,8 @@ function normalizeNotification(value: unknown): LocalInboxNotification | null {
     typeof record.workspaceId !== "string" ||
     typeof record.docId !== "string" ||
     typeof record.docTitle !== "string" ||
+    typeof record.targetUserId !== "string" ||
+    typeof record.mentionId !== "string" ||
     typeof record.mentionText !== "string" ||
     typeof record.createdAt !== "string"
   ) {
@@ -55,6 +68,8 @@ function normalizeNotification(value: unknown): LocalInboxNotification | null {
     workspaceId: record.workspaceId,
     docId: record.docId,
     docTitle: record.docTitle,
+    targetUserId: record.targetUserId,
+    mentionId: record.mentionId,
     mentionText: record.mentionText,
     createdAt: record.createdAt,
     isRead: record.isRead === true,
@@ -83,84 +98,35 @@ async function writeInboxState(storage: InboxStorageArea, key: string, state: Lo
   await storage.set({ [key]: state });
 }
 
-export function extractMentionSnippet(markdown: string, mention: string): string {
-  return findMentionOccurrences(markdown, mention)[0]?.snippet ?? "";
-}
-
-function isMentionBoundaryBefore(char: string | undefined): boolean {
-  return !char || !/[\p{L}\p{N}_@.-]/u.test(char);
-}
-
-function isMentionBoundaryAfter(char: string | undefined): boolean {
-  return !char || !/[\p{L}\p{N}_-]/u.test(char);
-}
-
-function mentionSignature(snippet: string, occurrenceIndex: number): string {
-  return `${occurrenceIndex}:${snippet.trim().toLowerCase()}`;
-}
-
-function findMentionOccurrences(markdown: string, mention: string): MentionOccurrence[] {
-  const trimmedMention = mention.trim();
-  if (!trimmedMention) return [];
-  const lowerMarkdown = markdown.toLowerCase();
-  const needle = `@${trimmedMention.toLowerCase()}`;
-  const matches: MentionOccurrence[] = [];
-  let searchFrom = 0;
-  let occurrenceIndex = 0;
-  while (searchFrom < lowerMarkdown.length) {
-    const index = lowerMarkdown.indexOf(needle, searchFrom);
-    if (index === -1) break;
-    searchFrom = index + needle.length;
-    const before = index > 0 ? markdown[index - 1] : undefined;
-    const after = markdown[index + needle.length];
-    if (!isMentionBoundaryBefore(before) || !isMentionBoundaryAfter(after)) {
-      continue;
-    }
-    const lineStart = markdown.lastIndexOf("\n", index);
-    const lineEnd = markdown.indexOf("\n", index);
-    const rawLine = markdown.slice(lineStart === -1 ? 0 : lineStart + 1, lineEnd === -1 ? markdown.length : lineEnd).trim();
-    const snippet = rawLine.slice(0, 180) || markdown.slice(index, Math.min(markdown.length, index + 180)).trim();
-    matches.push({
-      index,
-      line: rawLine,
-      snippet,
-      occurrenceKey: mentionSignature(snippet, occurrenceIndex),
-    });
-    occurrenceIndex += 1;
-  }
-  return matches;
-}
-
-export function hasMention(markdown: string, mention: string): boolean {
-  return findMentionOccurrences(markdown, mention).length > 0;
-}
-
 export function createMentionNotification(params: {
   workspaceId: string;
   docId: string;
   docTitle: string;
+  targetUserId: string;
+  mentionId: string;
   mentionText: string;
-  occurrenceKey?: string;
   createdAt?: string;
-  recipientDisplayName: string;
 }): LocalInboxNotification {
   const createdAt = params.createdAt ?? new Date().toISOString();
-  const dedupeKey = [
-    params.workspaceId,
-    params.docId,
-    params.recipientDisplayName.trim().toLowerCase(),
-    params.occurrenceKey?.trim().toLowerCase() || params.mentionText.trim().toLowerCase(),
-  ].join(":");
   return {
     id: makeNotificationId(),
-    dedupeKey,
+    dedupeKey: notificationDedupeKey(params.workspaceId, params.docId, params.targetUserId, params.mentionId),
     workspaceId: params.workspaceId,
     docId: params.docId,
     docTitle: params.docTitle,
-    mentionText: params.mentionText || `@${params.recipientDisplayName}`,
+    targetUserId: params.targetUserId,
+    mentionId: params.mentionId,
+    mentionText: params.mentionText,
     createdAt,
     isRead: false,
   };
+}
+
+function extractTargetMentions(markdown: string, targetUserId: string): MentionToken[] {
+  const targetUserRef = createMentionUserRef(targetUserId);
+  return extractMentionTokenMatches(markdown)
+    .filter((token) => token.userRef === targetUserRef || token.userId === targetUserId)
+    .map(({ raw: _raw, index: _index, ...token }) => token);
 }
 
 export function extractMentionNotifications(params: {
@@ -169,22 +135,26 @@ export function extractMentionNotifications(params: {
   workspaceId: string;
   docId: string;
   docTitle: string;
-  recipientDisplayName: string;
+  recipientUserId: string;
+  createdAt?: string;
 }): LocalInboxNotification[] {
-  const recipient = params.recipientDisplayName.trim();
-  if (!recipient) return [];
-  const previousMatches = findMentionOccurrences(params.previousMarkdown, recipient);
-  const nextMatches = findMentionOccurrences(params.nextMarkdown, recipient);
-  if (nextMatches.length === 0 || nextMatches.length <= previousMatches.length) return [];
-  const newMatches = nextMatches.slice(previousMatches.length);
-  return newMatches.map((match) => createMentionNotification({
-    workspaceId: params.workspaceId,
-    docId: params.docId,
-    docTitle: params.docTitle,
-    mentionText: match.snippet || `@${recipient}`,
-    occurrenceKey: match.occurrenceKey,
-    recipientDisplayName: recipient,
-  }));
+  const previousMentions = extractTargetMentions(params.previousMarkdown, params.recipientUserId);
+  const nextMentions = extractTargetMentions(params.nextMarkdown, params.recipientUserId);
+  if (nextMentions.length === 0 || nextMentions.length <= previousMentions.length) {
+    return [];
+  }
+  const previousIds = new Set(previousMentions.map((mention) => mention.mentionId));
+  return nextMentions
+    .filter((mention) => !previousIds.has(mention.mentionId))
+    .map((mention) => createMentionNotification({
+      workspaceId: params.workspaceId,
+      docId: params.docId,
+      docTitle: params.docTitle,
+      targetUserId: params.recipientUserId,
+      mentionId: mention.mentionId,
+      mentionText: extractMentionSnippet(params.nextMarkdown, mention.mentionId) || `@${mention.displayName}`,
+      createdAt: params.createdAt,
+    }));
 }
 
 export function extractMentionNotification(params: {
@@ -193,7 +163,8 @@ export function extractMentionNotification(params: {
   workspaceId: string;
   docId: string;
   docTitle: string;
-  recipientDisplayName: string;
+  recipientUserId: string;
+  createdAt?: string;
 }): LocalInboxNotification | null {
   return extractMentionNotifications(params)[0] ?? null;
 }
@@ -221,6 +192,73 @@ export async function appendLocalInboxNotification(
     notifications: [notification, ...state.notifications].slice(0, 100),
   };
   await writeInboxState(storage, key, next);
+  return next;
+}
+
+export async function appendMentionNotificationsWithCooldown(
+  storage: InboxStorageArea,
+  workspaceId: string,
+  userId: string,
+  notifications: LocalInboxNotification[],
+  now = new Date().toISOString(),
+): Promise<{ state: LocalInboxState; ledger: InboxCooldownLedger; added: LocalInboxNotification[] }> {
+  const key = inboxStorageKey(workspaceId, userId);
+  let state = await readInboxState(storage, key);
+  let ledger = await loadInboxCooldownLedger(storage, workspaceId, userId);
+  const added: LocalInboxNotification[] = [];
+  for (const notification of notifications) {
+    if (state.notifications.some((item) => item.dedupeKey === notification.dedupeKey)) {
+      continue;
+    }
+    if (!canCreateInboxNotification(ledger, {
+      workspaceId,
+      docId: notification.docId,
+      userId,
+      now,
+    })) {
+      continue;
+    }
+    state = {
+      notifications: [notification, ...state.notifications].slice(0, 100),
+    };
+    ledger = recordInboxNotification(ledger, {
+      workspaceId,
+      docId: notification.docId,
+      userId,
+      notificationId: notification.id,
+      now,
+    });
+    added.push(notification);
+  }
+  if (added.length > 0) {
+    await writeInboxState(storage, key, state);
+    await saveInboxCooldownLedger(storage, workspaceId, userId, ledger);
+  }
+  return { state, ledger, added };
+}
+
+export async function dismissLocalInboxNotification(
+  storage: InboxStorageArea,
+  workspaceId: string,
+  userId: string,
+  notificationId: string,
+): Promise<LocalInboxState> {
+  const key = inboxStorageKey(workspaceId, userId);
+  const state = await readInboxState(storage, key);
+  const target = state.notifications.find((notification) => notification.id === notificationId) ?? null;
+  const next: LocalInboxState = {
+    notifications: state.notifications.filter((notification) => notification.id !== notificationId),
+  };
+  await writeInboxState(storage, key, next);
+  if (target) {
+    const ledger = await loadInboxCooldownLedger(storage, workspaceId, userId);
+    const nextLedger = clearActiveInboxNotification(ledger, {
+      workspaceId,
+      docId: target.docId,
+      userId,
+    });
+    await saveInboxCooldownLedger(storage, workspaceId, userId, nextLedger);
+  }
   return next;
 }
 
