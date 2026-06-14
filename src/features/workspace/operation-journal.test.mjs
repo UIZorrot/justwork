@@ -114,3 +114,50 @@ test("journal replays delete operations over remote tree refreshes and clears co
   assert.equal(pendingHardDelete.state.docs.some((entry) => entry.id === "page-a"), false);
   assert.equal(pendingHardDelete.operations.length, 1);
 });
+
+test("journal keeps pending local creates visible until the remote tree contains them", async () => {
+  const mod = await loadTranspiledModule("src/features/workspace/operation-journal.ts");
+  const localSheet = baseDoc({
+    id: "local-sheet-1",
+    title: "New Sheet",
+    kind: "table",
+    content: { frozenHeader: false, columns: [], rows: [] },
+    revision: 0,
+    updatedAt: "2026-06-14T00:03:00.000Z",
+  });
+
+  const pending = mod.applyWorkspaceOperationJournal(baseState([baseDoc({ id: "root", kind: "folder" })]), [
+    {
+      id: "op-create",
+      workspaceId: "ws-1",
+      itemId: "local-sheet-1",
+      kind: "create",
+      doc: localSheet,
+      localSeq: 1,
+      createdAt: "2026-06-14T00:03:00.000Z",
+    },
+    {
+      id: "op-edit",
+      workspaceId: "ws-1",
+      itemId: "local-sheet-1",
+      kind: "edit",
+      patch: { title: "Edited Sheet" },
+      baseRevision: 0,
+      localSeq: 2,
+      createdAt: "2026-06-14T00:04:00.000Z",
+    },
+  ]);
+
+  const doc = pending.state.docs.find((entry) => entry.id === "local-sheet-1");
+  assert.equal(doc.title, "Edited Sheet");
+  assert.equal(pending.state.activeDocId, "local-sheet-1");
+  assert.equal(pending.operations.length, 2);
+
+  const confirmed = mod.applyWorkspaceOperationJournal(baseState([
+    baseDoc({ id: "root", kind: "folder" }),
+    baseDoc({ id: "local-sheet-1", title: "Remote Sheet", kind: "table", revision: 0 }),
+  ]), pending.operations);
+
+  assert.equal(confirmed.state.docs.some((entry) => entry.id === "local-sheet-1"), true);
+  assert.equal(confirmed.operations.map((operation) => operation.kind).includes("create"), false);
+});

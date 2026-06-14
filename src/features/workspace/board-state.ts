@@ -170,7 +170,7 @@ export function addBoardColumn(content: BoardDocumentContent, title = "New colum
 export function renameBoardColumn(content: BoardDocumentContent, columnId: string, title: string): BoardDocumentContent {
   const next = cloneBoard(content);
   next.columns = next.columns.map((column) => (
-    column.id === columnId ? { ...column, title: title.trim() || column.title } : column
+    column.id === columnId ? { ...column, title } : column
   ));
   return next;
 }

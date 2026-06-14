@@ -903,6 +903,8 @@ export async function startBackendWorkbench(): Promise<void> {
   editorRoot.replaceChildren(markdownHost, structuredHost);
   let tableView: TableViewHandle | undefined;
   let boardView: BoardViewHandle | undefined;
+  let structuredSurfaceDocId: string | null = null;
+  let structuredSurfaceKind: WorkspaceDoc["kind"] | null = null;
   const boardTemplateCollapsedState = new Map<string, boolean>();
   let mounted = false;
   let flushOfflineMutations: () => Promise<void> = async () => {};
@@ -1020,7 +1022,7 @@ export async function startBackendWorkbench(): Promise<void> {
       rm.className = "gate-recent-remove";
       rm.setAttribute("aria-label", t("gate.recent.remove"));
       rm.dataset.workspaceId = e.workspaceId;
-      rm.textContent = "脳";
+      rm.textContent = "×";
       li.appendChild(selectBtn);
       li.appendChild(rm);
       gateRecentList.appendChild(li);
@@ -1259,11 +1261,38 @@ export async function startBackendWorkbench(): Promise<void> {
     );
     let localOperationSeq = 0;
     let localOperationJournal: WorkspaceOperation[] = [];
+    const recordLocalCreateOperation = (doc: WorkspaceDoc): string => {
+      localOperationSeq += 1;
+      const id = mutationId();
+      localOperationJournal = [
+        ...localOperationJournal.filter((entry) => entry.itemId !== doc.id),
+        {
+          id,
+          workspaceId,
+          itemId: doc.id,
+          kind: "create",
+          doc: { ...doc },
+          localSeq: localOperationSeq,
+          createdAt: doc.updatedAt || new Date().toISOString(),
+        },
+      ];
+      return id;
+    };
+    const updateLocalCreateOperationDoc = (doc: WorkspaceDoc): void => {
+      localOperationJournal = localOperationJournal.map((entry) => (
+        entry.itemId === doc.id && entry.kind === "create"
+          ? {
+              ...entry,
+              doc: { ...doc },
+            }
+          : entry
+      ));
+    };
     const recordLocalDeleteOperation = (itemId: string, kind: OfflineDeleteMutationKind): string => {
       localOperationSeq += 1;
       const id = mutationId();
       localOperationJournal = [
-        ...localOperationJournal.filter((entry) => !(entry.itemId === itemId && entry.kind !== "edit")),
+        ...localOperationJournal.filter((entry) => entry.itemId !== itemId),
         {
           id,
           workspaceId,
@@ -2009,6 +2038,8 @@ export async function startBackendWorkbench(): Promise<void> {
     );
 
     const renderFolderSurface = (doc: WorkspaceDoc): void => {
+      structuredSurfaceDocId = doc.id;
+      structuredSurfaceKind = doc.kind;
       structuredHost.replaceChildren();
       const surface = document.createElement("section");
       surface.className = "folder-surface";
@@ -2077,21 +2108,36 @@ export async function startBackendWorkbench(): Promise<void> {
     };
 
     const renderStructuredSurface = (doc: WorkspaceDoc): void => {
-      tableView?.destroy?.();
-      boardView?.destroy?.();
-      tableView = undefined;
-      boardView = undefined;
-      structuredHost.replaceChildren();
       if (doc.kind === "folder") {
+        tableView?.destroy?.();
+        boardView?.destroy?.();
+        tableView = undefined;
+        boardView = undefined;
         renderFolderSurface(doc);
         return;
       }
       if (shouldRenderStructuredLoading(doc)) {
+        tableView?.destroy?.();
+        boardView?.destroy?.();
+        tableView = undefined;
+        boardView = undefined;
+        structuredSurfaceDocId = null;
+        structuredSurfaceKind = null;
+        structuredHost.replaceChildren();
         renderStructuredLoadingSurface();
         return;
       }
       if (doc.kind === "table") {
         const content = normalizedContentForDoc(doc) as TableDocumentContent;
+        if (tableView && structuredSurfaceDocId === doc.id && structuredSurfaceKind === doc.kind) {
+          tableView.update(content);
+          return;
+        }
+        tableView?.destroy?.();
+        boardView?.destroy?.();
+        tableView = undefined;
+        boardView = undefined;
+        structuredHost.replaceChildren();
         const view = createTableView({
           document,
           content,
@@ -2119,11 +2165,22 @@ export async function startBackendWorkbench(): Promise<void> {
           },
         });
         tableView = view;
+        structuredSurfaceDocId = doc.id;
+        structuredSurfaceKind = doc.kind;
         structuredHost.appendChild(view.element);
         return;
       }
       if (doc.kind === "board") {
         const content = normalizedContentForDoc(doc) as BoardDocumentContent;
+        if (boardView && structuredSurfaceDocId === doc.id && structuredSurfaceKind === doc.kind) {
+          boardView.update(content);
+          return;
+        }
+        tableView?.destroy?.();
+        boardView?.destroy?.();
+        tableView = undefined;
+        boardView = undefined;
+        structuredHost.replaceChildren();
         const view = createBoardView({
           document,
           content,
@@ -2170,6 +2227,8 @@ export async function startBackendWorkbench(): Promise<void> {
           },
         });
         boardView = view;
+        structuredSurfaceDocId = doc.id;
+        structuredSurfaceKind = doc.kind;
         structuredHost.appendChild(view.element);
       }
     };
@@ -2262,13 +2321,16 @@ export async function startBackendWorkbench(): Promise<void> {
       if (isCreatePendingDocId(itemId)) {
         stageOptimisticCreatePatch(optimisticCreatePatches, itemId, patch);
       }
-      updateDocById(itemId, (doc) => ({
+      const nextDoc = updateDocById(itemId, (doc) => ({
         ...doc,
         title: patch.title ?? doc.title,
         markdown: patch.markdown ?? doc.markdown,
         content: patch.content ?? doc.content ?? null,
         updatedAt: new Date().toISOString(),
       }));
+      if (nextDoc && isCreatePendingDocId(itemId)) {
+        updateLocalCreateOperationDoc(nextDoc);
+      }
       if (patch.title !== undefined) {
         void upsertBackendDocDraft(workspaceId, itemId, patch, baseRevision).catch(() => undefined);
       } else if (patch.markdown !== undefined || patch.content !== undefined) {
@@ -2398,7 +2460,8 @@ export async function startBackendWorkbench(): Promise<void> {
       );
       replayLocalOperationJournal();
       overlayDirtyDocsWithoutJournalEdits();
-      const summary = workspace.docs.find((d) => d.id === nextActiveId && !d.inTrash)
+      const replayedActiveId = workspace.activeDocId;
+      const summary = workspace.docs.find((d) => d.id === replayedActiveId && !d.inTrash)
         ?? workspace.docs.find((d) => !d.inTrash)
         ?? workspace.docs[0]!;
       const collaborator = summary.kind === "page" ? getCollaboratorForDoc(summary) : null;
@@ -3498,9 +3561,12 @@ export async function startBackendWorkbench(): Promise<void> {
       localCollaborativeDocCache.delete(optimisticId);
       hydratedDocIds.delete(optimisticId);
       localCollaborativeDocCache.set(created.id, created);
+      const hasOptimisticDoc = workspace.docs.some((doc) => doc.id === optimisticId);
       workspace = {
         ...workspace,
-        docs: workspace.docs.map((doc) => (doc.id === optimisticId ? created : doc)),
+        docs: hasOptimisticDoc
+          ? workspace.docs.map((doc) => (doc.id === optimisticId ? created : doc))
+          : [...workspace.docs, created],
         activeDocId: workspace.activeDocId === optimisticId ? created.id : workspace.activeDocId,
       };
       if (active.id === optimisticId) {
@@ -3526,6 +3592,7 @@ export async function startBackendWorkbench(): Promise<void> {
       const parentId = currentParentId();
       const previousActive = active;
       const optimistic = createOptimisticDoc(kind, title, parentId);
+      const localCreateOperationId = recordLocalCreateOperation(optimistic);
       insertOptimisticDoc(optimistic);
       syncEditorWithActive();
       renderAll();
@@ -3536,6 +3603,7 @@ export async function startBackendWorkbench(): Promise<void> {
         if (created.kind === "page") {
           const promoted = promoteOptimisticCreateDoc(optimisticCreatePatches, optimistic.id, created);
           replaceOptimisticDoc(optimistic.id, promoted.doc);
+          updateLocalCreateOperationDoc(promoted.doc);
           if (promoted.patch) {
             if (promoted.patch.markdown !== undefined) {
               const collaborator = getCollaboratorForDoc(promoted.doc);
@@ -3566,6 +3634,7 @@ export async function startBackendWorkbench(): Promise<void> {
             content: normalizedContentForDoc(created),
           });
           replaceOptimisticDoc(optimistic.id, promoted.doc);
+          updateLocalCreateOperationDoc(promoted.doc);
           if (promoted.patch) {
             const collaborator = getStructuredCollaboratorForDoc(promoted.doc);
             if (promoted.patch.content) {
@@ -3610,6 +3679,7 @@ export async function startBackendWorkbench(): Promise<void> {
                 : t("doc.createdFile"),
         );
       } catch (e) {
+        removeLocalOperation(localCreateOperationId);
         rollbackOptimisticDoc(optimistic.id, previousActive);
         syncEditorWithActive();
         renderAll();

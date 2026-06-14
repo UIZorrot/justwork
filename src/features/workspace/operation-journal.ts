@@ -1,6 +1,6 @@
 import type { WorkspaceDoc, WorkspaceDocContent, WorkspaceDocsState } from "@/shared/storage-keys";
 
-export type WorkspaceOperationKind = "edit" | "trash" | "restore" | "hard-delete";
+export type WorkspaceOperationKind = "create" | "edit" | "trash" | "restore" | "hard-delete";
 
 export type WorkspaceOperationPatch = {
   title?: string;
@@ -13,6 +13,7 @@ export type WorkspaceOperation = {
   workspaceId: string;
   itemId: string;
   kind: WorkspaceOperationKind;
+  doc?: WorkspaceDoc;
   patch?: WorkspaceOperationPatch;
   baseRevision?: number;
   localSeq: number;
@@ -91,6 +92,28 @@ function replayEdit(
   };
 }
 
+function replayCreate(
+  state: WorkspaceDocsState,
+  operation: WorkspaceOperation,
+): WorkspaceOperationReplayResult {
+  const current = state.docs.find((doc) => doc.id === operation.itemId);
+  if (current) {
+    return { state, operations: [] };
+  }
+  if (!operation.doc) {
+    return { state, operations: [] };
+  }
+  const doc = { ...operation.doc };
+  return {
+    state: {
+      ...state,
+      activeDocId: doc.inTrash ? state.activeDocId : doc.id,
+      docs: [...state.docs, doc],
+    },
+    operations: [operation],
+  };
+}
+
 function replayDelete(
   state: WorkspaceDocsState,
   operation: WorkspaceOperation,
@@ -137,9 +160,11 @@ export function applyWorkspaceOperationJournal(
   };
   const retained: WorkspaceOperation[] = [];
   for (const operation of sortOperations(operations)) {
-    const result = operation.kind === "edit"
-      ? replayEdit(nextState, operation)
-      : replayDelete(nextState, operation);
+    const result = operation.kind === "create"
+      ? replayCreate(nextState, operation)
+      : operation.kind === "edit"
+        ? replayEdit(nextState, operation)
+        : replayDelete(nextState, operation);
     nextState = result.state;
     retained.push(...result.operations);
   }

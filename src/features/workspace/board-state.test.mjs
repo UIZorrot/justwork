@@ -88,3 +88,14 @@ test("template lane can add cards independently of normal columns", async () => 
   assert.equal(updated.template.cardIds.length, base.template.cardIds.length + 1);
   assert.equal(updated.columns[0].cardIds.length, base.columns[0].cardIds.length);
 });
+
+test("renaming a board column preserves a just-typed trailing space", async () => {
+  const documents = await loadTranspiledModule("src/features/workspace/structured-document.ts");
+  const mod = await loadTranspiledModule("src/features/workspace/board-state.ts");
+
+  const base = documents.createDefaultBoardContent();
+  const columnId = base.columns[0].id;
+  const updated = mod.renameBoardColumn(base, columnId, "Today ");
+
+  assert.equal(updated.columns.find((column) => column.id === columnId)?.title, "Today ");
+});

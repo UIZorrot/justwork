@@ -100,6 +100,26 @@ test("board normalization preserves an explicit empty column set", async () => {
   assert.equal(normalized.template.fields.length, 1);
 });
 
+test("board normalization preserves a trailing space in column titles", async () => {
+  const mod = await loadTranspiledModule("src/features/workspace/structured-document.ts");
+
+  const normalized = mod.normalizeStructuredDocumentContent("board", {
+    template: {
+      columnId: "template_lane",
+      title: "Card template",
+      cardTitle: "Default card",
+      cardIds: ["template_card"],
+      fields: [{ id: "field_a", name: "Summary", defaultValue: "" }],
+    },
+    columns: [{ id: "doing", title: "Today ", color: "#aabbcc", cardIds: [] }],
+    cards: [
+      { id: "template_card", title: "Template seed", fields: [{ id: "template_field_instance", templateFieldId: "field_a", name: "Summary", value: "Seed" }] },
+    ],
+  });
+
+  assert.equal(normalized.columns[0]?.title, "Today ");
+});
+
 test("table workbook snapshots round-trip through structured normalization", async () => {
   const mod = await loadTranspiledModule("src/features/workspace/structured-document.ts");
 

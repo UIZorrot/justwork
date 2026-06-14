@@ -100,6 +100,10 @@ function asTrimmedString(value: unknown, fallback: string): string {
   return typeof value === "string" && value.trim() ? value.trim() : fallback;
 }
 
+function asPresentString(value: unknown, fallback: string): string {
+  return typeof value === "string" && value.trim() ? value : fallback;
+}
+
 function normalizeColumnWidth(value: unknown): number {
   if (typeof value !== "number" || !Number.isFinite(value)) return DEFAULT_TABLE_COLUMN_WIDTH;
   return Math.max(140, Math.round(value));
@@ -427,7 +431,7 @@ function extractTableFromWorkbookData(workbookData: Record<string, unknown>): {
     };
     columns.push({
       id: asTrimmedString(custom.justworkColumnId, fallback.id),
-      title: asTrimmedString(cellStringValue(headerRow[String(columnIndex)]), fallback.title),
+      title: asPresentString(cellStringValue(headerRow[String(columnIndex)]), fallback.title),
       type: normalizeTableColumnType(custom.justworkColumnType),
       width: normalizeColumnWidth(columnRecord.w ?? fallback.width),
     });
@@ -517,7 +521,7 @@ function normalizeTableColumn(value: unknown, index: number): TableColumn {
   const record = asRecord(value);
   return {
     id: asTrimmedString(record.id, `col_${index + 1}`),
-    title: asTrimmedString(record.title, `Column ${index + 1}`),
+    title: asPresentString(record.title, `Column ${index + 1}`),
     type: normalizeTableColumnType(record.type),
     width: normalizeColumnWidth(record.width),
   };
@@ -540,7 +544,7 @@ function normalizeBoardTemplateField(value: unknown, index: number): BoardTempla
   const record = asRecord(value);
   return {
     id: asTrimmedString(record.id, `template_field_${index + 1}`),
-    name: asTrimmedString(record.name, `Field ${index + 1}`),
+    name: asPresentString(record.name, `Field ${index + 1}`),
     defaultValue: typeof record.defaultValue === "string" ? record.defaultValue : "",
   };
 }
@@ -553,7 +557,7 @@ function normalizeBoardCardField(value: unknown, index: number): BoardCardField 
   return {
     id: asTrimmedString(record.id, `field_${index + 1}`),
     templateFieldId,
-    name: asTrimmedString(record.name, `Field ${index + 1}`),
+    name: asPresentString(record.name, `Field ${index + 1}`),
     value: typeof record.value === "string" ? record.value : "",
   };
 }
@@ -589,7 +593,7 @@ function normalizeBoardColumn(value: unknown, index: number, availableCardIds: S
     .filter((cardId): cardId is string => typeof cardId === "string" && availableCardIds.has(cardId));
   return {
     id: asTrimmedString(record.id, `column_${index + 1}`),
-    title: asTrimmedString(record.title, `Column ${index + 1}`),
+    title: asPresentString(record.title, `Column ${index + 1}`),
     color: typeof record.color === "string" && record.color.trim()
       ? record.color
       : BOARD_COLUMN_COLORS[index % BOARD_COLUMN_COLORS.length],
@@ -604,8 +608,8 @@ function normalizeBoardTemplateBase(value: unknown): Omit<BoardTemplateDefinitio
     .map((field, index) => normalizeBoardTemplateField(field, index));
   return {
     columnId: asTrimmedString(record.columnId, defaults.columnId),
-    title: asTrimmedString(record.title, defaults.title),
-    cardTitle: asTrimmedString(record.cardTitle, defaults.cardTitle),
+    title: asPresentString(record.title, defaults.title),
+    cardTitle: asPresentString(record.cardTitle, defaults.cardTitle),
     fields: fields.length > 0 ? fields : defaults.fields.map((field) => ({ ...field })),
   };
 }
