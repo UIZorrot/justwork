@@ -72,6 +72,10 @@ import {
   type OfflineDeleteMutationKind,
 } from "@/features/workspace/offline-delete-queue";
 import {
+  applyWorkspaceOperationJournal,
+  type WorkspaceOperation,
+} from "@/features/workspace/operation-journal";
+import {
   createDefaultBoardContent,
   createDefaultTableContent,
   normalizeStructuredDocumentContent,
@@ -1253,10 +1257,86 @@ export async function startBackendWorkbench(): Promise<void> {
       formatWorkspaceTitle(treeData.workspace_title, recentListLabel),
       t("doc.workspaceBackend"),
     );
+    let localOperationSeq = 0;
+    let localOperationJournal: WorkspaceOperation[] = [];
+    const recordLocalDeleteOperation = (itemId: string, kind: OfflineDeleteMutationKind): string => {
+      localOperationSeq += 1;
+      const id = mutationId();
+      localOperationJournal = [
+        ...localOperationJournal.filter((entry) => !(entry.itemId === itemId && entry.kind !== "edit")),
+        {
+          id,
+          workspaceId,
+          itemId,
+          kind,
+          localSeq: localOperationSeq,
+          createdAt: new Date().toISOString(),
+        },
+      ];
+      return id;
+    };
+    const recordLocalEditOperation = (itemId: string, baseRevision: number, patch: OfflineMutationPatch): string => {
+      localOperationSeq += 1;
+      const previous = localOperationJournal.find((entry) => entry.itemId === itemId && entry.kind === "edit");
+      const id = previous?.id ?? mutationId();
+      localOperationJournal = [
+        ...localOperationJournal.filter((entry) => !(entry.itemId === itemId && entry.kind === "edit")),
+        {
+          id,
+          workspaceId,
+          itemId,
+          kind: "edit",
+          patch: {
+            ...(previous?.patch ?? {}),
+            ...patch,
+          },
+          baseRevision: previous?.baseRevision ?? baseRevision,
+          localSeq: localOperationSeq,
+          createdAt: new Date().toISOString(),
+        },
+      ];
+      return id;
+    };
+    const removeLocalOperation = (operationId: string): void => {
+      localOperationJournal = localOperationJournal.filter((entry) => entry.id !== operationId);
+    };
+    const removeLocalEditOperations = (itemId: string): void => {
+      localOperationJournal = localOperationJournal.filter((entry) => !(entry.itemId === itemId && entry.kind === "edit"));
+    };
+    const hasLocalEditOperation = (itemId: string): boolean => (
+      localOperationJournal.some((entry) => entry.itemId === itemId && entry.kind === "edit")
+    );
+    const dirtyDocIdsWithoutJournalEdits = (): Set<string> => (
+      new Set([...dirtyDocIds].filter((itemId) => !hasLocalEditOperation(itemId)))
+    );
+    const overlayDirtyDocsWithoutJournalEdits = (): void => {
+      workspace = {
+        ...workspace,
+        docs: overlayDirtyCollaborativeDocs(
+          workspace.docs,
+          dirtyDocIdsWithoutJournalEdits(),
+          localCollaborativeDocCache,
+        ),
+      };
+    };
+    const replayLocalOperationJournal = (): void => {
+      const previousEditItemIds = new Set(
+        localOperationJournal.filter((entry) => entry.kind === "edit").map((entry) => entry.itemId),
+      );
+      const replayed = applyWorkspaceOperationJournal(workspace, localOperationJournal);
+      workspace = replayed.state;
+      localOperationJournal = replayed.operations;
+      for (const itemId of previousEditItemIds) {
+        if (!hasLocalEditOperation(itemId)) {
+          dirtyDocIds.delete(itemId);
+        }
+      }
+    };
     workspace = applyOfflineDeleteMutationsToDocs(
       workspace,
       (await loadOfflineDeleteMutations(localStorageArea)).filter((entry) => entry.workspaceId === workspaceId),
     );
+    replayLocalOperationJournal();
 
     let active = workspace.docs.find((d) => d.id === treeData.active_item_id && !d.inTrash)
       ?? workspace.docs.find((d) => !d.inTrash)
@@ -2176,6 +2256,9 @@ export async function startBackendWorkbench(): Promise<void> {
       const currentDoc = workspace.docs.find((doc) => doc.id === itemId);
       const baseRevision = currentDoc?.revision ?? 0;
       dirtyDocIds.add(itemId);
+      if (!isCreatePendingDocId(itemId)) {
+        recordLocalEditOperation(itemId, baseRevision, patch);
+      }
       if (isCreatePendingDocId(itemId)) {
         stageOptimisticCreatePatch(optimisticCreatePatches, itemId, patch);
       }
@@ -2207,6 +2290,7 @@ export async function startBackendWorkbench(): Promise<void> {
           const currentDoc = workspace.docs.find((doc) => doc.id === request.itemId);
           if (shouldSkipDocSave(blockedDocSaveIds, request.itemId, currentDoc)) {
             dirtyDocIds.delete(request.itemId);
+            removeLocalEditOperations(request.itemId);
             return;
           }
           if (request.itemId === active.id) {
@@ -2236,6 +2320,7 @@ export async function startBackendWorkbench(): Promise<void> {
             }
             if (!saveResolution.shouldKeepDirty) {
               dirtyDocIds.delete(request.itemId);
+              removeLocalEditOperations(request.itemId);
             }
 
             updateDocById(request.itemId, (doc) => {
@@ -2307,14 +2392,12 @@ export async function startBackendWorkbench(): Promise<void> {
         ...workspace,
         docs: workspace.docs.map((doc) => normalizeLoadedDoc(doc)),
       };
-      workspace = {
-        ...workspace,
-        docs: overlayDirtyCollaborativeDocs(workspace.docs, dirtyDocIds, localCollaborativeDocCache),
-      };
       workspace = applyOfflineDeleteMutationsToDocs(
         workspace,
         (await loadOfflineDeleteMutations(localStorageArea)).filter((entry) => entry.workspaceId === workspaceId),
       );
+      replayLocalOperationJournal();
+      overlayDirtyDocsWithoutJournalEdits();
       const summary = workspace.docs.find((d) => d.id === nextActiveId && !d.inTrash)
         ?? workspace.docs.find((d) => !d.inTrash)
         ?? workspace.docs[0]!;
@@ -2850,6 +2933,7 @@ export async function startBackendWorkbench(): Promise<void> {
               if (active.id === doc.id) {
                 active = restored;
               }
+              const localOperationId = recordLocalDeleteOperation(doc.id, "restore");
               renderAll();
               try {
                 releaseDocSaveBlocksForItem(doc.id);
@@ -2861,8 +2945,10 @@ export async function startBackendWorkbench(): Promise<void> {
               } catch (err) {
                 if (shouldQueueAsOfflinePending(err)) {
                   await queueOfflineDeleteAction(doc.id, "restore");
+                  removeLocalOperation(localOperationId);
                   return;
                 }
+                removeLocalOperation(localOperationId);
                 blockDocSavesForItem(doc.id);
                 replaceDoc(previous);
                 renderAll();
@@ -2878,6 +2964,7 @@ export async function startBackendWorkbench(): Promise<void> {
           hardDelete.addEventListener("click", (e) => {
             e.stopPropagation();
             void (async () => {
+              const localOperationId = recordLocalDeleteOperation(doc.id, "hard-delete");
               try {
                 const full = workspace.docs.find((current) => current.id === doc.id) ?? doc;
                 blockDocSavesForItem(doc.id);
@@ -2896,8 +2983,10 @@ export async function startBackendWorkbench(): Promise<void> {
                 if (shouldQueueAsOfflinePending(err)) {
                   removeCollaborativeSnapshot(collaborativeMarkdownSnapshotKey(workspaceId, doc.id));
                   await queueOfflineDeleteAction(doc.id, "hard-delete");
+                  removeLocalOperation(localOperationId);
                   return;
                 }
+                removeLocalOperation(localOperationId);
                 replaceDoc(doc);
                 releaseDocSaveBlocksForItem(doc.id);
                 syncEditorWithActive();
@@ -2918,6 +3007,7 @@ export async function startBackendWorkbench(): Promise<void> {
             e.stopPropagation();
             void (async () => {
               const snapshot = snapshotWorkspaceState();
+              const localOperationId = recordLocalDeleteOperation(doc.id, "trash");
               try {
                 blockDocSavesForItem(doc.id);
                 applyOptimisticTrash(doc.id);
@@ -2933,8 +3023,10 @@ export async function startBackendWorkbench(): Promise<void> {
               } catch (err) {
                 if (shouldQueueAsOfflinePending(err)) {
                   await queueOfflineDeleteAction(doc.id, "trash");
+                  removeLocalOperation(localOperationId);
                   return;
                 }
+                removeLocalOperation(localOperationId);
                 restoreWorkspaceState(snapshot);
                 releaseDocSaveBlocksForItem(doc.id);
                 syncEditorWithActive();
@@ -2982,6 +3074,7 @@ export async function startBackendWorkbench(): Promise<void> {
       for (const affectedId of collectAffectedDocIds(itemId)) {
         discardPendingDocSave(pendingDocSaves, blockedDocSaveIds, affectedId, (timer) => window.clearTimeout(timer));
         dirtyDocIds.delete(affectedId);
+        removeLocalEditOperations(affectedId);
         localCollaborativeDocCache.delete(affectedId);
         void removeBackendDocDraft(workspaceId, affectedId, Number.MAX_SAFE_INTEGER).catch(() => undefined);
       }
@@ -3595,6 +3688,7 @@ export async function startBackendWorkbench(): Promise<void> {
         const previous = workspace.docs.find((doc) => doc.id === itemId);
         if (!previous) return;
         const snapshot = snapshotWorkspaceState();
+        const localOperationId = recordLocalDeleteOperation(itemId, "trash");
         blockDocSavesForItem(itemId);
         applyOptimisticTrash(itemId);
         syncEditorWithActive();
@@ -3609,8 +3703,10 @@ export async function startBackendWorkbench(): Promise<void> {
         } catch (e) {
           if (shouldQueueAsOfflinePending(e)) {
             await queueOfflineDeleteAction(itemId, "trash");
+            removeLocalOperation(localOperationId);
             return;
           }
+          removeLocalOperation(localOperationId);
           restoreWorkspaceState(snapshot);
           releaseDocSaveBlocksForItem(itemId);
           syncEditorWithActive();
