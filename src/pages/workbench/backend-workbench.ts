@@ -124,6 +124,7 @@ import {
 } from "@/shared/storage-keys";
 import {
   getLocalStorageArea,
+  getRuntimeUrl,
   getSessionStorageArea,
   sendRuntimeMessage,
 } from "@/shared/browser-platform";
@@ -3487,7 +3488,7 @@ export async function startBackendWorkbench(): Promise<void> {
     const openConnectAgentDialog = (): void => {
       closeWorkspaceInfoDrawer();
       closeMessageDrawer();
-      const browserSkillUrl = chrome.runtime.getURL("agent/SKILL.md");
+      const browserSkillUrl = getRuntimeUrl("agent/SKILL.md");
       const backendSkillUrl = new URL("/agent/SKILL.md", JUSTWORK_BACKEND_URL).toString();
       connectAgentPromptText.value = buildConnectAgentPrompt(workspaceId, password, rememberWorkspacePassword);
       connectAgentDownloadSkillLink.href = browserSkillUrl;
