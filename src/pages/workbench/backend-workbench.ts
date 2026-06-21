@@ -88,6 +88,10 @@ import {
   promoteOptimisticCreateDoc,
   stageOptimisticCreatePatch,
 } from "@/features/workspace/optimistic-create-patches";
+import {
+  buildLocalFirstConflictRetryPatch,
+  shouldRetryLocalPatchAfterConflict,
+} from "@/features/workspace/sync-conflict";
 import { applyBackendDocDraft, type BackendDocDraft } from "@/features/workspace/backend-doc-drafts";
 import { createTableView, type TableViewHandle } from "@/features/workspace/table-view";
 import {
@@ -2309,7 +2313,47 @@ export async function startBackendWorkbench(): Promise<void> {
       usesDraftQueue: boolean;
     };
 
+    type SavePatchResult =
+      | { status: "saved"; doc: WorkspaceDoc }
+      | { status: "skipped" }
+      | { status: "remote-newer"; doc: WorkspaceDoc };
+
     let saveQueue: Promise<void> = Promise.resolve();
+
+    const savePatchWithConflictRetry = async (
+      itemId: string,
+      patch: OfflineMutationPatch,
+      expectedRevision: number,
+      localUpdatedAt: string | undefined,
+    ): Promise<SavePatchResult> => {
+      try {
+        return {
+          status: "saved",
+          doc: await session.saveItem(itemId, {
+            ...patch,
+            expectedRevision,
+          }),
+        };
+      } catch (e) {
+        if (!(e instanceof BackendApiError) || e.code !== "conflict") {
+          throw e;
+        }
+        const latest = await session.loadItem(itemId);
+        if (shouldSkipDocSave(blockedDocSaveIds, itemId, latest)) {
+          return { status: "skipped" };
+        }
+        if (!shouldRetryLocalPatchAfterConflict(localUpdatedAt, latest.updatedAt)) {
+          return { status: "remote-newer", doc: latest };
+        }
+        return {
+          status: "saved",
+          doc: await session.saveItem(
+            itemId,
+            buildLocalFirstConflictRetryPatch(patch, latest.revision),
+          ),
+        };
+      }
+    };
 
     const commitLocalEdit = (itemId: string, patch: OfflineMutationPatch): void => {
       const currentDoc = workspace.docs.find((doc) => doc.id === itemId);
@@ -2360,10 +2404,29 @@ export async function startBackendWorkbench(): Promise<void> {
           }
           try {
             const liveRevision = currentDoc?.revision ?? request.expectedRevision;
-            const next = await session.saveItem(request.itemId, {
-              ...request.patch,
-              expectedRevision: liveRevision,
-            });
+            const saveResult = await savePatchWithConflictRetry(
+              request.itemId,
+              request.patch,
+              liveRevision,
+              currentDoc?.updatedAt,
+            );
+            if (saveResult.status === "skipped") {
+              dirtyDocIds.delete(request.itemId);
+              removeLocalEditOperations(request.itemId);
+              return;
+            }
+            if (saveResult.status === "remote-newer") {
+              dirtyDocIds.delete(request.itemId);
+              removeLocalEditOperations(request.itemId);
+              await removeBackendDocDraft(workspaceId, request.itemId, Number.MAX_SAFE_INTEGER);
+              replaceDoc(saveResult.doc);
+              if (request.itemId === active.id) {
+                renderAll();
+                saveStatus(saveStatusEl, t("status.synced"));
+              }
+              return;
+            }
+            const next = saveResult.doc;
             markDocHydrated(request.itemId);
             const draft = request.usesDraftQueue ? await getBackendDocDraft(workspaceId, request.itemId) : null;
             const hasNewerDraft = request.usesDraftQueue && draft !== null && draft.seq > request.seq;
@@ -2411,15 +2474,6 @@ export async function startBackendWorkbench(): Promise<void> {
               }
             }
           } catch (e) {
-            if (e instanceof BackendApiError && e.code === "conflict") {
-              const latestDoc = workspace.docs.find((doc) => doc.id === request.itemId);
-              if (shouldSkipDocSave(blockedDocSaveIds, request.itemId, latestDoc)) {
-                dirtyDocIds.delete(request.itemId);
-                return;
-              }
-              showToast({ message: t("toast.conflict"), variant: "warning" });
-              return;
-            }
             if (shouldQueueAsOfflinePending(e)) {
               await queueOfflinePatch(request.itemId, request.expectedRevision, request.patch);
               return;
@@ -2730,10 +2784,30 @@ export async function startBackendWorkbench(): Promise<void> {
             continue;
           }
           const expectedRevision = revisionByItem.get(mutation.itemId) ?? mutation.expectedRevision;
-          const saved = await session.saveItem(mutation.itemId, {
-            ...mutation.patch,
+          const saveResult = await savePatchWithConflictRetry(
+            mutation.itemId,
+            mutation.patch,
             expectedRevision,
-          });
+            currentDoc?.updatedAt ?? mutation.createdAt,
+          );
+          if (saveResult.status === "skipped") {
+            await removeOfflineMutation(localStorageArea, mutation.id);
+            continue;
+          }
+          if (saveResult.status === "remote-newer") {
+            revisionByItem.set(mutation.itemId, saveResult.doc.revision);
+            updateDocById(mutation.itemId, (doc) => ({
+              ...doc,
+              title: saveResult.doc.title,
+              markdown: saveResult.doc.markdown,
+              content: saveResult.doc.content ?? doc.content ?? null,
+              revision: saveResult.doc.revision,
+              updatedAt: saveResult.doc.updatedAt,
+            }));
+            await removeOfflineMutation(localStorageArea, mutation.id);
+            continue;
+          }
+          const saved = saveResult.doc;
           revisionByItem.set(mutation.itemId, saved.revision);
           updateDocById(mutation.itemId, (doc) => ({
             ...doc,
@@ -2745,12 +2819,8 @@ export async function startBackendWorkbench(): Promise<void> {
           }));
           await removeOfflineMutation(localStorageArea, mutation.id);
         } catch (e) {
-          if (e instanceof BackendApiError && e.code === "conflict") {
-            showToast({ message: t("toast.conflict"), variant: "warning" });
-            return;
-          }
           if (isOfflineError(e)) {
-      setHealthStatus(backendHealthStatus, "offline", t("status.offline"));
+            setHealthStatus(backendHealthStatus, "offline", t("status.offline"));
             saveStatus(saveStatusEl, t("status.offlinePending"));
             return;
           }

@@ -124,7 +124,6 @@ export function createTableView(options: TableViewOptions): TableViewHandle {
           },
         },
         contextMenu: true,
-        disableAutoFocus: true,
       }),
     ],
   });

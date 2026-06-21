@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import path from "node:path";
 import test from "node:test";
 import { loadTranspiledModule } from "./test-module-loader.mjs";
 
@@ -47,4 +49,14 @@ test("table workbook snapshots keep formulas and freeze state", async () => {
   assert.equal(normalized.frozenHeader, false);
   assert.equal(normalized.columns[0].type, "formula");
   assert.equal(normalized.rows[0].cells.col_formula, "=SUM(1,2)");
+});
+
+test("table view does not disable Univer auto focus", async () => {
+  const source = await readFile(path.resolve("src/features/workspace/table-view.ts"), "utf8");
+
+  assert.equal(
+    source.includes("disableAutoFocus: true"),
+    false,
+    "sheet cells must be allowed to focus into edit mode",
+  );
 });
