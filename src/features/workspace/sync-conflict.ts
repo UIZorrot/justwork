@@ -1,17 +1,15 @@
 import type { OfflineMutationPatch } from "./offline-queue";
+import { resolveWorkspaceMutationConflict } from "./mutation-log";
 
 export type ConflictRetryPatch = OfflineMutationPatch & {
   expectedRevision: number;
 };
 
-function timestampMs(value: string | undefined): number {
-  if (!value) return 0;
-  const parsed = Date.parse(value);
-  return Number.isFinite(parsed) ? parsed : 0;
-}
-
 export function shouldRetryLocalPatchAfterConflict(localUpdatedAt: string | undefined, remoteUpdatedAt: string | undefined): boolean {
-  return timestampMs(localUpdatedAt) >= timestampMs(remoteUpdatedAt);
+  return resolveWorkspaceMutationConflict(
+    { createdAt: localUpdatedAt ?? "" },
+    { updatedAt: remoteUpdatedAt ?? "" },
+  ).action === "retry-local";
 }
 
 export function buildLocalFirstConflictRetryPatch(

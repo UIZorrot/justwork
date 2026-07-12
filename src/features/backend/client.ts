@@ -111,6 +111,8 @@ export type CreateWorkspaceBody = {
 
 export type PasswordBody = {
   password: string;
+  expected_revision?: number | null;
+  client_mutation_id?: string | null;
 };
 
 export type UpdateItemBody = {
@@ -119,6 +121,7 @@ export type UpdateItemBody = {
   markdown?: string | null;
   content?: WorkspaceDocContent | null;
   expected_revision?: number | null;
+  client_mutation_id?: string | null;
 };
 
 export type CreateItemBody = {
@@ -127,11 +130,14 @@ export type CreateItemBody = {
   title?: string;
   parent_id?: string | null;
   client_item_id?: string | null;
+  client_mutation_id?: string | null;
 };
 
 export type PinItemBody = {
   password: string;
   pinned: boolean;
+  expected_revision?: number | null;
+  client_mutation_id?: string | null;
 };
 
 export type UpdateWorkspaceSettingsBody = {
@@ -142,6 +148,8 @@ export type UpdateWorkspaceSettingsBody = {
 export type MoveItemBody = {
   password: string;
   parent_id: string | null;
+  expected_revision?: number | null;
+  client_mutation_id?: string | null;
 };
 
 export type SearchBody = {
@@ -155,6 +163,7 @@ export type PatchBody = {
   replace?: string;
   dry_run?: boolean;
   expected_revision?: number | null;
+  client_mutation_id?: string | null;
 };
 
 export type PatchResponse = {

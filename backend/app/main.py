@@ -114,6 +114,8 @@ QUOTA_PLAN_FREE = "free"
 QUOTA_PLAN_PRO = "pro"
 MAX_WORKSPACES_PER_OWNER = 5
 AGENT_SKILL_PATH = Path(__file__).resolve().parent.parent / "agent" / "SKILL.md"
+SYNC_MUTATION_LOG_KEY = "__syncMutations"
+MAX_SYNC_MUTATION_LOG_ENTRIES = 1000
 
 
 def _int_env(name: str, default: int) -> int:
@@ -388,6 +390,115 @@ def actor_from_body(
         workspace_id=workspace_id,
         target_id=target_id,
     )
+
+
+def client_mutation_id_from_body(body: BaseModel) -> str | None:
+    raw = str(getattr(body, "client_mutation_id", "") or "").strip()
+    if not raw:
+        return None
+    if len(raw) > 200:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="client mutation id too long")
+    return raw
+
+
+def recorded_mutation_item(
+    state_payload: dict,
+    mutation_id: str | None,
+    *,
+    operation: str,
+    target_id: str,
+) -> dict | None:
+    entry = recorded_mutation_entry(
+        state_payload,
+        mutation_id,
+        operation=operation,
+        target_id=target_id,
+    )
+    if entry is None:
+        return None
+    item = entry.get("item")
+    if not isinstance(item, dict):
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="mutation record conflict")
+    return item
+
+
+def recorded_mutation_entry(
+    state_payload: dict,
+    mutation_id: str | None,
+    *,
+    operation: str,
+    target_id: str,
+) -> dict | None:
+    if mutation_id is None:
+        return None
+    entries = state_payload.get(SYNC_MUTATION_LOG_KEY)
+    if not isinstance(entries, list):
+        return None
+    for entry in entries:
+        if not isinstance(entry, dict) or entry.get("id") != mutation_id:
+            continue
+        if entry.get("operation") != operation or entry.get("targetId", "") != target_id:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="mutation id conflict")
+        return entry
+    return None
+
+
+def record_mutation_item(
+    state_payload: dict,
+    mutation_id: str | None,
+    *,
+    operation: str,
+    target_id: str,
+    item: dict,
+) -> None:
+    if mutation_id is None:
+        return
+    entries = state_payload.get(SYNC_MUTATION_LOG_KEY)
+    if not isinstance(entries, list):
+        entries = []
+        state_payload[SYNC_MUTATION_LOG_KEY] = entries
+    entries.append(
+        {
+            "id": mutation_id,
+            "operation": operation,
+            "targetId": target_id,
+            "item": item,
+            "createdAt": now_iso(),
+        }
+    )
+    if len(entries) > MAX_SYNC_MUTATION_LOG_ENTRIES:
+        del entries[0 : len(entries) - MAX_SYNC_MUTATION_LOG_ENTRIES]
+
+
+def record_patch_mutation(
+    state_payload: dict,
+    mutation_id: str | None,
+    *,
+    target_id: str,
+    item: dict,
+    changed: bool,
+    preview_markdown: str,
+) -> None:
+    record_mutation_item(state_payload, mutation_id, operation="patch", target_id=target_id, item=item)
+    if mutation_id is None:
+        return
+    entries = state_payload.get(SYNC_MUTATION_LOG_KEY)
+    if not isinstance(entries, list):
+        return
+    for entry in reversed(entries):
+        if isinstance(entry, dict) and entry.get("id") == mutation_id:
+            entry["changed"] = changed
+            entry["previewMarkdown"] = preview_markdown
+            return
+
+
+def require_expected_revision(state_payload: dict, item_id: str, expected_revision: int | None) -> dict:
+    doc = find_doc(state_payload, item_id)
+    if doc is None:
+        raise KeyError(item_id)
+    if expected_revision is not None and int(doc.get("revision", 0)) != expected_revision:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="revision conflict")
+    return doc
 
 
 def require_workspace(gateway: DatabaseGateway, workspace_id: str) -> WorkspaceRecord:
@@ -953,12 +1064,18 @@ def create_workspace_item(
     au, sg, sd = actor_from_body(body, request, workspace_id, "")
     record = require_workspace(gateway, workspace_id)
     state_payload = load_decrypted_state(record, body.password)
+    mutation_id = client_mutation_id_from_body(body)
+    recorded_item = recorded_mutation_item(state_payload, mutation_id, operation="create", target_id="")
+    if recorded_item is not None:
+        return WorkspaceItemResponse(ok=True, workspace_id=workspace_id, item=recorded_item)
     try:
         doc = create_doc(state_payload, body.kind, body.title, body.parent_id, body.client_item_id)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    item = item_view(doc)
+    record_mutation_item(state_payload, mutation_id, operation="create", target_id="", item=item)
     save_state(gateway, record, state_payload, body.password, actor_user_id=au)
-    return WorkspaceItemResponse(ok=True, workspace_id=workspace_id, item=item_view(doc))
+    return WorkspaceItemResponse(ok=True, workspace_id=workspace_id, item=item)
 
 
 @app.put("/v1/workspaces/{workspace_id}/items/{item_id}", response_model=WorkspaceItemResponse)
@@ -973,20 +1090,22 @@ def update_workspace_item(
     au, sg, sd = actor_from_body(body, request, workspace_id, item_id)
     record = require_workspace(gateway, workspace_id)
     state_payload = load_decrypted_state(record, body.password)
+    mutation_id = client_mutation_id_from_body(body)
+    recorded_item = recorded_mutation_item(state_payload, mutation_id, operation="update", target_id=item_id)
+    if recorded_item is not None:
+        return WorkspaceItemResponse(ok=True, workspace_id=workspace_id, item=recorded_item)
     try:
-        cur = find_doc(state_payload, item_id)
-        if cur is None:
-            raise KeyError(item_id)
-        if body.expected_revision is not None and int(cur.get("revision", 0)) != body.expected_revision:
-            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="revision conflict")
+        cur = require_expected_revision(state_payload, item_id, body.expected_revision)
         before_doc = dict(cur)
         doc = update_doc(state_payload, item_id, body.title, body.markdown, body.content)
     except KeyError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="item not found") from exc
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    item = item_view(doc)
+    record_mutation_item(state_payload, mutation_id, operation="update", target_id=item_id, item=item)
     save_state(gateway, record, state_payload, body.password, actor_user_id=au)
-    return WorkspaceItemResponse(ok=True, workspace_id=workspace_id, item=item_view(doc))
+    return WorkspaceItemResponse(ok=True, workspace_id=workspace_id, item=item)
 
 
 @app.put("/v1/workspaces/{workspace_id}/items/{item_id}/pin", response_model=WorkspaceItemResponse)
@@ -1001,15 +1120,21 @@ def pin_workspace_item(
     au, sg, sd = actor_from_body(body, request, workspace_id, item_id)
     record = require_workspace(gateway, workspace_id)
     state_payload = load_decrypted_state(record, body.password)
+    mutation_id = client_mutation_id_from_body(body)
+    recorded_item = recorded_mutation_item(state_payload, mutation_id, operation="pin", target_id=item_id)
+    if recorded_item is not None:
+        return WorkspaceItemResponse(ok=True, workspace_id=workspace_id, item=recorded_item)
     try:
-        before_doc = dict(find_doc(state_payload, item_id) or {})
+        before_doc = dict(require_expected_revision(state_payload, item_id, body.expected_revision))
         doc = set_doc_pin(state_payload, item_id, body.pinned)
     except KeyError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="item not found") from exc
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    item = item_view(doc)
+    record_mutation_item(state_payload, mutation_id, operation="pin", target_id=item_id, item=item)
     save_state(gateway, record, state_payload, body.password, actor_user_id=au)
-    return WorkspaceItemResponse(ok=True, workspace_id=workspace_id, item=item_view(doc))
+    return WorkspaceItemResponse(ok=True, workspace_id=workspace_id, item=item)
 
 
 @app.put("/v1/workspaces/{workspace_id}/items/{item_id}/move", response_model=WorkspaceItemResponse)
@@ -1024,15 +1149,21 @@ def move_workspace_item(
     au, sg, sd = actor_from_body(body, request, workspace_id, item_id)
     record = require_workspace(gateway, workspace_id)
     state_payload = load_decrypted_state(record, body.password)
+    mutation_id = client_mutation_id_from_body(body)
+    recorded_item = recorded_mutation_item(state_payload, mutation_id, operation="move", target_id=item_id)
+    if recorded_item is not None:
+        return WorkspaceItemResponse(ok=True, workspace_id=workspace_id, item=recorded_item)
     try:
-        before_doc = dict(find_doc(state_payload, item_id) or {})
+        before_doc = dict(require_expected_revision(state_payload, item_id, body.expected_revision))
         doc = move_doc(state_payload, item_id, body.parent_id)
     except KeyError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="item not found") from exc
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    item = item_view(doc)
+    record_mutation_item(state_payload, mutation_id, operation="move", target_id=item_id, item=item)
     save_state(gateway, record, state_payload, body.password, actor_user_id=au)
-    return WorkspaceItemResponse(ok=True, workspace_id=workspace_id, item=item_view(doc))
+    return WorkspaceItemResponse(ok=True, workspace_id=workspace_id, item=item)
 
 
 @app.put("/v1/workspaces/{workspace_id}/items/{item_id}/trash", response_model=WorkspaceItemResponse)
@@ -1047,15 +1178,21 @@ def trash_workspace_item(
     au, sg, sd = actor_from_body(body, request, workspace_id, item_id)
     record = require_workspace(gateway, workspace_id)
     state_payload = load_decrypted_state(record, body.password)
+    mutation_id = client_mutation_id_from_body(body)
+    recorded_item = recorded_mutation_item(state_payload, mutation_id, operation="trash", target_id=item_id)
+    if recorded_item is not None:
+        return WorkspaceItemResponse(ok=True, workspace_id=workspace_id, item=recorded_item)
     try:
-        before_doc = dict(find_doc(state_payload, item_id) or {})
+        before_doc = dict(require_expected_revision(state_payload, item_id, body.expected_revision))
         doc = trash_doc(state_payload, item_id)
     except KeyError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="item not found") from exc
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    item = item_view(doc)
+    record_mutation_item(state_payload, mutation_id, operation="trash", target_id=item_id, item=item)
     save_state(gateway, record, state_payload, body.password, actor_user_id=au)
-    return WorkspaceItemResponse(ok=True, workspace_id=workspace_id, item=item_view(doc))
+    return WorkspaceItemResponse(ok=True, workspace_id=workspace_id, item=item)
 
 
 @app.put("/v1/workspaces/{workspace_id}/items/{item_id}/restore", response_model=WorkspaceItemResponse)
@@ -1070,15 +1207,21 @@ def restore_workspace_item(
     au, sg, sd = actor_from_body(body, request, workspace_id, item_id)
     record = require_workspace(gateway, workspace_id)
     state_payload = load_decrypted_state(record, body.password)
+    mutation_id = client_mutation_id_from_body(body)
+    recorded_item = recorded_mutation_item(state_payload, mutation_id, operation="restore", target_id=item_id)
+    if recorded_item is not None:
+        return WorkspaceItemResponse(ok=True, workspace_id=workspace_id, item=recorded_item)
     try:
-        before_doc = dict(find_doc(state_payload, item_id) or {})
+        before_doc = dict(require_expected_revision(state_payload, item_id, body.expected_revision))
         doc = restore_doc(state_payload, item_id)
     except KeyError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="item not found") from exc
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    item = item_view(doc)
+    record_mutation_item(state_payload, mutation_id, operation="restore", target_id=item_id, item=item)
     save_state(gateway, record, state_payload, body.password, actor_user_id=au)
-    return WorkspaceItemResponse(ok=True, workspace_id=workspace_id, item=item_view(doc))
+    return WorkspaceItemResponse(ok=True, workspace_id=workspace_id, item=item)
 
 
 @app.post("/v1/workspaces/{workspace_id}/items/{item_id}/hard-delete", response_model=WorkspaceItemResponse)
@@ -1093,16 +1236,22 @@ def hard_delete_workspace_item(
     au, sg, sd = actor_from_body(body, request, workspace_id, item_id)
     record = require_workspace(gateway, workspace_id)
     state_payload = load_decrypted_state(record, body.password)
+    mutation_id = client_mutation_id_from_body(body)
+    recorded_item = recorded_mutation_item(state_payload, mutation_id, operation="hard-delete", target_id=item_id)
+    if recorded_item is not None:
+        return WorkspaceItemResponse(ok=True, workspace_id=workspace_id, item=recorded_item)
     try:
-        before_doc = dict(find_doc(state_payload, item_id) or {})
+        before_doc = dict(require_expected_revision(state_payload, item_id, body.expected_revision))
         doc = hard_delete_doc(state_payload, item_id)
     except KeyError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="item not found") from exc
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    item = item_view(doc)
+    record_mutation_item(state_payload, mutation_id, operation="hard-delete", target_id=item_id, item=item)
     get_collab_relay_hub().delete_snapshot(workspace_id, item_id)
     save_state(gateway, record, state_payload, body.password, actor_user_id=au)
-    return WorkspaceItemResponse(ok=True, workspace_id=workspace_id, item=item_view(doc))
+    return WorkspaceItemResponse(ok=True, workspace_id=workspace_id, item=item)
 
 
 @app.post("/v1/workspaces/{workspace_id}/search", response_model=WorkspaceSearchResponse)
@@ -1154,12 +1303,18 @@ def patch_workspace_item(
     au, sg, sd = actor_from_body(body, request, workspace_id, item_id)
     record = require_workspace(gateway, workspace_id)
     state_payload = load_decrypted_state(record, body.password)
+    mutation_id = client_mutation_id_from_body(body)
+    recorded_entry = recorded_mutation_entry(state_payload, mutation_id, operation="patch", target_id=item_id)
+    if recorded_entry is not None:
+        return WorkspacePatchResponse(
+            ok=True,
+            workspace_id=workspace_id,
+            item=recorded_entry["item"],
+            changed=bool(recorded_entry.get("changed", False)),
+            preview_markdown=str(recorded_entry.get("previewMarkdown", "")),
+        )
     try:
-        cur = find_doc(state_payload, item_id)
-        if cur is None:
-            raise KeyError(item_id)
-        if body.expected_revision is not None and int(cur.get("revision", 0)) != body.expected_revision:
-            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="revision conflict")
+        require_expected_revision(state_payload, item_id, body.expected_revision)
         doc, changed, preview = patch_doc(
             state_payload,
             item_id,
@@ -1174,12 +1329,21 @@ def patch_workspace_item(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="item not found") from exc
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    item = item_view(doc)
     if not body.dry_run and changed:
+        record_patch_mutation(
+            state_payload,
+            mutation_id,
+            target_id=item_id,
+            item=item,
+            changed=changed,
+            preview_markdown=preview,
+        )
         save_state(gateway, record, state_payload, body.password, actor_user_id=au)
     return WorkspacePatchResponse(
         ok=True,
         workspace_id=workspace_id,
-        item=item_view(doc),
+        item=item,
         changed=changed,
         preview_markdown=preview,
     )

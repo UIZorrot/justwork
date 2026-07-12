@@ -129,6 +129,11 @@ export async function computeWriteBodyHash(body: Record<string, unknown>): Promi
   for (const k of WRITE_SIGNING_FIELD_NAMES) {
     delete stripped[k];
   }
+  for (const [key, value] of Object.entries(stripped)) {
+    if (value === null || value === undefined) {
+      delete stripped[key];
+    }
+  }
   return sha256HexOfUtf8(canonicalJson(stripped));
 }
 

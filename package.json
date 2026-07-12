@@ -1,7 +1,7 @@
 {
   "name": "justwork-doc-shell",
   "private": true,
-  "version": "0.0.1",
+  "version": "0.0.3",
   "type": "module",
   "workspaces": [
     "packages/*"
@@ -10,7 +10,7 @@
     "dev": "node node_modules/vite/bin/vite.js build --watch",
     "backend": "uv run --directory backend --env-file .env -m uvicorn app.main:app --host 127.0.0.1 --port 1446",
     "dev:backend": "uv run --directory backend --env-file .env -m uvicorn app.main:app --host 127.0.0.1 --port 1446 --reload",
-    "build": "node node_modules/vite/bin/vite.js build",
+    "build": "node node_modules/vite/bin/vite.js build && node scripts/sanitize-chrome-store-dist.mjs",
     "build:packages": "yarn workspace @justwork/agent-protocol build && yarn workspace @justwork/security build && yarn workspace @justwork/workspace-runtime build && yarn workspace @justwork/bridge build && yarn workspace @justwork/cli build",
     "typecheck": "tsc --noEmit && yarn workspace @justwork/agent-protocol typecheck && yarn workspace @justwork/security typecheck && yarn workspace @justwork/workspace-runtime typecheck && yarn workspace @justwork/bridge typecheck && yarn workspace @justwork/cli typecheck",
     "test": "yarn build:packages && node scripts/run-node-tests.mjs",

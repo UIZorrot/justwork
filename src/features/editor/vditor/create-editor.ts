@@ -52,6 +52,19 @@ function vditorCdnBase(): string {
   return getRuntimeUrl("vendor/vditor");
 }
 
+function vditorAssetPaths(): {
+  cdn: string;
+  emojiPath: string;
+  contentThemePath: string;
+} {
+  const cdn = vditorCdnBase();
+  return {
+    cdn,
+    emojiPath: `${cdn}/dist/images/emoji`,
+    contentThemePath: `${cdn}/dist/css/content-theme`,
+  };
+}
+
 function getBundledVditorI18n(): ITips | undefined {
   if (typeof window === "undefined") return undefined;
   return window.VditorI18n;
@@ -241,6 +254,7 @@ export function createWysiwygEditor(options: CreateEditorOptions): DocEditor {
   const startingMarkdown = options.collaboratorBinding?.collaborator.getMarkdown() ?? initialMarkdown;
 
   ensureBundledVditorIcons();
+  const vditorAssets = vditorAssetPaths();
   container.addEventListener("compositionstart", compositionGate.onCompositionStart, true);
   container.addEventListener("compositionend", flushComposedMarkdown, true);
   container.addEventListener("compositioncancel", cancelComposedMarkdown, true);
@@ -248,13 +262,24 @@ export function createWysiwygEditor(options: CreateEditorOptions): DocEditor {
   container.addEventListener("mouseup", notifyMentionQueryChange, true);
   container.addEventListener("blur", clearMentionQuery, true);
   vditor = new Vditor(container, {
-    cdn: vditorCdnBase(),
+    cdn: vditorAssets.cdn,
     lang: "zh_CN",
     i18n: getBundledVditorI18n(),
     icon: "ant",
     theme: "classic",
     mode: "wysiwyg",
+    hint: {
+      emojiPath: vditorAssets.emojiPath,
+    },
     preview: {
+      theme: {
+        current: "light",
+        path: vditorAssets.contentThemePath,
+      },
+      markdown: {
+        codeBlockPreview: false,
+        mathBlockPreview: false,
+      },
       math: {
         engine: "KaTeX",
       },

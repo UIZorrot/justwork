@@ -5,6 +5,7 @@ from pydantic import BaseModel, Field
 
 class WriteSigningEnvelope(BaseModel):
     actor_user_id: str | None = None
+    client_mutation_id: str | None = None
     public_key: dict[str, Any] | None = None
     signature: str | None = None
     nonce: str | None = None
@@ -74,6 +75,7 @@ class WorkspaceCreateResponse(BaseModel):
 
 class WorkspacePasswordRequest(WriteSigningEnvelope):
     password: str = Field(min_length=1)
+    expected_revision: int | None = None
 
 
 class WorkspaceRelayJoinRequest(BaseModel):
@@ -158,6 +160,7 @@ class WorkspaceItemCreateRequest(WriteSigningEnvelope):
 class WorkspaceItemPinRequest(WriteSigningEnvelope):
     password: str = Field(min_length=1)
     pinned: bool
+    expected_revision: int | None = None
 
 
 class WorkspaceSettingsUpdateRequest(WriteSigningEnvelope):
@@ -233,6 +236,7 @@ class WorkspaceCollabJoinResponse(BaseModel):
 class WorkspaceItemMoveRequest(WriteSigningEnvelope):
     password: str = Field(min_length=1)
     parent_id: str | None = None
+    expected_revision: int | None = None
 
 
 class WorkspaceSearchRequest(WriteSigningEnvelope):

@@ -132,7 +132,13 @@ export function createBackendWorkspaceSession(opts: BackendWorkspaceSessionOptio
 
     async saveItem(
       itemId: string,
-      patch: { title?: string; markdown?: string; content?: WorkspaceDocContent | null; expectedRevision?: number },
+      patch: {
+        title?: string;
+        markdown?: string;
+        content?: WorkspaceDocContent | null;
+        expectedRevision?: number;
+        mutationId?: string;
+      },
     ) {
       const r = await client.updateItem(opts.workspaceId, itemId, {
         password: opts.password,
@@ -140,6 +146,7 @@ export function createBackendWorkspaceSession(opts: BackendWorkspaceSessionOptio
         markdown: patch.markdown ?? null,
         content: patch.content ?? null,
         expected_revision: patch.expectedRevision ?? null,
+        client_mutation_id: patch.mutationId ?? null,
       });
       return apiItemToDoc(r.item);
     },
@@ -149,6 +156,7 @@ export function createBackendWorkspaceSession(opts: BackendWorkspaceSessionOptio
       title: string,
       parentId: string | null = ROOT_FOLDER_ID,
       clientItemId?: string | null,
+      clientMutationId?: string | null,
     ) {
       const r = await client.createItem(opts.workspaceId, {
         password: opts.password,
@@ -156,38 +164,55 @@ export function createBackendWorkspaceSession(opts: BackendWorkspaceSessionOptio
         title,
         parent_id: parentId,
         client_item_id: clientItemId ?? undefined,
+        client_mutation_id: clientMutationId ?? null,
       });
       return apiItemToDoc(r.item);
     },
 
-    async setPinned(itemId: string, pinned: boolean) {
+    async setPinned(itemId: string, pinned: boolean, expectedRevision?: number, clientMutationId?: string | null) {
       const r = await client.pinItem(opts.workspaceId, itemId, {
         password: opts.password,
         pinned,
+        expected_revision: expectedRevision ?? null,
+        client_mutation_id: clientMutationId ?? null,
       });
       return apiItemToDoc(r.item);
     },
 
-    async moveItem(itemId: string, parentId: string | null) {
+    async moveItem(itemId: string, parentId: string | null, expectedRevision?: number, clientMutationId?: string | null) {
       const r = await client.moveItem(opts.workspaceId, itemId, {
         password: opts.password,
         parent_id: parentId,
+        expected_revision: expectedRevision ?? null,
+        client_mutation_id: clientMutationId ?? null,
       });
       return apiItemToDoc(r.item);
     },
 
-    async trashItem(itemId: string) {
-      const r = await client.trashItem(opts.workspaceId, itemId, pwd());
+    async trashItem(itemId: string, expectedRevision?: number, clientMutationId?: string | null) {
+      const r = await client.trashItem(opts.workspaceId, itemId, {
+        password: opts.password,
+        expected_revision: expectedRevision ?? null,
+        client_mutation_id: clientMutationId ?? null,
+      });
       return apiItemToDoc(r.item);
     },
 
-    async restoreItem(itemId: string) {
-      const r = await client.restoreItem(opts.workspaceId, itemId, pwd());
+    async restoreItem(itemId: string, expectedRevision?: number, clientMutationId?: string | null) {
+      const r = await client.restoreItem(opts.workspaceId, itemId, {
+        password: opts.password,
+        expected_revision: expectedRevision ?? null,
+        client_mutation_id: clientMutationId ?? null,
+      });
       return apiItemToDoc(r.item);
     },
 
-    async hardDeleteItem(itemId: string) {
-      const r = await client.hardDeleteItem(opts.workspaceId, itemId, pwd());
+    async hardDeleteItem(itemId: string, expectedRevision?: number, clientMutationId?: string | null) {
+      const r = await client.hardDeleteItem(opts.workspaceId, itemId, {
+        password: opts.password,
+        expected_revision: expectedRevision ?? null,
+        client_mutation_id: clientMutationId ?? null,
+      });
       return apiItemToDoc(r.item);
     },
 

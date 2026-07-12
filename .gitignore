@@ -22,6 +22,7 @@ scripts
 # --- Local data / dev databases (may contain workspace ciphertext & metadata) ---
 .justwork-data/
 .justwork-backend/
+output
 
 # --- Python ---
 backend/tests/

@@ -1,0 +1,73 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { loadTranspiledModule } from "./test-module-loader.mjs";
+
+function createStorage() {
+  const data = new Map();
+  return {
+    async get(key) {
+      const keys = Array.isArray(key) ? key : [key];
+      const result = {};
+      for (const item of keys) {
+        if (data.has(item)) {
+          result[item] = data.get(item);
+        }
+      }
+      return result;
+    },
+    async set(items) {
+      for (const [key, value] of Object.entries(items)) {
+        data.set(key, value);
+      }
+    },
+  };
+}
+
+test("local history skips no-op snapshots", async () => {
+  const mod = await loadTranspiledModule("src/features/workspace/local-history.ts");
+  const snapshot = { title: "Doc", markdown: "hello" };
+  assert.equal(mod.shouldRecordLocalHistoryEvent(snapshot, snapshot), false);
+  assert.equal(
+    mod.shouldRecordLocalHistoryEvent(snapshot, { ...snapshot, markdown: "hello world" }),
+    true,
+  );
+});
+
+test("local history builds revert patch from before snapshot", async () => {
+  const mod = await loadTranspiledModule("src/features/workspace/local-history.ts");
+  const event = {
+    id: "hist_1",
+    workspaceId: "ws_1",
+    op: "workspace.item.set",
+    itemId: "doc_1",
+    timestamp: "2026-05-11T00:00:00.000Z",
+    title: "Doc",
+    before: { title: "Old", markdown: "before" },
+    after: { title: "Doc", markdown: "after" },
+  };
+  assert.equal(mod.isRevertableLocalHistoryEvent(event), true);
+  assert.deepEqual(mod.buildLocalHistoryRevertPatch(event), {
+    title: "Old",
+    markdown: "before",
+  });
+});
+
+test("local history trims to max events per workspace", async () => {
+  const mod = await loadTranspiledModule("src/features/workspace/local-history.ts");
+  const storage = createStorage();
+  const workspaceId = "ws_trim";
+  for (let i = 0; i < mod.LOCAL_HISTORY_MAX_EVENTS + 5; i += 1) {
+    await mod.appendLocalHistoryEvent(storage, {
+      workspaceId,
+      op: "workspace.item.set",
+      itemId: "doc_1",
+      title: "Doc",
+      before: { markdown: `before-${i}` },
+      after: { markdown: `after-${i}` },
+      createdAt: new Date(Date.UTC(2026, 4, 11, 0, 0, i)).toISOString(),
+    });
+  }
+  const events = await mod.listLocalHistoryEvents(storage, workspaceId);
+  assert.equal(events.length, mod.LOCAL_HISTORY_MAX_EVENTS);
+  assert.equal(events[0].after.markdown, `after-${mod.LOCAL_HISTORY_MAX_EVENTS + 4}`);
+});

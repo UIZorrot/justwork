@@ -32,3 +32,13 @@ test("shared i18n contract exists for locale detection, persistence, and page wi
   assert.match(workbenchHtml, /language-switcher-menu/);
   assert.match(sidepanel, /createTranslator/);
 });
+
+test("Chinese workbench labels use current product wording", async () => {
+  const i18n = await readFile(i18nPath, "utf8");
+
+  assert.match(i18n, /"drawer\.profile\.title": "项目设置"/);
+  assert.match(i18n, /"status\.locked": "退出当前项目"/);
+  assert.match(i18n, /"sidebar\.newTable": "新建表格"/);
+  assert.match(i18n, /"sidebar\.newBoard": "新建看板"/);
+  assert.match(i18n, /"drawer\.message\.markAllRead": "全部标为已读"/);
+});

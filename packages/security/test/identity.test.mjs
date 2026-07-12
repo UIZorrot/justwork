@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  computeWriteBodyHash,
   generateIdentity,
   signPayload,
   verifyPayloadSignature,
@@ -38,4 +39,23 @@ test("verifies signatures and rejects tampered payloads", async () => {
     ),
     false,
   );
+});
+
+test("write body hash ignores null optional fields", async () => {
+  const withNulls = await computeWriteBodyHash({
+    password: "pw",
+    title: "Local",
+    markdown: null,
+    content: null,
+    expected_revision: 0,
+    client_mutation_id: "m1",
+  });
+  const withoutNulls = await computeWriteBodyHash({
+    password: "pw",
+    title: "Local",
+    expected_revision: 0,
+    client_mutation_id: "m1",
+  });
+
+  assert.equal(withNulls, withoutNulls);
 });

@@ -28,6 +28,7 @@ test("enqueueOfflineDeleteMutation keeps one destructive action per item and let
     workspaceId: "ws-1",
     itemId: "doc-1",
     kind: "trash",
+    expectedRevision: 7,
     createdAt: "2026-05-13T00:00:00.000Z",
   });
   await mod.enqueueOfflineDeleteMutation(storage, {
@@ -42,6 +43,49 @@ test("enqueueOfflineDeleteMutation keeps one destructive action per item and let
   assert.equal(queued.length, 1);
   assert.equal(queued[0].id, "m2");
   assert.equal(queued[0].kind, "hard-delete");
+});
+
+test("offline delete queue preserves the expected revision for backend conflict guards", async () => {
+  const mod = await loadTranspiledModule("src/features/workspace/offline-delete-queue.ts");
+  const storage = createMemoryStorage();
+
+  await mod.enqueueOfflineDeleteMutation(storage, {
+    id: "m1",
+    workspaceId: "ws-1",
+    itemId: "doc-1",
+    kind: "trash",
+    expectedRevision: 9,
+    createdAt: "2026-05-13T00:00:00.000Z",
+  });
+
+  const queued = await mod.loadOfflineDeleteMutations(storage);
+  assert.equal(queued[0].expectedRevision, 9);
+});
+
+test("offline delete queue mirrors destructive actions into the unified workspace mutation log", async () => {
+  const mod = await loadTranspiledModule("src/features/workspace/offline-delete-queue.ts");
+  const log = await loadTranspiledModule("src/features/workspace/mutation-log.ts");
+  const storage = createMemoryStorage();
+
+  await mod.enqueueOfflineDeleteMutation(storage, {
+    id: "m1",
+    workspaceId: "ws-1",
+    itemId: "doc-1",
+    kind: "trash",
+    createdAt: "2026-05-13T00:00:00.000Z",
+  });
+  await mod.enqueueOfflineDeleteMutation(storage, {
+    id: "m2",
+    workspaceId: "ws-1",
+    itemId: "doc-1",
+    kind: "hard-delete",
+    createdAt: "2026-05-13T00:01:00.000Z",
+  });
+
+  const mutations = await log.loadWorkspaceMutationLog(storage, "ws-1");
+  assert.equal(mutations.length, 1);
+  assert.equal(mutations[0].id, "m2");
+  assert.equal(mutations[0].kind, "hard-delete");
 });
 
 test("removeOfflineDeleteMutation removes only the targeted action", async () => {
@@ -67,6 +111,23 @@ test("removeOfflineDeleteMutation removes only the targeted action", async () =>
   const queued = await mod.loadOfflineDeleteMutations(storage);
   assert.equal(queued.length, 1);
   assert.equal(queued[0].id, "m2");
+});
+
+test("offline delete queue removal keeps the unified workspace mutation log in sync", async () => {
+  const mod = await loadTranspiledModule("src/features/workspace/offline-delete-queue.ts");
+  const log = await loadTranspiledModule("src/features/workspace/mutation-log.ts");
+  const storage = createMemoryStorage();
+
+  await mod.enqueueOfflineDeleteMutation(storage, {
+    id: "m1",
+    workspaceId: "ws-1",
+    itemId: "doc-1",
+    kind: "trash",
+    createdAt: "2026-05-13T00:00:00.000Z",
+  });
+
+  await mod.removeOfflineDeleteMutation(storage, "m1");
+  assert.deepEqual(await log.loadWorkspaceMutationLog(storage, "ws-1"), []);
 });
 
 test("applyOfflineDeleteMutationsToDocs overlays queued trash and hard delete onto the local tree", async () => {

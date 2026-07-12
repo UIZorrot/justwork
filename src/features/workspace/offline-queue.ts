@@ -1,4 +1,11 @@
-import { STORAGE_KEYS, type WorkspaceDocContent } from "@/shared/storage-keys";
+import { STORAGE_KEYS, type WorkspaceDocContent } from "../../shared/storage-keys";
+import {
+  clearStoredWorkspaceMutationsForWorkspace,
+  enqueueStoredWorkspaceMutation,
+  loadWorkspaceMutationLog,
+  removeStoredWorkspaceMutation,
+  type WorkspaceMutation,
+} from "./mutation-log";
 
 export type OfflineMutationPatch = {
   title?: string;
@@ -47,6 +54,33 @@ async function saveOfflineMutations(storage: OfflineQueueStorage, mutations: Off
   await storage.set({ [STORAGE_KEYS.OFFLINE_MUTATION_QUEUE]: mutations });
 }
 
+function nextClientSeq(mutations: WorkspaceMutation[]): number {
+  return mutations.reduce((max, mutation) => Math.max(max, mutation.clientSeq), 0) + 1;
+}
+
+async function mirrorOfflineMutationToWorkspaceLog(
+  storage: OfflineQueueStorage,
+  current: OfflineMutation[],
+  mutation: OfflineMutation,
+): Promise<void> {
+  const existing = current.find((entry) => entry.workspaceId === mutation.workspaceId && entry.itemId === mutation.itemId);
+  if (existing) {
+    await removeStoredWorkspaceMutation(storage, existing.id);
+  }
+  const mutations = await loadWorkspaceMutationLog(storage);
+  await enqueueStoredWorkspaceMutation(storage, {
+    id: mutation.id,
+    workspaceId: mutation.workspaceId,
+    itemId: mutation.itemId,
+    kind: "edit",
+    status: "pending",
+    patch: mutation.patch,
+    baseRevision: mutation.expectedRevision,
+    clientSeq: nextClientSeq(mutations),
+    createdAt: mutation.createdAt,
+  });
+}
+
 export function mergeOfflineMutation(current: OfflineMutation[], next: OfflineMutation): OfflineMutation[] {
   const existingIndex = current.findIndex(
     (entry) => entry.workspaceId === next.workspaceId && entry.itemId === next.itemId,
@@ -73,6 +107,7 @@ export async function enqueueOfflineMutation(
   const current = await loadOfflineMutations(storage);
   const next = mergeOfflineMutation(current, mutation);
   await saveOfflineMutations(storage, next);
+  await mirrorOfflineMutationToWorkspaceLog(storage, current, mutation);
   return next;
 }
 
@@ -83,6 +118,7 @@ export async function removeOfflineMutation(
   const current = await loadOfflineMutations(storage);
   const next = current.filter((entry) => entry.id !== mutationId);
   await saveOfflineMutations(storage, next);
+  await removeStoredWorkspaceMutation(storage, mutationId);
   return next;
 }
 
@@ -93,5 +129,6 @@ export async function clearOfflineMutationsForWorkspace(
   const current = await loadOfflineMutations(storage);
   const next = current.filter((entry) => entry.workspaceId !== workspaceId);
   await saveOfflineMutations(storage, next);
+  await clearStoredWorkspaceMutationsForWorkspace(storage, workspaceId);
   return next;
 }

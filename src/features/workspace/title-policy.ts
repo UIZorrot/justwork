@@ -7,5 +7,11 @@ export function displayTitleOrFallback(value: string | undefined, fallback: stri
 }
 
 export function normalizeDocTitleInput(value: string, fallback: string): string {
-  return hasVisibleTitle(value) ? value : fallback;
+  void fallback;
+  return value;
+}
+
+export function titleInputValue(value: string | undefined, fallback: string, isEditing: boolean): string {
+  if (isEditing) return value ?? "";
+  return displayTitleOrFallback(value, fallback);
 }

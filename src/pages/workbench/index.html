@@ -20,6 +20,17 @@
         <span id="backend-health-status" class="backend-health-status" aria-live="polite" data-i18n="status.connecting">Connecting</span>
         <span id="save-status" class="save-status" data-i18n="status.saved">Saved</span>
         <button
+          id="history-drawer-open-btn"
+          class="ghost-btn"
+          type="button"
+          hidden
+          aria-expanded="false"
+          aria-controls="history-drawer"
+          data-i18n="drawer.history.title"
+        >
+          History
+        </button>
+        <button
           id="workspace-info-drawer-open-btn"
           class="ghost-btn"
           type="button"
@@ -345,13 +356,6 @@
             <p id="workspace-message-drawer-count" class="workspace-message-drawer-count">0 unread</p>
           </div>
           <button
-            id="workspace-message-mark-read-btn"
-            type="button"
-            class="ghost-btn"
-          >
-            Mark all read
-          </button>
-          <button
             id="workspace-message-drawer-close-btn"
             type="button"
             class="workspace-info-drawer-close"
@@ -368,8 +372,45 @@
           </section>
           <section class="workspace-message-section workspace-message-section--log">
             <h3 class="workspace-info-heading" data-i18n="drawer.message.logHeading">Mentions</h3>
+            <button
+              id="workspace-message-mark-read-btn"
+              type="button"
+              class="ghost-btn workspace-message-mark-read-btn"
+              data-i18n="drawer.message.markAllRead"
+            >
+              Mark all read
+            </button>
             <div id="workspace-message-log" class="workspace-message-log" aria-live="polite"></div>
           </section>
+        </div>
+      </aside>
+    </div>
+
+    <div id="history-drawer-root" class="history-drawer-root" aria-hidden="true">
+      <div id="history-drawer-backdrop" class="history-drawer-backdrop" tabindex="-1"></div>
+      <aside
+        id="history-drawer"
+        class="history-drawer"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="history-drawer-title"
+      >
+        <div class="history-drawer-header">
+          <div>
+            <h2 id="history-drawer-title" class="history-drawer-title" data-i18n="drawer.history.title">Activity history</h2>
+            <p class="history-drawer-hint" data-i18n="drawer.history.localHint">
+              Stored on this device only. Not synced to the server.
+            </p>
+          </div>
+          <div class="history-drawer-actions">
+            <button id="history-refresh-btn" type="button" class="ghost-btn" data-i18n="drawer.history.refresh">Refresh</button>
+            <button id="history-drawer-close-btn" type="button" class="history-drawer-close" aria-label="Close" data-i18n-aria-label="common.close">
+              ×
+            </button>
+          </div>
+        </div>
+        <div class="history-drawer-body">
+          <ul id="history-list" class="history-list" aria-label="Activity history" data-i18n-aria-label="drawer.history.ariaLabel" data-testid="history-list"></ul>
         </div>
       </aside>
     </div>

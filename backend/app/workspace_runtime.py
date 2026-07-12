@@ -243,7 +243,7 @@ def default_workspace_title(workspace_id: str) -> str:
 
 
 def normalize_workspace_title_text(title: str) -> str:
-    return re.sub(r"\s+", "_", title.strip())
+    return re.sub(r"\s+", " ", title.strip())
 
 
 def normalize_workspace_title(title: str, workspace_id: str | None = None) -> str:

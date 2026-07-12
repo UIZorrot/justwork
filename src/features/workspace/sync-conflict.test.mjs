@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import path from "node:path";
 import test from "node:test";
 import { loadTranspiledModule } from "./test-module-loader.mjs";
 
@@ -26,4 +28,10 @@ test("sync conflict retry rebases the local patch onto the latest remote revisio
     mod.buildLocalFirstConflictRetryPatch({ title: "Local title", markdown: "Local body" }, 8),
     { title: "Local title", markdown: "Local body", expectedRevision: 8 },
   );
+});
+
+test("sync conflict retry delegates conflict decisions to the workspace mutation log", async () => {
+  const source = await readFile(path.resolve("src/features/workspace/sync-conflict.ts"), "utf8");
+
+  assert.match(source, /resolveWorkspaceMutationConflict/);
 });

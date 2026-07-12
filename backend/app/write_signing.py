@@ -62,7 +62,7 @@ def derive_user_id(public_key_jwk: dict[str, Any]) -> str:
 
 
 def body_hash_from_model(model: BaseModel) -> str:
-    data = model.model_dump(exclude_none=False, mode="json")
+    data = model.model_dump(exclude_none=True, mode="json")
     for k in SIGNING_FIELD_NAMES:
         data.pop(k, None)
     return hashlib.sha256(canonical_json(data).encode("utf-8")).hexdigest()
@@ -191,4 +191,3 @@ def verify_signed_write_body(
 
     sig_digest = hashlib.sha256(str(signature).encode("ascii")).hexdigest()
     return actor_user_id, True, sig_digest
-

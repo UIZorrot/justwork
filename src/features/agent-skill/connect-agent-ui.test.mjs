@@ -41,8 +41,18 @@ test("Connect Agent prompt only includes the real password when the user remembe
   assert.match(workbench, /Workspace password: \$\{passwordValue\}/);
   assert.match(workbench, /Replace the placeholder before sending this setup text/);
   assert.match(workbench, /new URL\("\/agent\/SKILL\.md", JUSTWORK_BACKEND_URL\)/);
-  assert.match(workbench, /chrome\.runtime\.getURL\("agent\/SKILL\.md"\)/);
+  assert.match(workbench, /getRuntimeUrl\("agent\/SKILL\.md"\)/);
   assert.match(workbench, /connectAgentCopyBtn\.addEventListener\("click",/);
+});
+
+test("Connect Agent prompt includes inline read-only API fallback when URL discovery fails", async () => {
+  const workbench = await readFile(workbenchTsPath, "utf8");
+
+  assert.match(workbench, /Inline read-only fallback/);
+  assert.match(workbench, /If the Skill URL or OpenAPI URL cannot be fetched/);
+  assert.match(workbench, /POST \$\{backendUrl\}\/v1\/workspaces\/\$\{workspaceId\}\/tree/);
+  assert.match(workbench, /POST \$\{backendUrl\}\/v1\/workspaces\/\$\{workspaceId\}\/items\/\{item_id\}/);
+  assert.match(workbench, /Do not ask the user to paste SKILL\.md or openapi\.json before trying this read-only request/);
 });
 
 test("remembered workspace passwords are stored locally and wired into unlock", async () => {
@@ -56,4 +66,12 @@ test("remembered workspace passwords are stored locally and wired into unlock", 
   assert.match(workbench, /unlockRememberPasswordInput\.checked/);
   assert.match(workbench, /mountWithPassword\(wsId, password, undefined, undefined, unlockRememberPasswordInput\.checked\)/);
   assert.match(workbench, /buildConnectAgentPrompt\(workspaceId, password, rememberWorkspacePassword\)/);
+});
+
+test("backend Skill URL link is warmed before opening to avoid first-click connection errors", async () => {
+  const workbench = await readFile(workbenchTsPath, "utf8");
+
+  assert.match(workbench, /warmBackendLink/);
+  assert.match(workbench, /connectAgentBackendSkillLink\.addEventListener\("click"/);
+  assert.match(workbench, /event\.preventDefault\(\)/);
 });

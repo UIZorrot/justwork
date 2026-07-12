@@ -6,7 +6,6 @@
  */
 export function getWysiwygToolbar(): Array<string | { name: string }> {
   return [
-    "emoji",
     "headings",
     "bold",
     "italic",
@@ -30,12 +29,7 @@ export function getWysiwygToolbar(): Array<string | { name: string }> {
     "upload",
     "link",
     "table",
-    "record",
     "|",
     "fullscreen",
-    "outline",
-    "code-theme",
-    "content-theme",
-    "export",
   ];
 }

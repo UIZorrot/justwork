@@ -16,6 +16,7 @@ export const STORAGE_KEYS = {
   BACKEND_WORKSPACE_INBOX_COOLDOWN: "justwork.backend.workspaceInboxCooldown.v1",
   OFFLINE_MUTATION_QUEUE: "justwork.offline.queue.v1",
   OFFLINE_DELETE_MUTATION_QUEUE: "justwork.offline.delete-queue.v1",
+  WORKSPACE_MUTATION_LOG: "justwork.workspace.mutationLog.v1",
   BACKEND_DOC_DRAFTS: "justwork.backend.docDrafts.v1",
   COLLABORATIVE_MARKDOWN_SNAPSHOT_PREFIX: "justwork:collaboration:snapshot:",
 } as const;
