@@ -1,9 +1,0 @@
-{
-  "url": "http://127.0.0.1:4183/src/pages/workbench/index.html?backendUrl=http://127.0.0.1:1456",
-  "initialGate": "JustWork Backend\n创建加密工作区\n\n输入一个工作区密码。内容会加密后同步到 JustWork Backend，密码不会写入数据库。\n\n创建并解锁\n最近使用的工作区\n\n暂无记录，创建或解锁成功后会出现在这里。",
-  "afterSetupGate": "JustWork Backend\n创建加密工作区\n\n输入一个工作区密码。内容会加密后同步到 JustWork Backend，密码不会写入数据库。\n\n创建并解锁\n最近使用的工作区\n\n暂无记录，创建或解锁成功后会出现在这里。",
-  "mainHidden": "",
-  "errorText": "",
-  "backendHealth": "在线",
-  "logs": []
-}

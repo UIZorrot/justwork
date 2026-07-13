@@ -1,7 +1,7 @@
 {
   "name": "justwork-doc-shell",
   "private": true,
-  "version": "0.0.3",
+  "version": "0.0.4",
   "type": "module",
   "workspaces": [
     "packages/*"
@@ -20,7 +20,8 @@
     "test:e2e:extension": "yarn build && node scripts/workbench-e2e.mjs",
     "test:backend": "python -m unittest backend.tests.test_backend_agent_api backend.tests.test_write_signing",
     "test:cli": "yarn build:packages && powershell -NoProfile -ExecutionPolicy Bypass -File scripts/cli-workspace-e2e.ps1",
-    "justwork": "node packages/cli/dist/index.js"
+    "justwork": "node packages/cli/dist/index.js",
+    "package:chrome-store": "powershell -NoProfile -ExecutionPolicy Bypass -File .publish/package-extension.ps1"
   },
   "dependencies": {
     "@justwork/security": "0.0.1",
