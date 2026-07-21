@@ -15,7 +15,7 @@ test("workbench keeps pending online deletes applied across remote tree refreshe
     "const recordLocalEditOperation = (itemId: string, baseRevision: number, patch: OfflineMutationPatch): string => {",
     "recordLocalEditOperation(itemId, baseRevision, patch);",
     "removeLocalEditOperations(request.itemId);",
-    "overlayDirtyDocsWithoutJournalEdits();",
+    "overlayDirtyDocs();",
     "const replayedActiveId = workspace.activeDocId;",
     "recordLocalCreateOperation(optimistic);",
     "updateLocalCreateOperationDoc(nextDoc);",

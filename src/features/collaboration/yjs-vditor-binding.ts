@@ -4,6 +4,7 @@ export type MarkdownEditorSurface = {
   getMarkdown: () => string;
   setMarkdown: (markdown: string, clearHistory?: boolean) => void;
   onMarkdownInput: (listener: (markdown: string) => void) => () => void;
+  isComposing?: () => boolean;
 };
 
 export type VditorMarkdownBinding = {
@@ -26,6 +27,7 @@ export function createVditorMarkdownBinding(
   };
 
   const syncEditorFromCollaborator = (): void => {
+    if (editor.isComposing?.()) return;
     const markdown = collaborator.getMarkdown();
     if (editor.getMarkdown() === markdown) return;
     suppress = true;

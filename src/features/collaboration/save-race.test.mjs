@@ -103,3 +103,33 @@ test("structured collaborative saves are rejected when live content moved on", a
   const stale = mod.hasStaleCollaborativeSave(liveDoc, request);
   assert.equal(stale, true);
 });
+
+test("separate debounced save batches receive separate idempotency keys", async () => {
+  const mod = await importTsModule("src/features/collaboration/save-race.ts");
+  let sequence = 0;
+  const createMutationId = () => `mutation-${++sequence}`;
+
+  const firstBatch = mod.resolveSaveMutationId(undefined, createMutationId);
+  const mergedIntoFirstBatch = mod.resolveSaveMutationId(firstBatch, createMutationId);
+  const secondBatch = mod.resolveSaveMutationId(undefined, createMutationId);
+
+  assert.equal(mergedIntoFirstBatch, firstBatch);
+  assert.notEqual(secondBatch, firstBatch);
+});
+
+test("an old idempotent response cannot confirm newer editor text", async () => {
+  const mod = await importTsModule("src/features/collaboration/save-race.ts");
+  const request = {
+    nextTitle: "Page",
+    nextMarkdown: "newer typing",
+  };
+
+  assert.equal(mod.hasUnexpectedCollaborativeSaveResult({
+    title: "Page",
+    markdown: "older save",
+  }, request), true);
+  assert.equal(mod.hasUnexpectedCollaborativeSaveResult({
+    title: "Page",
+    markdown: "newer typing",
+  }, request), false);
+});

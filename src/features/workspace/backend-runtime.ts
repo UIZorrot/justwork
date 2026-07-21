@@ -95,6 +95,10 @@ export function createBackendWorkspaceSession(opts: BackendWorkspaceSessionOptio
       return client.joinCollaborativeMarkdown(opts.workspaceId, itemId, { password: opts.password });
     },
 
+    async loadCollaborativeMarkdownState(itemId: string) {
+      return client.getCollaborativeMarkdownState(opts.workspaceId, itemId, { password: opts.password });
+    },
+
     async loadTree() {
       const r = await client.getTree(opts.workspaceId, pwd());
       return {

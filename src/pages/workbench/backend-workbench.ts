@@ -119,7 +119,12 @@ import { planPageEditPersistence } from "@/features/collaboration/page-edit-pers
 import { isTransportUsable, safeSendCollaborativeUpdate } from "@/features/collaboration/transport-resilience";
 import { createMarkdownCollaborator } from "@/features/collaboration/yjs-markdown";
 import { createStructuredCollaborator } from "@/features/collaboration/yjs-structured";
-import { hasStaleCollaborativeSave, reconcileCollaborativeSave } from "@/features/collaboration/save-race";
+import {
+  hasStaleCollaborativeSave,
+  hasUnexpectedCollaborativeSaveResult,
+  reconcileCollaborativeSave,
+  resolveSaveMutationId,
+} from "@/features/collaboration/save-race";
 import { JUSTWORK_BACKEND_URL } from "@/shared/backend-config";
 import {
   applyI18n,
@@ -1461,34 +1466,22 @@ export async function startBackendWorkbench(): Promise<void> {
     const removeLocalEditOperations = (itemId: string): void => {
       localOperationJournal = localOperationJournal.filter((entry) => !(entry.itemId === itemId && entry.kind === "edit"));
     };
-    const hasLocalEditOperation = (itemId: string): boolean => (
-      localOperationJournal.some((entry) => entry.itemId === itemId && entry.kind === "edit")
-    );
-    const dirtyDocIdsWithoutJournalEdits = (): Set<string> => (
-      new Set([...dirtyDocIds].filter((itemId) => !hasLocalEditOperation(itemId)))
-    );
-    const overlayDirtyDocsWithoutJournalEdits = (): void => {
+    const overlayDirtyDocs = (): void => {
       workspace = {
         ...workspace,
         docs: overlayDirtyCollaborativeDocs(
           workspace.docs,
-          dirtyDocIdsWithoutJournalEdits(),
+          dirtyDocIds,
           localCollaborativeDocCache,
         ),
       };
     };
     const replayLocalOperationJournal = (): void => {
-      const previousEditItemIds = new Set(
-        localOperationJournal.filter((entry) => entry.kind === "edit").map((entry) => entry.itemId),
-      );
       const replayed = applyWorkspaceOperationJournal(workspace, localOperationJournal);
       workspace = replayed.state;
       localOperationJournal = replayed.operations;
-      for (const itemId of previousEditItemIds) {
-        if (!hasLocalEditOperation(itemId)) {
-          dirtyDocIds.delete(itemId);
-        }
-      }
+      // A newer server revision may be the acknowledgement of this client's previous save.
+      // Only the matching save result may clear dirty state; refresh replay must keep newer typing.
     };
     const replayStoredWorkspaceMutationLog = async (): Promise<void> => {
       const mutations = await loadWorkspaceMutationLog(localStorageArea, workspaceId);
@@ -1619,10 +1612,12 @@ export async function startBackendWorkbench(): Promise<void> {
       const existing = collaborativeMarkdownDocs.get(doc.id);
       if (existing) return existing;
       const fallbackMarkdown = doc.markdown || "";
-      const collaborator = createMarkdownCollaborator({ initialMarkdown: fallbackMarkdown });
+      const collaborator = createMarkdownCollaborator();
       const snapshot = loadCollaborativeSnapshot(collaborativeMarkdownSnapshotKey(workspaceId, doc.id));
       if (snapshot) {
         collaborator.applyRemoteUpdate(snapshot);
+      } else if (fallbackMarkdown) {
+        collaborator.applyLocalMarkdown(fallbackMarkdown);
       }
       const normalizedMarkdown = stripAutoTitleHeading(collaborator.getMarkdown(), doc.title);
       if (normalizedMarkdown !== collaborator.getMarkdown()) {
@@ -1664,7 +1659,9 @@ export async function startBackendWorkbench(): Promise<void> {
     let activeCollaborativeItemId: string | null = null;
     let activeCollaborativeTransport: ReturnType<typeof createCollaborativeTransport> | undefined;
     let activeCollaborativeUnsubscribe: (() => void) | undefined;
+    let collaborativeTransportGeneration = 0;
     const stopActiveCollaborativeTransport = (): void => {
+      collaborativeTransportGeneration += 1;
       activeCollaborativeUnsubscribe?.();
       activeCollaborativeUnsubscribe = undefined;
       activeCollaborativeTransport?.close();
@@ -1682,7 +1679,19 @@ export async function startBackendWorkbench(): Promise<void> {
         isTransportUsable(activeCollaborativeTransport.readyState)
       ) return;
       stopActiveCollaborativeTransport();
-      const join = await session.joinCollaborativeMarkdown(doc.id);
+      const generation = collaborativeTransportGeneration;
+      const [join, remoteState] = await Promise.all([
+        session.joinCollaborativeMarkdown(doc.id),
+        doc.kind === "page" ? session.loadCollaborativeMarkdownState(doc.id) : Promise.resolve(new Uint8Array()),
+      ]);
+      if (generation !== collaborativeTransportGeneration || active.id !== doc.id) return;
+      if (doc.kind === "page" && remoteState.length > 0) {
+        const collaborator = getCollaboratorForDoc(doc);
+        collaborator.applyRemoteUpdate(remoteState, {
+          preserveLocalMarkdown: dirtyDocIds.has(doc.id),
+        });
+        saveCollaborativeSnapshot(collaborativeMarkdownSnapshotKey(workspaceId, doc.id), collaborator.encodeUpdate());
+      }
       const transport = createCollaborativeTransport(collaborativeTransportUrl(doc.id, join.ticket));
       activeCollaborativeItemId = doc.id;
       activeCollaborativeTransport = transport;
@@ -1703,18 +1712,27 @@ export async function startBackendWorkbench(): Promise<void> {
             requestTransportRejoin,
           );
         });
-          transport.onUpdate((update) => {
-            const previousMarkdown = collaborator.getMarkdown();
-            collaborator.applyRemoteUpdate(update);
-            saveCollaborativeSnapshot(collaborativeMarkdownSnapshotKey(workspaceId, doc.id), collaborator.encodeUpdate());
-            const nextMarkdown = collaborator.getMarkdown();
-            syncMentionInboxFromMarkdown({
-              previousMarkdown,
-              nextMarkdown,
-              docId: doc.id,
-              docTitle: displayDocTitle(doc),
-            });
+        transport.onUpdate((update) => {
+          const previousMarkdown = collaborator.getMarkdown();
+          const changed = collaborator.applyRemoteUpdate(update, {
+            preserveLocalMarkdown: dirtyDocIds.has(doc.id),
           });
+          saveCollaborativeSnapshot(collaborativeMarkdownSnapshotKey(workspaceId, doc.id), collaborator.encodeUpdate());
+          const nextMarkdown = collaborator.getMarkdown();
+          syncMentionInboxFromMarkdown({
+            previousMarkdown,
+            nextMarkdown,
+            docId: doc.id,
+            docTitle: displayDocTitle(doc),
+          });
+          if (changed) {
+            safeSendCollaborativeUpdate(
+              transport.readyState,
+              () => transport.sendUpdate(collaborator.encodeUpdate()),
+              requestTransportRejoin,
+            );
+          }
+        });
         safeSendCollaborativeUpdate(
           transport.readyState,
           () => {
@@ -1780,13 +1798,13 @@ export async function startBackendWorkbench(): Promise<void> {
         normalized.markdown !== doc.markdown ||
         normalized.title !== doc.title
       ) {
-        removeCollaborativeSnapshot(doc.id);
+        removeCollaborativeSnapshot(collaborativeMarkdownSnapshotKey(workspaceId, doc.id));
       }
       if (normalized.kind === "page" && normalized.title.trim()) {
         const stripped = stripAutoTitleHeading(normalized.markdown, normalized.title);
         if (stripped !== normalized.markdown) {
           normalized.markdown = stripped;
-          removeCollaborativeSnapshot(doc.id);
+          removeCollaborativeSnapshot(collaborativeMarkdownSnapshotKey(workspaceId, doc.id));
         }
       }
       return normalized;
@@ -2627,11 +2645,15 @@ export async function startBackendWorkbench(): Promise<void> {
             const draft = request.usesDraftQueue ? await getBackendDocDraft(workspaceId, request.itemId) : null;
             const hasNewerDraft = request.usesDraftQueue && draft !== null && draft.seq > request.seq;
             const liveDoc = localCollaborativeDocCache.get(request.itemId);
-            const isStale = hasStaleCollaborativeSave(liveDoc, {
+            const collaborativeSaveRequest = {
               nextTitle: request.nextTitle,
               nextMarkdown: request.nextMarkdown,
               content: request.patch.content,
-            });
+            };
+            const isStale = (
+              hasStaleCollaborativeSave(liveDoc, collaborativeSaveRequest) ||
+              hasUnexpectedCollaborativeSaveResult(next, collaborativeSaveRequest)
+            );
             const saveResolution = reconcileCollaborativeSave(liveDoc, isStale, hasNewerDraft);
             if (request.usesDraftQueue && !hasNewerDraft) {
               await removeBackendDocDraft(workspaceId, request.itemId, request.seq);
@@ -2727,7 +2749,7 @@ export async function startBackendWorkbench(): Promise<void> {
       );
       await replayStoredWorkspaceMutationLog();
       replayLocalOperationJournal();
-      overlayDirtyDocsWithoutJournalEdits();
+      overlayDirtyDocs();
       const replayedActiveId = workspace.activeDocId;
       const summary = workspace.docs.find((d) => d.id === replayedActiveId && !d.inTrash)
         ?? workspace.docs.find((d) => !d.inTrash)
@@ -3561,10 +3583,6 @@ export async function startBackendWorkbench(): Promise<void> {
       }
     };
 
-    const currentLocalEditOperationId = (itemId: string): string | undefined => (
-      localOperationJournal.find((entry) => entry.itemId === itemId && entry.kind === "edit")?.id
-    );
-
     const scheduleDocSave = (
       itemId: string,
       expectedRevision: number,
@@ -3601,7 +3619,7 @@ export async function startBackendWorkbench(): Promise<void> {
       }
       const nextPending: PendingDocSave = {
         timer: undefined,
-        mutationId: pending?.mutationId ?? currentLocalEditOperationId(itemId) ?? mutationId(),
+        mutationId: resolveSaveMutationId(pending?.mutationId, mutationId),
         expectedRevision,
         patch: mergedPatch,
         nextTitle: mergedNextTitle,

@@ -281,6 +281,22 @@ export function createBackendClient(opts: BackendClientOptions) {
     return data as T;
   };
 
+  const requestBytes = async (method: string, path: string, body?: unknown): Promise<Uint8Array> => {
+    const res = await fetch(`${base}${path}`, {
+      method,
+      headers: headers(),
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const data = await parseJson(res);
+      if (isErrorPayload(data)) {
+        throw new BackendApiError(res.status, data.error.code, data.error.message);
+      }
+      throw new BackendApiError(res.status, "http_error", `HTTP ${res.status}`);
+    }
+    return new Uint8Array(await res.arrayBuffer());
+  };
+
   return {
     baseUrl: base,
 
@@ -490,6 +506,18 @@ export function createBackendClient(opts: BackendClientOptions) {
       return request(
         "POST",
         `/v1/workspaces/${encodeURIComponent(workspaceId)}/items/${encodeURIComponent(itemId)}/collab/join`,
+        body,
+      );
+    },
+
+    getCollaborativeMarkdownState(
+      workspaceId: string,
+      itemId: string,
+      body: PasswordBody,
+    ): Promise<Uint8Array> {
+      return requestBytes(
+        "POST",
+        `/v1/workspaces/${encodeURIComponent(workspaceId)}/items/${encodeURIComponent(itemId)}/collab/state`,
         body,
       );
     },

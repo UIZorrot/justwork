@@ -20,6 +20,13 @@ export type CollaborativeSaveResolution = {
   retainedContent: WorkspaceDocContent | null;
 };
 
+export function resolveSaveMutationId(
+  pendingMutationId: string | undefined,
+  createMutationId: () => string,
+): string {
+  return pendingMutationId ?? createMutationId();
+}
+
 function stableContentKey(content: WorkspaceDocContent | null | undefined): string {
   return JSON.stringify(content ?? null);
 }
@@ -33,6 +40,21 @@ export function hasStaleCollaborativeSave(
     liveDoc.title !== request.nextTitle ||
     liveDoc.markdown !== request.nextMarkdown ||
     stableContentKey(liveDoc.content) !== stableContentKey(request.content)
+  );
+}
+
+export function hasUnexpectedCollaborativeSaveResult(
+  savedDoc: CollaborativeDocState | null | undefined,
+  request: CollaborativeSaveRequest,
+): boolean {
+  if (!savedDoc) return true;
+  return (
+    savedDoc.title !== request.nextTitle ||
+    savedDoc.markdown !== request.nextMarkdown ||
+    (
+      request.content !== undefined &&
+      stableContentKey(savedDoc.content) !== stableContentKey(request.content)
+    )
   );
 }
 

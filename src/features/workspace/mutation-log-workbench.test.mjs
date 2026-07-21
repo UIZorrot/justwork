@@ -14,4 +14,8 @@ test("workbench replays the persisted workspace mutation log during initial load
 
   const refreshBlock = /const persistRefreshTree = async \(\): Promise<void> => \{([\s\S]*?)\n    \};/.exec(workbench)?.[1] ?? "";
   assert.match(refreshBlock, /await replayStoredWorkspaceMutationLog\(\);/);
+  assert.match(refreshBlock, /replayLocalOperationJournal\(\);[\s\S]*overlayDirtyDocs\(\);/);
+
+  const journalReplayBlock = /const replayLocalOperationJournal = \(\): void => \{([\s\S]*?)\n    \};/.exec(workbench)?.[1] ?? "";
+  assert.doesNotMatch(journalReplayBlock, /dirtyDocIds\.delete/);
 });

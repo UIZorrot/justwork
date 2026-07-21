@@ -63,3 +63,34 @@ test("clean collaborative docs prefer server data unless local revision is newer
     { id: "b", title: "Local Newer", markdown: "local b", revision: 5 },
   ]);
 });
+
+test("an earlier save acknowledgement cannot replace newer typing from the same client", async () => {
+  const mod = await importTsModule("src/features/collaboration/dirty-docs.ts");
+
+  const previousSaveNowOnServer = [{
+    id: "page-a",
+    title: "Page",
+    markdown: "first save",
+    revision: 8,
+    updatedAt: "2026-07-21T10:00:01.000Z",
+  }];
+  const newerLocalTyping = new Map([[
+    "page-a",
+    {
+      id: "page-a",
+      title: "Page",
+      markdown: "first save plus newer typing",
+      revision: 7,
+      updatedAt: "2026-07-21T10:00:02.000Z",
+    },
+  ]]);
+
+  const nextDocs = mod.overlayDirtyCollaborativeDocs(
+    previousSaveNowOnServer,
+    new Set(["page-a"]),
+    newerLocalTyping,
+  );
+
+  assert.equal(nextDocs[0].markdown, "first save plus newer typing");
+  assert.equal(nextDocs[0].revision, 7);
+});

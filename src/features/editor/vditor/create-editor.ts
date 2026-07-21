@@ -204,6 +204,7 @@ export function createWysiwygEditor(options: CreateEditorOptions): DocEditor {
   const editorSurface = {
     getMarkdown,
     setMarkdown,
+    isComposing: compositionGate.isComposing,
     onMarkdownInput: (listener: (markdown: string) => void): (() => void) => {
       markdownInputListeners.add(listener);
       return () => {

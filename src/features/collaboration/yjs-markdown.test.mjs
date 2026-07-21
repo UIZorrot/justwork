@@ -44,3 +44,55 @@ test("markdown collaborator round-trips plain markdown text", async () => {
   source.destroy();
   replica.destroy();
 });
+
+test("markdown collaborator adopts a disjoint bootstrap snapshot without duplicating text", async () => {
+  const mod = await importTsModule("src/features/collaboration/yjs-markdown.ts");
+  const remote = mod.createMarkdownCollaborator({ initialMarkdown: "hello" });
+  const local = mod.createMarkdownCollaborator({ initialMarkdown: "hello" });
+
+  const changed = local.applyRemoteUpdate(remote.encodeUpdate());
+
+  assert.equal(changed, true);
+  assert.equal(local.getMarkdown(), "hello");
+
+  remote.destroy();
+  local.destroy();
+});
+
+test("markdown collaborator preserves unsaved text while rebasing a disjoint bootstrap snapshot", async () => {
+  const mod = await importTsModule("src/features/collaboration/yjs-markdown.ts");
+  const remote = mod.createMarkdownCollaborator({ initialMarkdown: "hello" });
+  const local = mod.createMarkdownCollaborator({ initialMarkdown: "hello" });
+  local.applyLocalMarkdown("hello!");
+
+  local.applyRemoteUpdate(remote.encodeUpdate(), { preserveLocalMarkdown: true });
+
+  assert.equal(local.getMarkdown(), "hello!");
+
+  remote.destroy();
+  local.destroy();
+});
+
+test("minimal markdown edits converge without dropping concurrent suffixes", async () => {
+  const mod = await importTsModule("src/features/collaboration/yjs-markdown.ts");
+  const seed = mod.createMarkdownCollaborator({ initialMarkdown: "hello" });
+  const left = mod.createMarkdownCollaborator();
+  const right = mod.createMarkdownCollaborator();
+  left.applyRemoteUpdate(seed.encodeUpdate());
+  right.applyRemoteUpdate(seed.encodeUpdate());
+
+  left.applyLocalMarkdown("hello A");
+  right.applyLocalMarkdown("hello B");
+  const leftUpdate = left.encodeUpdate();
+  const rightUpdate = right.encodeUpdate();
+  left.applyRemoteUpdate(rightUpdate);
+  right.applyRemoteUpdate(leftUpdate);
+
+  assert.equal(left.getMarkdown(), right.getMarkdown());
+  assert.match(left.getMarkdown(), /A/);
+  assert.match(left.getMarkdown(), /B/);
+
+  seed.destroy();
+  left.destroy();
+  right.destroy();
+});
