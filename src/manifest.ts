@@ -6,7 +6,7 @@ export default defineManifest({
   manifest_version: 3,
   name: "JustWork — Encrypted Collaborative Workspace for Humans and AI Agents",
   short_name: "JustWork",
-  version: "0.0.6",
+  version: "0.0.7",
   description: "An Agent-native collaborative workspace for teams, built end to end for usability, openness, and powerful human–Agent workflows.",
   icons: {
     "16": "justwork_logo.png",
