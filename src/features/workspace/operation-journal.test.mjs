@@ -50,7 +50,7 @@ test("journal replays newer local edit operations over an older remote baseline"
   assert.equal(result.operations.length, 1);
 });
 
-test("journal drops stale local edits when the remote version is newer than the operation", async () => {
+test("journal preserves pending local edits when the remote version advances", async () => {
   const mod = await loadTranspiledModule("src/features/workspace/operation-journal.ts");
 
   const result = mod.applyWorkspaceOperationJournal(baseState([
@@ -74,9 +74,9 @@ test("journal drops stale local edits when the remote version is newer than the 
   ]);
 
   const doc = result.state.docs.find((entry) => entry.id === "page-a");
-  assert.equal(doc.title, "Remote newer");
-  assert.equal(doc.markdown, "remote newer");
-  assert.equal(result.operations.length, 0);
+  assert.equal(doc.title, "Local stale");
+  assert.equal(doc.markdown, "local stale");
+  assert.equal(result.operations.length, 1);
 });
 
 test("journal replays delete operations over remote tree refreshes and clears confirmed operations", async () => {

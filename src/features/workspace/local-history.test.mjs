@@ -52,6 +52,23 @@ test("local history builds revert patch from before snapshot", async () => {
   });
 });
 
+test("local history allows structural move, pin, trash, and restore events to be reverted", async () => {
+  const mod = await loadTranspiledModule("src/features/workspace/local-history.ts");
+  const base = {
+    id: "hist_structural",
+    workspaceId: "ws_1",
+    itemId: "doc_1",
+    timestamp: "2026-05-11T00:00:00.000Z",
+    title: "Doc",
+    after: {},
+  };
+  assert.equal(mod.isRevertableLocalHistoryEvent({ ...base, op: "workspace.item.move", before: { parentId: "folder_1" } }), true);
+  assert.equal(mod.isRevertableLocalHistoryEvent({ ...base, op: "workspace.item.pin", before: { pinned: false } }), true);
+  assert.equal(mod.isRevertableLocalHistoryEvent({ ...base, op: "workspace.item.trash", before: { inTrash: false } }), true);
+  assert.equal(mod.isRevertableLocalHistoryEvent({ ...base, op: "workspace.item.restore", before: { inTrash: true } }), true);
+  assert.equal(mod.isRevertableLocalHistoryEvent({ ...base, op: "workspace.item.create", before: {}, after: { inTrash: false } }), true);
+});
+
 test("local history trims to max events per workspace", async () => {
   const mod = await loadTranspiledModule("src/features/workspace/local-history.ts");
   const storage = createStorage();
@@ -70,4 +87,20 @@ test("local history trims to max events per workspace", async () => {
   const events = await mod.listLocalHistoryEvents(storage, workspaceId);
   assert.equal(events.length, mod.LOCAL_HISTORY_MAX_EVENTS);
   assert.equal(events[0].after.markdown, `after-${mod.LOCAL_HISTORY_MAX_EVENTS + 4}`);
+});
+
+test("local history does not lose concurrent events", async () => {
+  const mod = await loadTranspiledModule("src/features/workspace/local-history.ts");
+  const storage = createStorage();
+  await Promise.all(Array.from({ length: 12 }, (_, index) => mod.appendLocalHistoryEvent(storage, {
+    workspaceId: "ws_concurrent",
+    op: "workspace.item.set",
+    itemId: `doc_${index}`,
+    title: `Doc ${index}`,
+    before: { markdown: `before-${index}` },
+    after: { markdown: `after-${index}` },
+  })));
+  const events = await mod.listLocalHistoryEvents(storage, "ws_concurrent");
+  assert.equal(events.length, 12);
+  assert.equal(new Set(events.map((event) => event.itemId)).size, 12);
 });

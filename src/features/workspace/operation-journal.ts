@@ -17,6 +17,7 @@ export type WorkspaceOperation = {
   kind: WorkspaceOperationKind;
   doc?: WorkspaceDoc;
   patch?: WorkspaceOperationPatch;
+  base?: WorkspaceOperationPatch;
   baseRevision?: number;
   localSeq: number;
   createdAt: string;

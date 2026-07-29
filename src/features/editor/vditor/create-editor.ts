@@ -96,9 +96,10 @@ export function createWysiwygEditor(options: CreateEditorOptions): DocEditor {
   let lastEmittedMarkdown = initialMarkdown;
   let lastInputMarkdown = initialMarkdown;
   let lastKnownMarkdown = initialMarkdown;
-  let collaboratorObserver: (() => void) | undefined;
+  let stopCollaboratorObserver: (() => void) | undefined;
   let collaboratorBinding: ReturnType<typeof createVditorMarkdownBinding> | undefined;
   let collaboratorState: CollaborativeMarkdownBinding | undefined;
+  let compositionBaseMarkdown: string | null = null;
   const compositionGate = createCompositionGate();
   const clearMentionQuery = (): void => onMentionQueryChange?.(null);
 
@@ -188,16 +189,22 @@ export function createWysiwygEditor(options: CreateEditorOptions): DocEditor {
     }
     emitMarkdown(markdown);
   };
+  const startComposingMarkdown = (): void => {
+    compositionBaseMarkdown = imageSync?.fromEditorMarkdown(getMarkdown()) ?? getMarkdown();
+    compositionGate.onCompositionStart();
+  };
   const flushComposedMarkdown = (): void => {
     const markdown = compositionGate.onCompositionEnd(imageSync?.fromEditorMarkdown(getMarkdown()) ?? getMarkdown());
     if (markdown === null) return;
     dispatchMarkdown(markdown);
+    compositionBaseMarkdown = null;
     queueMicrotask(notifyMentionQueryChange);
   };
   const cancelComposedMarkdown = (): void => {
     const markdown = compositionGate.onCompositionCancel(imageSync?.fromEditorMarkdown(getMarkdown()) ?? getMarkdown());
     if (markdown === null) return;
     dispatchMarkdown(markdown);
+    compositionBaseMarkdown = null;
     queueMicrotask(notifyMentionQueryChange);
   };
 
@@ -205,6 +212,7 @@ export function createWysiwygEditor(options: CreateEditorOptions): DocEditor {
     getMarkdown,
     setMarkdown,
     isComposing: compositionGate.isComposing,
+    getCompositionBaseMarkdown: () => compositionBaseMarkdown,
     onMarkdownInput: (listener: (markdown: string) => void): (() => void) => {
       markdownInputListeners.add(listener);
       return () => {
@@ -218,10 +226,8 @@ export function createWysiwygEditor(options: CreateEditorOptions): DocEditor {
       collaboratorBinding.destroy();
       collaboratorBinding = undefined;
     }
-    if (collaboratorObserver && collaboratorState) {
-      collaboratorState.collaborator.text.unobserve(collaboratorObserver);
-    }
-    collaboratorObserver = undefined;
+    stopCollaboratorObserver?.();
+    stopCollaboratorObserver = undefined;
     collaboratorState = undefined;
   };
 
@@ -240,11 +246,12 @@ export function createWysiwygEditor(options: CreateEditorOptions): DocEditor {
     unbindCollaborator();
     if (!binding) return;
     collaboratorState = binding;
-    collaboratorObserver = () => {
+    stopCollaboratorObserver = binding.collaborator.onUpdate((_update, origin) => {
       saveCollaborativeSnapshot(binding.storageKey, binding.collaborator.encodeUpdate());
-      onChange?.(binding.collaborator.getMarkdown());
-    };
-    binding.collaborator.text.observe(collaboratorObserver);
+      if (origin === "local") {
+        onChange?.(binding.collaborator.getMarkdown());
+      }
+    });
     collaboratorBinding = createVditorMarkdownBinding(editorSurface, binding.collaborator);
     if (editorReady) {
       collaboratorBinding.applyRemoteMarkdown(binding.collaborator.getMarkdown());
@@ -256,7 +263,7 @@ export function createWysiwygEditor(options: CreateEditorOptions): DocEditor {
 
   ensureBundledVditorIcons();
   const vditorAssets = vditorAssetPaths();
-  container.addEventListener("compositionstart", compositionGate.onCompositionStart, true);
+  container.addEventListener("compositionstart", startComposingMarkdown, true);
   container.addEventListener("compositionend", flushComposedMarkdown, true);
   container.addEventListener("compositioncancel", cancelComposedMarkdown, true);
   container.addEventListener("keyup", notifyMentionQueryChange, true);
@@ -366,7 +373,7 @@ export function createWysiwygEditor(options: CreateEditorOptions): DocEditor {
       vditor?.destroy();
       vditor = undefined;
       imageSync?.dispose?.();
-      container.removeEventListener("compositionstart", compositionGate.onCompositionStart, true);
+      container.removeEventListener("compositionstart", startComposingMarkdown, true);
       container.removeEventListener("compositionend", flushComposedMarkdown, true);
       container.removeEventListener("compositioncancel", cancelComposedMarkdown, true);
       container.removeEventListener("keyup", notifyMentionQueryChange, true);

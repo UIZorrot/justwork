@@ -12,7 +12,7 @@ test("workbench replays the persisted workspace mutation log during initial load
   assert.match(workbench, /const replayStoredWorkspaceMutationLog = async \(\): Promise<void> => \{/);
   assert.match(workbench, /await replayStoredWorkspaceMutationLog\(\);/);
 
-  const refreshBlock = /const persistRefreshTree = async \(\): Promise<void> => \{([\s\S]*?)\n    \};/.exec(workbench)?.[1] ?? "";
+  const refreshBlock = /const refreshWorkspaceFromRemote = async \(\): Promise<void> => \{([\s\S]*?)\n    \};/.exec(workbench)?.[1] ?? "";
   assert.match(refreshBlock, /await replayStoredWorkspaceMutationLog\(\);/);
   assert.match(refreshBlock, /replayLocalOperationJournal\(\);[\s\S]*overlayDirtyDocs\(\);/);
 

@@ -71,6 +71,7 @@ export type WorkspaceDoc = {
   updatedAt: string;
   lastVisitedAt: string;
   parentId: string | null;
+  orderKey: number;
   pinned: boolean;
   inTrash: boolean;
   kind: WorkspaceDocKind;

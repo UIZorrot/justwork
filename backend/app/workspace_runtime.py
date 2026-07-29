@@ -125,6 +125,7 @@ def _normalize_member_payload(user_id: str, raw: object) -> dict:
         "nickname": nickname,
         "joinedAt": joined_at,
         "updatedAt": updated_at,
+        "revision": max(0, int(record.get("revision", 0) or 0)),
     }
 
 
@@ -151,6 +152,7 @@ def ensure_workspace_members(state: dict, owner_user_id: str, owner_nickname: st
             "nickname": owner_nickname.strip(),
             "joinedAt": joined_at,
             "updatedAt": joined_at,
+            "revision": 0,
         }
         changed = True
     elif not owner.get("nickname") and owner_nickname.strip():
@@ -175,11 +177,13 @@ def upsert_workspace_member(state: dict, user_id: str, nickname: str) -> dict:
             "nickname": nickname.strip(),
             "joinedAt": now,
             "updatedAt": now,
+            "revision": 1,
         }
     else:
         current = dict(current)
         current["nickname"] = nickname.strip()
         current["updatedAt"] = now
+        current["revision"] = int(current.get("revision", 0)) + 1
     members[user_id] = current
     state["members"] = members
     return current
@@ -205,6 +209,7 @@ def ensure_actor_workspace_member(state: dict, owner_user_id: str, actor_user_id
             "nickname": default_agent_nickname(actor),
             "joinedAt": joined_at,
             "updatedAt": joined_at,
+            "revision": 0,
         }
         changed = True
     elif not str(current.get("nickname", "")).strip():
@@ -231,6 +236,7 @@ def workspace_member_views(state: dict, owner_user_id: str) -> list[dict]:
             "display_name": display_name(str(member.get("nickname", "")), user_id),
             "joined_at": str(member.get("joinedAt", "")),
             "updated_at": str(member.get("updatedAt", "")),
+            "revision": int(member.get("revision", 0)),
             "is_owner": user_id == owner_user_id,
         }
         for user_id, member in members.items()
@@ -261,6 +267,7 @@ def make_initial_workspace_state(workspace_title: str, initial_doc_title: str = 
     return {
         "activeDocId": page_id,
         "workspaceTitle": normalized_workspace_title,
+        "workspaceRevision": 0,
         "workspaceDescription": "Backend-first JustWork workspace.",
         "members": {},
         "docs": [
@@ -346,6 +353,16 @@ def normalize_workspace_state(state: dict) -> dict:
         if doc.get("kind") != "welcome":
             normalized = strip_auto_title_heading(normalized)
         docs.append(normalize_doc_payload(normalized))
+    next_order_by_parent: dict[str, float] = {}
+    for doc in docs:
+        parent_key = str(doc.get("parentId") or "")
+        raw_order = doc.get("orderKey")
+        if isinstance(raw_order, (int, float)) and not isinstance(raw_order, bool):
+            order_key = float(raw_order)
+        else:
+            order_key = next_order_by_parent.get(parent_key, 0.0)
+        doc["orderKey"] = order_key
+        next_order_by_parent[parent_key] = max(next_order_by_parent.get(parent_key, 0.0), order_key + 1024.0)
     active_doc_id = state.get("activeDocId")
     active = find_doc({**state, "docs": docs}, active_doc_id) if active_doc_id else None
     if active is None or active.get("inTrash", False):
@@ -362,6 +379,18 @@ def normalize_workspace_state(state: dict) -> dict:
         first_page = next((doc for doc in docs if doc.get("kind") == "page" and doc.get("id") != WELCOME_DOC_ID), None)
         workspace_title = normalize_workspace_title_text(str(first_page.get("title", ""))) if first_page else ""
     next_state["workspaceTitle"] = workspace_title or "Untitled workspace"
+    next_state["workspaceRevision"] = max(0, int(next_state.get("workspaceRevision", 0) or 0))
+    billing_plan = str(next_state.get("billingPlan", "free"))
+    next_state["billingPlan"] = "paid" if billing_plan == "paid" else "free"
+    default_history_limit = 1000 if next_state["billingPlan"] == "paid" else 200
+    try:
+        requested_history_limit = int(next_state.get("historyLimit", default_history_limit) or default_history_limit)
+    except (TypeError, ValueError):
+        requested_history_limit = default_history_limit
+    next_state["historyLimit"] = max(
+        1,
+        min(1000, requested_history_limit),
+    )
     return next_state
 
 
@@ -375,6 +404,7 @@ def get_workspace_title(state: dict, workspace_id: str | None = None) -> str:
 def update_workspace_title(state: dict, title: str, workspace_id: str | None = None) -> str:
     normalized = normalize_workspace_title(title, workspace_id)
     state["workspaceTitle"] = normalized
+    state["workspaceRevision"] = int(state.get("workspaceRevision", 0)) + 1
     return normalized
 
 
@@ -412,6 +442,7 @@ def tree_items(state: dict) -> list[dict]:
             "title": doc.get("title", ""),
             "kind": doc.get("kind", "page"),
             "parent_id": doc.get("parentId"),
+            "order_key": float(doc.get("orderKey", 0)),
             "pinned": bool(doc.get("pinned", False)),
             "in_trash": bool(doc.get("inTrash", False)),
             "revision": int(doc.get("revision", 0)),
@@ -429,6 +460,7 @@ def item_view(doc: dict) -> dict:
         "content": doc.get("content"),
         "kind": doc.get("kind", "page"),
         "parent_id": doc.get("parentId"),
+        "order_key": float(doc.get("orderKey", 0)),
         "pinned": bool(doc.get("pinned", False)),
         "in_trash": bool(doc.get("inTrash", False)),
         "revision": int(doc.get("revision", 0)),
@@ -488,6 +520,7 @@ def create_doc(state: dict, kind: str, title: str, parent_id: str | None, doc_id
     if find_doc(state, chosen_id) is not None:
         raise ValueError("item id already exists")
 
+    sibling_order = [float(entry.get("orderKey", 0)) for entry in child_docs(state, parent["id"])]
     doc = {
         "id": chosen_id,
         "title": normalized_title,
@@ -497,6 +530,7 @@ def create_doc(state: dict, kind: str, title: str, parent_id: str | None, doc_id
         "updatedAt": now,
         "lastVisitedAt": now,
         "parentId": parent["id"],
+        "orderKey": (max(sibling_order) + 1024.0) if sibling_order else 0.0,
         "pinned": False,
         "inTrash": False,
         "kind": kind,
@@ -560,6 +594,8 @@ def hard_delete_doc(state: dict, item_id: str) -> dict:
         raise KeyError(item_id)
     if is_protected_item(doc):
         raise ValueError("protected item cannot be deleted")
+    if not doc.get("inTrash", False):
+        raise ValueError("item must be in trash before hard delete")
     if child_docs(state, item_id):
         raise ValueError("folder must be empty before hard delete")
     state["docs"] = [entry for entry in state.get("docs", []) if entry.get("id") != item_id]
@@ -567,17 +603,20 @@ def hard_delete_doc(state: dict, item_id: str) -> dict:
     return doc
 
 
-def move_doc(state: dict, item_id: str, parent_id: str | None) -> dict:
+def move_doc(state: dict, item_id: str, parent_id: str | None, order_key: float = 0) -> dict:
     doc = find_doc(state, item_id)
     if doc is None:
         raise KeyError(item_id)
     if doc["id"] == ROOT_FOLDER_ID or doc.get("kind") == "welcome":
         raise ValueError("protected item cannot be moved")
+    if parent_id == item_id or any(entry.get("id") == parent_id for entry in descendant_docs(state, item_id)):
+        raise ValueError("item cannot be moved into itself or its descendant")
     if parent_id is not None:
         parent = find_doc(state, parent_id)
         if parent is None or parent.get("kind") != "folder":
             raise ValueError("parent must be a folder")
     doc["parentId"] = parent_id
+    doc["orderKey"] = float(order_key)
     doc["updatedAt"] = now_iso()
     doc["revision"] = int(doc.get("revision", 0)) + 1
     return doc

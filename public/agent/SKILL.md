@@ -60,7 +60,9 @@ POST /v1/workspaces/{workspace_id}/tree
 }
 ```
 
-The tree response includes `workspace_title`. This is workspace metadata and is separate from page/folder item titles.
+The tree response includes `workspace_title`, `workspace_revision`, and each item's
+`revision` and `order_key`. Workspace metadata has its own revision and is separate
+from page/folder/table/board item titles.
 
 Rename the workspace:
 
@@ -71,9 +73,13 @@ PUT /v1/workspaces/{workspace_id}/settings
 ```json
 {
   "password": "workspace-password",
-  "title": "Project Knowledge Base"
+  "title": "Project Knowledge Base",
+  "expected_revision": 2
 }
 ```
+
+Use `workspace_revision` from the latest tree response. A settings conflict must be
+re-read and surfaced; do not overwrite the newer workspace name.
 
 Read one item:
 
@@ -96,9 +102,9 @@ PUT /v1/workspaces/{workspace_id}/items/{item_id}
 }
 ```
 
-Always send `expected_revision` when modifying an item after reading it. If the Backend returns `conflict`, stop writing, re-read the item and tree, and ask the caller how to merge.
+Every item mutation must send `expected_revision` from a prior read. If the Backend returns `conflict`, stop writing, re-read the item and tree, and ask the caller how to merge. Never auto-rebase or resolve a conflict using timestamps.
 
-Create a page or folder:
+Create a page, folder, table/workbook, or board:
 
 ```http
 POST /v1/workspaces/{workspace_id}/items
@@ -113,7 +119,9 @@ POST /v1/workspaces/{workspace_id}/items
 }
 ```
 
-Use `"kind": "folder"` to create a folder. `parent_id` must point to a folder; omit it or use `"root"` for top-level items.
+Valid `kind` values are `page`, `folder`, `table`, and `board`. A table's structured
+content contains its sheets/workbook. `parent_id` must point to a folder; omit it or
+use `"root"` for top-level items.
 
 Move, pin, trash, restore, and hard-delete:
 
@@ -125,7 +133,10 @@ PUT /v1/workspaces/{workspace_id}/items/{item_id}/restore
 POST /v1/workspaces/{workspace_id}/items/{item_id}/hard-delete
 ```
 
-Hard-delete rejects non-empty folders. Trash/restore operate on a folder subtree. `root` and `welcome` are protected system items.
+Move bodies include `parent_id`, `order_key`, and `expected_revision`; preserve the
+server order key when the order is not intentionally changing. Hard-delete is only
+allowed for items already in the trash and rejects non-empty folders. Trash/restore
+operate on a folder subtree. `root` and `welcome` are protected system items.
 
 Search, outline, patch:
 
@@ -140,9 +151,12 @@ Use patch `dry_run: true` before applying risky changes. This is the dry-run pat
 History:
 
 ```http
-POST /v1/workspaces/{workspace_id}/history
-POST /v1/workspaces/{workspace_id}/history/{event_id}/revert
+POST /v1/workspaces/{workspace_id}/revisions
 ```
+
+Revision history is append-only and bounded. To undo an event, read the current item,
+then submit the explicit inverse update/move/pin/trash/restore with the current
+`expected_revision`. There is no history rewrite or rebase endpoint.
 
 Profile nickname:
 
@@ -151,7 +165,17 @@ GET /v1/workspaces/{workspace_id}/profile
 PUT /v1/workspaces/{workspace_id}/profile
 ```
 
+Profile reads return a member `revision`. Profile updates require `password`,
+`nickname`, and that value as `expected_revision`; on conflict, re-read instead of
+overwriting another client.
+
 ## Operation Mapping
+
+Paid workspace creation is a user-facing Stripe Checkout flow. Agents must not call
+the free `POST /v1/workspaces` endpoint and then claim paid quota, invent a Checkout
+Session ID, or place database credentials in Stripe metadata. A paid workspace is
+created only through `/v1/billing/paid-workspace/checkout` followed by
+`/v1/workspaces/paid/complete` after server-side payment verification.
 
 - `profile.get` -> `GET /v1/workspaces/{workspace_id}/profile`
 - `profile.update` -> `PUT /v1/workspaces/{workspace_id}/profile`
@@ -170,8 +194,8 @@ PUT /v1/workspaces/{workspace_id}/profile
 - `doc.search` -> `POST /v1/workspaces/{workspace_id}/search`
 - `doc.outline` -> `POST /v1/workspaces/{workspace_id}/items/{item_id}/outline`
 - `doc.patch` -> `POST /v1/workspaces/{workspace_id}/items/{item_id}/patch`
-- `history.list` -> `POST /v1/workspaces/{workspace_id}/history`
-- `history.revert` -> `POST /v1/workspaces/{workspace_id}/history/{event_id}/revert`
+- `history.list` -> `POST /v1/workspaces/{workspace_id}/revisions`
+- `history.revert` -> no direct endpoint; submit the explicit revision-guarded inverse item operation
 - `identity.sign` -> sign mutating requests when the caller has a local identity keypair
 
 ## Signed Writes

@@ -1,3 +1,5 @@
+import DiffMatchPatch from "diff-match-patch";
+
 import type { MarkdownCollaborator } from "./yjs-markdown";
 
 export type MarkdownEditorSurface = {
@@ -5,6 +7,7 @@ export type MarkdownEditorSurface = {
   setMarkdown: (markdown: string, clearHistory?: boolean) => void;
   onMarkdownInput: (listener: (markdown: string) => void) => () => void;
   isComposing?: () => boolean;
+  getCompositionBaseMarkdown?: () => string | null;
 };
 
 export type VditorMarkdownBinding = {
@@ -13,21 +16,55 @@ export type VditorMarkdownBinding = {
   destroy: () => void;
 };
 
+export type ComposedMarkdownMerge = {
+  markdown: string;
+  clean: boolean;
+};
+
+/** Replay only the IME edit onto current collaborative text. */
+export function mergeComposedMarkdown(
+  compositionBase: string,
+  composedMarkdown: string,
+  currentCollaborativeMarkdown: string,
+): ComposedMarkdownMerge {
+  if (composedMarkdown === compositionBase) {
+    return { markdown: currentCollaborativeMarkdown, clean: true };
+  }
+  if (currentCollaborativeMarkdown === compositionBase) {
+    return { markdown: composedMarkdown, clean: true };
+  }
+  const differ = new DiffMatchPatch();
+  const patches = differ.patch_make(compositionBase, composedMarkdown);
+  const [markdown, applied] = differ.patch_apply(patches, currentCollaborativeMarkdown);
+  return { markdown, clean: applied.every(Boolean) };
+}
+
 export function createVditorMarkdownBinding(
   editor: MarkdownEditorSurface,
   collaborator: MarkdownCollaborator,
 ): VditorMarkdownBinding {
   let suppress = false;
+  let remoteUpdatePendingDuringComposition = false;
 
   const syncCollaboratorFromEditor = (markdown: string): void => {
     if (suppress) return;
     suppress = true;
-    collaborator.applyLocalMarkdown(markdown);
+    const compositionBase = editor.getCompositionBaseMarkdown?.() ?? null;
+    if (remoteUpdatePendingDuringComposition && compositionBase !== null) {
+      const merged = mergeComposedMarkdown(compositionBase, markdown, collaborator.getMarkdown());
+      collaborator.applyLocalMarkdown(merged.markdown);
+      remoteUpdatePendingDuringComposition = false;
+    } else {
+      collaborator.applyLocalMarkdown(markdown);
+    }
     suppress = false;
   };
 
   const syncEditorFromCollaborator = (): void => {
-    if (editor.isComposing?.()) return;
+    if (editor.isComposing?.()) {
+      remoteUpdatePendingDuringComposition = true;
+      return;
+    }
     const markdown = collaborator.getMarkdown();
     if (editor.getMarkdown() === markdown) return;
     suppress = true;
@@ -45,6 +82,7 @@ export function createVditorMarkdownBinding(
     },
     applyRemoteMarkdown: (markdown) => {
       if (editor.getMarkdown() === markdown) return;
+      remoteUpdatePendingDuringComposition = false;
       suppress = true;
       editor.setMarkdown(markdown, false);
       suppress = false;

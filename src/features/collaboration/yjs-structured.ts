@@ -17,7 +17,7 @@ export type StructuredCollaborator = {
 
 export type StructuredCollaboratorOptions = {
   kind: StructuredDocumentKind;
-  initialContent: StructuredDocumentContent;
+  initialContent?: StructuredDocumentContent;
 };
 
 function toYValue(value: unknown): Y.Map<unknown> | Y.Array<unknown> | string | number | boolean | null {
@@ -110,7 +110,12 @@ export function createStructuredCollaborator(
     }, origin);
   };
 
-  applyContent(options.initialContent, localOrigin);
+  // Only the elected bootstrap client may seed a brand-new CRDT document. If
+  // every client writes its local fallback here, a late join can overwrite or
+  // duplicate the already-authoritative structured state.
+  if (options.initialContent !== undefined) {
+    applyContent(options.initialContent, localOrigin);
+  }
 
   return {
     doc,

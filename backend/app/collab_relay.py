@@ -69,7 +69,7 @@ class CollaborativeRelayHub:
             if not room:
                 self._rooms.pop(self._room_key(workspace_id, item_id), None)
 
-    async def broadcast(self, workspace_id: str, item_id: str, sender: WebSocket, payload: bytes) -> None:
+    async def broadcast(self, workspace_id: str, item_id: str, sender: WebSocket | None, payload: bytes) -> None:
         async with self._lock:
             recipients = [ws for ws in self._rooms.get(self._room_key(workspace_id, item_id), set()) if ws is not sender]
         dead: list[WebSocket] = []
@@ -85,7 +85,7 @@ class CollaborativeRelayHub:
         return self._store.get_snapshot(workspace_id, item_id)
 
     async def store_snapshot(self, workspace_id: str, item_id: str, payload: bytes) -> None:
-        self._store.set_snapshot(workspace_id, item_id, payload)
+        self._store.append_update(workspace_id, item_id, payload)
 
     def delete_snapshot(self, workspace_id: str, item_id: str) -> None:
         self._store.delete_snapshot(workspace_id, item_id)

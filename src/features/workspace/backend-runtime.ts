@@ -24,6 +24,7 @@ export function apiTreeItemToPartialDoc(item: WorkspaceTreeItem): WorkspaceDoc {
     updatedAt: item.updated_at,
     lastVisitedAt: item.updated_at,
     parentId: item.parent_id,
+    orderKey: item.order_key,
     pinned: item.pinned,
     inTrash: item.in_trash,
     kind: item.kind as WorkspaceDoc["kind"],
@@ -40,6 +41,7 @@ export function apiItemToDoc(item: WorkspaceItem): WorkspaceDoc {
     updatedAt: item.updated_at,
     lastVisitedAt: item.updated_at,
     parentId: item.parent_id,
+    orderKey: item.order_key,
     pinned: item.pinned,
     inTrash: item.in_trash,
     kind: item.kind as WorkspaceDoc["kind"],
@@ -104,16 +106,23 @@ export function createBackendWorkspaceSession(opts: BackendWorkspaceSessionOptio
       return {
         active_item_id: r.active_item_id,
         workspace_title: r.workspace_title,
+        workspace_revision: r.workspace_revision,
         items: r.items,
       };
     },
 
-    async updateWorkspaceTitle(title: string) {
+    async listRevisions() {
+      const r = await client.listRevisions(opts.workspaceId, pwd());
+      return r.revisions;
+    },
+
+    async updateWorkspaceTitle(title: string, expectedRevision: number) {
       const r = await client.updateWorkspaceSettings(opts.workspaceId, {
         password: opts.password,
         title,
+        expected_revision: expectedRevision,
       });
-      return r.title;
+      return { title: r.title, revision: r.revision };
     },
 
     async listMembers() {
@@ -121,10 +130,11 @@ export function createBackendWorkspaceSession(opts: BackendWorkspaceSessionOptio
       return r.members;
     },
 
-    async updateProfile(nickname: string) {
+    async updateProfile(nickname: string, expectedRevision: number) {
       const r = await client.updateProfile(opts.workspaceId, {
         nickname,
         password: opts.password,
+        expected_revision: expectedRevision,
       });
       return r.profile;
     },
@@ -140,7 +150,8 @@ export function createBackendWorkspaceSession(opts: BackendWorkspaceSessionOptio
         title?: string;
         markdown?: string;
         content?: WorkspaceDocContent | null;
-        expectedRevision?: number;
+        collaborativeUpdate?: string;
+        expectedRevision: number;
         mutationId?: string;
       },
     ) {
@@ -149,7 +160,8 @@ export function createBackendWorkspaceSession(opts: BackendWorkspaceSessionOptio
         title: patch.title ?? null,
         markdown: patch.markdown ?? null,
         content: patch.content ?? null,
-        expected_revision: patch.expectedRevision ?? null,
+        collaborative_update: patch.collaborativeUpdate ?? null,
+        expected_revision: patch.expectedRevision,
         client_mutation_id: patch.mutationId ?? null,
       });
       return apiItemToDoc(r.item);
@@ -173,48 +185,55 @@ export function createBackendWorkspaceSession(opts: BackendWorkspaceSessionOptio
       return apiItemToDoc(r.item);
     },
 
-    async setPinned(itemId: string, pinned: boolean, expectedRevision?: number, clientMutationId?: string | null) {
+    async setPinned(itemId: string, pinned: boolean, expectedRevision: number, clientMutationId?: string | null) {
       const r = await client.pinItem(opts.workspaceId, itemId, {
         password: opts.password,
         pinned,
-        expected_revision: expectedRevision ?? null,
+        expected_revision: expectedRevision,
         client_mutation_id: clientMutationId ?? null,
       });
       return apiItemToDoc(r.item);
     },
 
-    async moveItem(itemId: string, parentId: string | null, expectedRevision?: number, clientMutationId?: string | null) {
+    async moveItem(
+      itemId: string,
+      parentId: string | null,
+      orderKey: number,
+      expectedRevision: number,
+      clientMutationId?: string | null,
+    ) {
       const r = await client.moveItem(opts.workspaceId, itemId, {
         password: opts.password,
         parent_id: parentId,
-        expected_revision: expectedRevision ?? null,
+        order_key: orderKey,
+        expected_revision: expectedRevision,
         client_mutation_id: clientMutationId ?? null,
       });
       return apiItemToDoc(r.item);
     },
 
-    async trashItem(itemId: string, expectedRevision?: number, clientMutationId?: string | null) {
+    async trashItem(itemId: string, expectedRevision: number, clientMutationId?: string | null) {
       const r = await client.trashItem(opts.workspaceId, itemId, {
         password: opts.password,
-        expected_revision: expectedRevision ?? null,
+        expected_revision: expectedRevision,
         client_mutation_id: clientMutationId ?? null,
       });
       return apiItemToDoc(r.item);
     },
 
-    async restoreItem(itemId: string, expectedRevision?: number, clientMutationId?: string | null) {
+    async restoreItem(itemId: string, expectedRevision: number, clientMutationId?: string | null) {
       const r = await client.restoreItem(opts.workspaceId, itemId, {
         password: opts.password,
-        expected_revision: expectedRevision ?? null,
+        expected_revision: expectedRevision,
         client_mutation_id: clientMutationId ?? null,
       });
       return apiItemToDoc(r.item);
     },
 
-    async hardDeleteItem(itemId: string, expectedRevision?: number, clientMutationId?: string | null) {
+    async hardDeleteItem(itemId: string, expectedRevision: number, clientMutationId?: string | null) {
       const r = await client.hardDeleteItem(opts.workspaceId, itemId, {
         password: opts.password,
-        expected_revision: expectedRevision ?? null,
+        expected_revision: expectedRevision,
         client_mutation_id: clientMutationId ?? null,
       });
       return apiItemToDoc(r.item);

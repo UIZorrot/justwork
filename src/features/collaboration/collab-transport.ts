@@ -1,9 +1,11 @@
 export type CollaborativeUpdateHandler = (update: Uint8Array) => void;
+export type CollaborativeStatusHandler = (readyState: number) => void;
 
 export type CollaborativeTransport = {
   readonly readyState: number;
   sendUpdate: (update: Uint8Array) => void;
   onUpdate: (handler: CollaborativeUpdateHandler) => () => void;
+  onStatus: (handler: CollaborativeStatusHandler) => () => void;
   close: () => void;
 };
 
@@ -13,6 +15,7 @@ export function createCollaborativeTransport(
 ): CollaborativeTransport {
   const socket = new WebSocket(url, protocols);
   const handlers = new Set<CollaborativeUpdateHandler>();
+  const statusHandlers = new Set<CollaborativeStatusHandler>();
   const pendingUpdates: Uint8Array[] = [];
 
   const flushPendingUpdates = (): void => {
@@ -24,7 +27,15 @@ export function createCollaborativeTransport(
   };
 
   socket.binaryType = "arraybuffer";
-  socket.addEventListener("open", flushPendingUpdates);
+  const notifyStatus = (): void => {
+    for (const handler of statusHandlers) handler(socket.readyState);
+  };
+  socket.addEventListener("open", () => {
+    flushPendingUpdates();
+    notifyStatus();
+  });
+  socket.addEventListener("close", notifyStatus);
+  socket.addEventListener("error", notifyStatus);
   socket.addEventListener("message", (event) => {
     const payload = event.data;
     if (payload instanceof ArrayBuffer) {
@@ -57,9 +68,16 @@ export function createCollaborativeTransport(
         handlers.delete(handler);
       };
     },
+    onStatus: (handler) => {
+      statusHandlers.add(handler);
+      return () => {
+        statusHandlers.delete(handler);
+      };
+    },
     close: () => {
       socket.close();
       handlers.clear();
+      statusHandlers.clear();
     },
   };
 }

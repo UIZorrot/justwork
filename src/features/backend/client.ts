@@ -39,6 +39,31 @@ export type WorkspaceSummary = {
   owner_display_name: string;
   encrypted_payload: string;
   updated_at: string;
+  plan: "free" | "paid";
+  billing_status: string;
+};
+
+export type PaidWorkspaceBillingConfig = {
+  ok: boolean;
+  enabled: boolean;
+  checkout_mode: "payment" | "subscription";
+  price_label: string;
+  storage_multiplier: number;
+  history_limit: number;
+  custom_database_enabled: boolean;
+};
+
+export type PaidWorkspaceCheckout = {
+  ok: boolean;
+  checkout_session_id: string;
+  checkout_url: string;
+};
+
+export type PaidWorkspaceCheckoutStatus = {
+  ok: boolean;
+  checkout_session_id: string;
+  status: string;
+  paid: boolean;
 };
 
 export type WorkspaceTreeItem = {
@@ -46,6 +71,7 @@ export type WorkspaceTreeItem = {
   title: string;
   kind: BackendWorkspaceItemKind;
   parent_id: string | null;
+  order_key: number;
   pinned: boolean;
   in_trash: boolean;
   revision: number;
@@ -59,16 +85,30 @@ export type WorkspaceItem = {
   content?: WorkspaceDocContent | null;
   kind: BackendWorkspaceItemKind;
   parent_id: string | null;
+  order_key: number;
   pinned: boolean;
   in_trash: boolean;
   revision: number;
   updated_at: string;
 };
 
+export type WorkspaceRevisionEvent = {
+  id: string;
+  operation: string;
+  item_id: string;
+  title: string;
+  before: Record<string, unknown>;
+  after: Record<string, unknown>;
+  actor_user_id?: string | null;
+  mutation_id?: string | null;
+  timestamp: string;
+};
+
 export type ProfileBody = {
   user_id: string;
   nickname: string;
   display_name: string;
+  revision: number;
 };
 
 export type WorkspaceMemberBody = {
@@ -77,6 +117,7 @@ export type WorkspaceMemberBody = {
   display_name: string;
   joined_at: string;
   updated_at: string;
+  revision: number;
   is_owner: boolean;
 };
 
@@ -109,9 +150,20 @@ export type CreateWorkspaceBody = {
   title?: string;
 };
 
+export type CompletePaidWorkspaceBody = CreateWorkspaceBody & {
+  checkout_session_id: string;
+  custom_database_url?: string | null;
+};
+
 export type PasswordBody = {
   password: string;
   expected_revision?: number | null;
+  client_mutation_id?: string | null;
+};
+
+export type RevisionMutationBody = {
+  password: string;
+  expected_revision: number;
   client_mutation_id?: string | null;
 };
 
@@ -120,7 +172,8 @@ export type UpdateItemBody = {
   title?: string | null;
   markdown?: string | null;
   content?: WorkspaceDocContent | null;
-  expected_revision?: number | null;
+  collaborative_update?: string | null;
+  expected_revision: number;
   client_mutation_id?: string | null;
 };
 
@@ -136,19 +189,21 @@ export type CreateItemBody = {
 export type PinItemBody = {
   password: string;
   pinned: boolean;
-  expected_revision?: number | null;
+  expected_revision: number;
   client_mutation_id?: string | null;
 };
 
 export type UpdateWorkspaceSettingsBody = {
   password: string;
   title: string;
+  expected_revision: number;
 };
 
 export type MoveItemBody = {
   password: string;
   parent_id: string | null;
-  expected_revision?: number | null;
+  order_key: number;
+  expected_revision: number;
   client_mutation_id?: string | null;
 };
 
@@ -162,7 +217,7 @@ export type PatchBody = {
   find: string;
   replace?: string;
   dry_run?: boolean;
-  expected_revision?: number | null;
+  expected_revision: number;
   client_mutation_id?: string | null;
 };
 
@@ -195,6 +250,7 @@ export type CollaborativeJoinResponse = {
   item_id: string;
   ticket: string;
   expires_at: string;
+  bootstrap_owner: boolean;
 };
 
 /** Same shape as `@justwork/security` IdentityKeyPair — inlined to avoid circular workspace deps in types. */
@@ -304,12 +360,38 @@ export function createBackendClient(opts: BackendClientOptions) {
       return request("GET", "/v1/health");
     },
 
+    getPaidWorkspaceBillingConfig(): Promise<PaidWorkspaceBillingConfig> {
+      return request("GET", "/v1/billing/paid-workspace/config");
+    },
+
+    createPaidWorkspaceCheckout(ownerUserId: string): Promise<PaidWorkspaceCheckout> {
+      return request("POST", "/v1/billing/paid-workspace/checkout", { owner_user_id: ownerUserId });
+    },
+
+    getPaidWorkspaceCheckoutStatus(checkoutSessionId: string): Promise<PaidWorkspaceCheckoutStatus> {
+      return request("GET", `/v1/billing/paid-workspace/checkout/${encodeURIComponent(checkoutSessionId)}`);
+    },
+
+    completePaidWorkspace(
+      body: CompletePaidWorkspaceBody,
+    ): Promise<{
+      ok: boolean;
+      workspace: WorkspaceSummary;
+      workspace_title: string;
+      workspace_revision: number;
+      active_item_id: string;
+      items: WorkspaceTreeItem[];
+    }> {
+      return request("POST", "/v1/workspaces/paid/complete", body);
+    },
+
     createWorkspace(
       body: CreateWorkspaceBody,
     ): Promise<{
       ok: boolean;
       workspace: WorkspaceSummary;
       workspace_title: string;
+      workspace_revision: number;
       active_item_id: string;
       items: WorkspaceTreeItem[];
     }> {
@@ -327,16 +409,24 @@ export function createBackendClient(opts: BackendClientOptions) {
       ok: boolean;
       workspace_id: string;
       workspace_title: string;
+      workspace_revision: number;
       active_item_id: string;
       items: WorkspaceTreeItem[];
     }> {
       return request("POST", `/v1/workspaces/${encodeURIComponent(workspaceId)}/tree`, body);
     },
 
+    listRevisions(
+      workspaceId: string,
+      body: PasswordBody,
+    ): Promise<{ ok: boolean; workspace_id: string; revisions: WorkspaceRevisionEvent[] }> {
+      return request("POST", `/v1/workspaces/${encodeURIComponent(workspaceId)}/revisions`, body);
+    },
+
     updateWorkspaceSettings(
       workspaceId: string,
       body: UpdateWorkspaceSettingsBody,
-    ): Promise<{ ok: boolean; workspace_id: string; title: string }> {
+    ): Promise<{ ok: boolean; workspace_id: string; title: string; revision: number }> {
       return request("PUT", `/v1/workspaces/${encodeURIComponent(workspaceId)}/settings`, body);
     },
 
@@ -398,7 +488,7 @@ export function createBackendClient(opts: BackendClientOptions) {
     trashItem(
       workspaceId: string,
       itemId: string,
-      body: PasswordBody,
+      body: RevisionMutationBody,
     ): Promise<{ ok: boolean; workspace_id: string; item: WorkspaceItem }> {
       return request(
         "PUT",
@@ -410,7 +500,7 @@ export function createBackendClient(opts: BackendClientOptions) {
     restoreItem(
       workspaceId: string,
       itemId: string,
-      body: PasswordBody,
+      body: RevisionMutationBody,
     ): Promise<{ ok: boolean; workspace_id: string; item: WorkspaceItem }> {
       return request(
         "PUT",
@@ -422,7 +512,7 @@ export function createBackendClient(opts: BackendClientOptions) {
     hardDeleteItem(
       workspaceId: string,
       itemId: string,
-      body: PasswordBody,
+      body: RevisionMutationBody,
     ): Promise<{ ok: boolean; workspace_id: string; item: WorkspaceItem }> {
       return request(
         "POST",
@@ -489,7 +579,7 @@ export function createBackendClient(opts: BackendClientOptions) {
 
     updateProfile(
       workspaceId: string,
-      body: { nickname: string; password?: string | null },
+      body: { nickname: string; password: string; expected_revision: number },
     ): Promise<{ ok: boolean; profile: ProfileBody }> {
       return request("PUT", `/v1/workspaces/${encodeURIComponent(workspaceId)}/profile`, body);
     },

@@ -78,11 +78,12 @@ test("vditor binding syncs markdown both ways without dropping the local snapsho
   collaborator.destroy();
 });
 
-test("vditor binding does not reset the editor during IME composition", async () => {
+test("vditor binding merges remote text received during IME composition", async () => {
   const bindingMod = await importTsModule("src/features/collaboration/yjs-vditor-binding.ts");
   const collabMod = await importTsModule("src/features/collaboration/yjs-markdown.ts");
   let composing = true;
   const editor = createFakeEditorSurface("draft", () => composing);
+  editor.getCompositionBaseMarkdown = () => "draft";
   const collaborator = collabMod.createMarkdownCollaborator({ initialMarkdown: "draft" });
   const binding = bindingMod.createVditorMarkdownBinding(editor, collaborator);
 
@@ -92,8 +93,8 @@ test("vditor binding does not reset the editor during IME composition", async ()
 
   composing = false;
   editor.emitInput("draft local");
-  assert.equal(collaborator.getMarkdown(), "draft local");
-  assert.equal(editor.getMarkdown(), "draft local");
+  assert.equal(collaborator.getMarkdown(), "remote draft local");
+  assert.equal(editor.getMarkdown(), "remote draft local");
 
   binding.destroy();
   collaborator.destroy();

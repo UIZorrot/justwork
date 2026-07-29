@@ -78,6 +78,42 @@
               placeholder="Workspace title (optional)"
             />
           </div>
+          <div class="workspace-plan-options" role="radiogroup" aria-label="Workspace plan" data-i18n-aria-label="gate.plan.ariaLabel">
+            <label class="workspace-plan-card is-selected" data-plan-card="free">
+              <input id="workspace-plan-free" type="radio" name="workspace-plan" value="free" checked />
+              <span class="workspace-plan-copy">
+                <strong data-i18n="gate.plan.freeTitle">Free workspace</strong>
+                <span data-i18n="gate.plan.freeDesc">Standard storage · 200 history records · up to 5 workspaces</span>
+              </span>
+            </label>
+            <label id="workspace-plan-paid-card" class="workspace-plan-card" data-plan-card="paid">
+              <input id="workspace-plan-paid" type="radio" name="workspace-plan" value="paid" />
+              <span class="workspace-plan-copy">
+                <span class="workspace-plan-heading">
+                  <strong data-i18n="gate.plan.paidTitle">Paid workspace</strong>
+                  <span id="workspace-plan-paid-price" class="workspace-plan-price">Stripe Checkout</span>
+                </span>
+                <span data-i18n="gate.plan.paidDesc">4× storage · 1000 history records · unlimited paid workspaces · custom PostgreSQL optional</span>
+              </span>
+            </label>
+          </div>
+          <div id="paid-workspace-extras" class="paid-workspace-extras" hidden>
+            <label class="paid-workspace-db-label" for="paid-workspace-database-url" data-i18n="gate.plan.databaseLabel">
+              Custom PostgreSQL database (optional)
+            </label>
+            <input
+              id="paid-workspace-database-url"
+              class="gate-input"
+              type="password"
+              autocomplete="off"
+              spellcheck="false"
+              data-i18n-placeholder="gate.plan.databasePlaceholder"
+              placeholder="postgresql://user:password@host/database"
+            />
+            <p id="paid-workspace-database-hint" class="gate-check-hint" data-i18n="gate.plan.databaseHint">
+              Optional. Leave blank to use JustWork storage; if provided, it is sent only after payment and encrypted by the backend routing key.
+            </p>
+          </div>
           <input
             id="setup-password-input"
             class="gate-input"

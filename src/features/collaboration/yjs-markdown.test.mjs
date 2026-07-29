@@ -45,29 +45,15 @@ test("markdown collaborator round-trips plain markdown text", async () => {
   replica.destroy();
 });
 
-test("markdown collaborator adopts a disjoint bootstrap snapshot without duplicating text", async () => {
+test("markdown collaborator applies the authoritative bootstrap snapshot without rewriting history", async () => {
   const mod = await importTsModule("src/features/collaboration/yjs-markdown.ts");
   const remote = mod.createMarkdownCollaborator({ initialMarkdown: "hello" });
-  const local = mod.createMarkdownCollaborator({ initialMarkdown: "hello" });
+  const local = mod.createMarkdownCollaborator();
 
   const changed = local.applyRemoteUpdate(remote.encodeUpdate());
 
   assert.equal(changed, true);
   assert.equal(local.getMarkdown(), "hello");
-
-  remote.destroy();
-  local.destroy();
-});
-
-test("markdown collaborator preserves unsaved text while rebasing a disjoint bootstrap snapshot", async () => {
-  const mod = await importTsModule("src/features/collaboration/yjs-markdown.ts");
-  const remote = mod.createMarkdownCollaborator({ initialMarkdown: "hello" });
-  const local = mod.createMarkdownCollaborator({ initialMarkdown: "hello" });
-  local.applyLocalMarkdown("hello!");
-
-  local.applyRemoteUpdate(remote.encodeUpdate(), { preserveLocalMarkdown: true });
-
-  assert.equal(local.getMarkdown(), "hello!");
 
   remote.destroy();
   local.destroy();

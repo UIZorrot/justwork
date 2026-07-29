@@ -1,7 +1,7 @@
 {
   "name": "justwork-doc-shell",
   "private": true,
-  "version": "0.0.5",
+  "version": "0.0.6",
   "type": "module",
   "workspaces": [
     "packages/*"
@@ -28,6 +28,7 @@
     "@justwork/workspace-runtime": "0.0.1",
     "@univerjs/preset-sheets-core": "^0.22.0",
     "@univerjs/presets": "^0.22.0",
+    "diff-match-patch": "^1.0.5",
     "react": "^19.2.6",
     "react-dom": "^19.2.6",
     "rxjs": "^7.8.2",

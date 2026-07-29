@@ -24,6 +24,10 @@ class WorkspaceRecord(BaseModel):
     owner_nickname: str = ""
     encrypted_payload: str = Field(min_length=1)
     updated_at: str = Field(min_length=1)
+    plan: Literal["free", "paid"] = "free"
+    billing_status: str = "free"
+    stripe_customer_id: str | None = None
+    stripe_subscription_id: str | None = None
 
 
 class WorkspaceUpsertRequest(BaseModel):
@@ -63,19 +67,86 @@ class WorkspaceSummary(BaseModel):
     owner_display_name: str
     encrypted_payload: str
     updated_at: str
+    plan: Literal["free", "paid"] = "free"
+    billing_status: str = "free"
 
 
 class WorkspaceCreateResponse(BaseModel):
     ok: bool
     workspace: WorkspaceSummary
     workspace_title: str
+    workspace_revision: int = 0
     active_item_id: str
     items: list["WorkspaceTreeItem"]
+
+
+class PaidWorkspaceBillingConfigResponse(BaseModel):
+    ok: bool = True
+    enabled: bool
+    checkout_mode: Literal["payment", "subscription"]
+    price_label: str
+    storage_multiplier: int = 4
+    history_limit: int = 1000
+    custom_database_enabled: bool
+
+
+class PaidWorkspaceCheckoutRequest(BaseModel):
+    owner_user_id: str = Field(min_length=1)
+
+
+class PaidWorkspaceCheckoutResponse(BaseModel):
+    ok: bool = True
+    checkout_session_id: str
+    checkout_url: str
+
+
+class PaidWorkspaceCheckoutStatusResponse(BaseModel):
+    ok: bool = True
+    checkout_session_id: str
+    status: str
+    paid: bool
+
+
+class PaidWorkspaceCompleteRequest(BaseModel):
+    checkout_session_id: str = Field(min_length=1)
+    owner_user_id: str = Field(min_length=1)
+    nickname: str = ""
+    password: str = Field(min_length=1)
+    title: str = "Untitled"
+    custom_database_url: str | None = Field(default=None, max_length=2048)
+
+
+class PaidCheckoutRecord(BaseModel):
+    purchase_token: str
+    owner_user_id: str
+    checkout_session_id: str
+    status: str
+    stripe_customer_id: str | None = None
+    stripe_subscription_id: str | None = None
+    consumed_workspace_id: str | None = None
+    created_at: str
+    updated_at: str
+
+
+class WorkspaceRouteRecord(BaseModel):
+    workspace_id: str
+    owner_user_id: str
+    plan: Literal["paid"] = "paid"
+    billing_status: str
+    stripe_customer_id: str | None = None
+    stripe_subscription_id: str | None = None
+    database_url_ciphertext: str | None = None
+    updated_at: str
 
 
 class WorkspacePasswordRequest(WriteSigningEnvelope):
     password: str = Field(min_length=1)
     expected_revision: int | None = None
+
+
+class WorkspaceRevisionMutationRequest(WriteSigningEnvelope):
+    password: str = Field(min_length=1)
+    expected_revision: int
 
 
 class WorkspaceRelayJoinRequest(BaseModel):
@@ -91,6 +162,7 @@ class WorkspaceTreeItem(BaseModel):
     title: str
     kind: Literal["page", "folder", "table", "board"]
     parent_id: str | None = None
+    order_key: float = 0
     pinned: bool = False
     in_trash: bool = False
     revision: int = 0
@@ -101,6 +173,7 @@ class WorkspaceTreeResponse(BaseModel):
     ok: bool
     workspace_id: str
     workspace_title: str
+    workspace_revision: int = 0
     active_item_id: str
     items: list[WorkspaceTreeItem]
 
@@ -112,6 +185,7 @@ class WorkspaceItem(BaseModel):
     content: dict[str, Any] | None = None
     kind: Literal["page", "folder", "table", "board"]
     parent_id: str | None = None
+    order_key: float = 0
     pinned: bool = False
     in_trash: bool = False
     revision: int = 0
@@ -146,7 +220,8 @@ class WorkspaceItemUpdateRequest(WriteSigningEnvelope):
     title: str | None = None
     markdown: str | None = None
     content: dict[str, Any] | None = None
-    expected_revision: int | None = None
+    collaborative_update: str | None = None
+    expected_revision: int
 
 
 class WorkspaceItemCreateRequest(WriteSigningEnvelope):
@@ -160,29 +235,33 @@ class WorkspaceItemCreateRequest(WriteSigningEnvelope):
 class WorkspaceItemPinRequest(WriteSigningEnvelope):
     password: str = Field(min_length=1)
     pinned: bool
-    expected_revision: int | None = None
+    expected_revision: int
 
 
 class WorkspaceSettingsUpdateRequest(WriteSigningEnvelope):
     password: str = Field(min_length=1)
     title: str = ""
+    expected_revision: int
 
 
 class WorkspaceSettingsResponse(BaseModel):
     ok: bool
     workspace_id: str
     title: str
+    revision: int
 
 
 class ProfileUpdateRequest(WriteSigningEnvelope):
-    password: str | None = None
+    password: str = Field(min_length=1)
     nickname: str = ""
+    expected_revision: int
 
 
 class ProfileBody(BaseModel):
     user_id: str
     nickname: str
     display_name: str
+    revision: int = 0
 
 
 class ProfileResponse(BaseModel):
@@ -196,6 +275,7 @@ class WorkspaceMemberBody(BaseModel):
     display_name: str
     joined_at: str
     updated_at: str
+    revision: int = 0
     is_owner: bool = False
 
 
@@ -231,12 +311,32 @@ class WorkspaceCollabJoinResponse(BaseModel):
     item_id: str
     ticket: str
     expires_at: str
+    bootstrap_owner: bool = False
+
+
+class WorkspaceRevisionEvent(BaseModel):
+    id: str
+    operation: str
+    item_id: str
+    title: str
+    before: dict[str, Any]
+    after: dict[str, Any]
+    actor_user_id: str | None = None
+    mutation_id: str | None = None
+    timestamp: str
+
+
+class WorkspaceRevisionHistoryResponse(BaseModel):
+    ok: bool
+    workspace_id: str
+    revisions: list[WorkspaceRevisionEvent]
 
 
 class WorkspaceItemMoveRequest(WriteSigningEnvelope):
     password: str = Field(min_length=1)
     parent_id: str | None = None
-    expected_revision: int | None = None
+    order_key: float = 0
+    expected_revision: int
 
 
 class WorkspaceSearchRequest(WriteSigningEnvelope):
@@ -277,7 +377,7 @@ class WorkspacePatchRequest(WriteSigningEnvelope):
     find: str = Field(min_length=1)
     replace: str = ""
     dry_run: bool = True
-    expected_revision: int | None = None
+    expected_revision: int
 
 
 class WorkspacePatchResponse(BaseModel):

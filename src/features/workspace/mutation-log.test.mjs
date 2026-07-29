@@ -109,7 +109,7 @@ test("workspace mutation log lets destructive mutations supersede pending edits 
   assert.deepEqual(next.map((entry) => entry.kind), ["trash"]);
 });
 
-test("workspace mutation log replays local mutations over remote refreshes and drops stale edits", async () => {
+test("workspace mutation log keeps pending local edits over newer remote refreshes", async () => {
   const mod = await loadTranspiledModule("src/features/workspace/mutation-log.ts");
 
   const applied = mod.applyWorkspaceMutationLog(baseState(), [
@@ -128,7 +128,7 @@ test("workspace mutation log replays local mutations over remote refreshes and d
   assert.equal(applied.state.docs.find((entry) => entry.id === "page-a").title, "Local");
   assert.equal(applied.mutations.length, 1);
 
-  const dropped = mod.applyWorkspaceMutationLog(baseState([
+  const retained = mod.applyWorkspaceMutationLog(baseState([
     baseDoc({
       revision: 4,
       updatedAt: "2026-07-05T00:03:00.000Z",
@@ -136,27 +136,79 @@ test("workspace mutation log replays local mutations over remote refreshes and d
       markdown: "remote newer",
     }),
   ]), applied.mutations);
-  assert.equal(dropped.state.docs.find((entry) => entry.id === "page-a").title, "Remote newer");
-  assert.equal(dropped.mutations.length, 0);
+  assert.equal(retained.state.docs.find((entry) => entry.id === "page-a").title, "Local");
+  assert.equal(retained.state.docs.find((entry) => entry.id === "page-a").markdown, "local");
+  assert.equal(retained.state.docs.find((entry) => entry.id === "page-a").revision, 3);
+  assert.equal(retained.mutations.length, 1);
 });
 
-test("workspace mutation conflict decision is centralized and timestamp based for now", async () => {
+test("workspace mutation log keeps move and pin operations over stale tree refreshes until acknowledged", async () => {
   const mod = await loadTranspiledModule("src/features/workspace/mutation-log.ts");
+  const mutations = [
+    {
+      id: "move-1",
+      workspaceId: "ws-1",
+      itemId: "page-a",
+      kind: "move",
+      patch: { parentId: "folder-a" },
+      baseRevision: 3,
+      clientSeq: 1,
+      createdAt: "2026-07-05T00:01:00.000Z",
+      status: "pending",
+    },
+    {
+      id: "pin-1",
+      workspaceId: "ws-1",
+      itemId: "page-a",
+      kind: "pin",
+      patch: { pinned: true },
+      baseRevision: 3,
+      clientSeq: 2,
+      createdAt: "2026-07-05T00:01:01.000Z",
+      status: "pending",
+    },
+  ];
 
-  assert.equal(
-    mod.resolveWorkspaceMutationConflict(
-      { createdAt: "2026-07-05T00:02:00.000Z" },
-      { updatedAt: "2026-07-05T00:01:00.000Z" },
-    ).action,
-    "retry-local",
-  );
-  assert.equal(
-    mod.resolveWorkspaceMutationConflict(
-      { createdAt: "2026-07-05T00:01:00.000Z" },
-      { updatedAt: "2026-07-05T00:02:00.000Z" },
-    ).action,
-    "accept-remote",
-  );
+  const replayed = mod.applyWorkspaceMutationLog(baseState(), mutations);
+  const local = replayed.state.docs.find((entry) => entry.id === "page-a");
+  assert.equal(local.parentId, "folder-a");
+  assert.equal(local.pinned, true);
+  assert.equal(replayed.mutations.length, 2);
+
+  const acknowledged = mod.applyWorkspaceMutationLog(baseState([
+    baseDoc({ parentId: "folder-a", pinned: true, revision: 4 }),
+  ]), replayed.mutations);
+  assert.equal(acknowledged.mutations.length, 0);
+});
+
+test("a newer structural operation replaces an older pending operation with its own mutation id", async () => {
+  const mod = await loadTranspiledModule("src/features/workspace/mutation-log.ts");
+  const first = mod.enqueueWorkspaceMutation([], {
+    id: "move-1",
+    workspaceId: "ws-1",
+    itemId: "page-a",
+    kind: "move",
+    patch: { parentId: "folder-a" },
+    baseRevision: 3,
+    clientSeq: 1,
+    createdAt: "2026-07-05T00:01:00.000Z",
+    status: "pending",
+  });
+  const second = mod.enqueueWorkspaceMutation(first, {
+    id: "move-2",
+    workspaceId: "ws-1",
+    itemId: "page-a",
+    kind: "move",
+    patch: { parentId: "folder-b" },
+    baseRevision: 3,
+    clientSeq: 2,
+    createdAt: "2026-07-05T00:01:01.000Z",
+    status: "pending",
+  });
+
+  assert.equal(second.length, 1);
+  assert.equal(second[0].id, "move-2");
+  assert.equal(second[0].patch.parentId, "folder-b");
 });
 
 test("workspace mutation log persists through one explicit storage queue", async () => {
@@ -192,4 +244,24 @@ test("workspace mutation log persists through one explicit storage queue", async
 
   await mod.removeStoredWorkspaceMutation(storage, "m1");
   assert.deepEqual(await mod.loadWorkspaceMutationLog(storage, "ws-1"), []);
+});
+
+test("workspace mutation log does not lose concurrent writes", async () => {
+  const mod = await loadTranspiledModule("src/features/workspace/mutation-log.ts");
+  const storage = createStorage();
+  await Promise.all(Array.from({ length: 12 }, (_, index) => mod.enqueueStoredWorkspaceMutation(storage, {
+    id: `m${index}`,
+    workspaceId: "ws-1",
+    itemId: `page-${index}`,
+    kind: "edit",
+    patch: { title: `Title ${index}` },
+    baseRevision: 1,
+    clientSeq: 1,
+    createdAt: `2026-07-05T00:01:${String(index).padStart(2, "0")}.000Z`,
+    status: "pending",
+  })));
+
+  const stored = await mod.loadWorkspaceMutationLog(storage, "ws-1");
+  assert.equal(stored.length, 12);
+  assert.equal(new Set(stored.map((entry) => entry.clientSeq)).size, 12);
 });

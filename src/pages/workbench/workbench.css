@@ -377,6 +377,84 @@ body {
   gap: 8px;
   margin-bottom: 12px;
 }
+.workspace-plan-options {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin: 0 0 12px;
+}
+.workspace-plan-card {
+  position: relative;
+  display: flex;
+  min-height: 92px;
+  padding: 11px;
+  border: 1px solid #d8d8d4;
+  border-radius: 9px;
+  background: #fff;
+  cursor: pointer;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease, background 0.15s ease;
+}
+.workspace-plan-card:hover {
+  border-color: #a7a7a1;
+}
+.workspace-plan-card.is-selected {
+  border-color: #202020;
+  background: #fafaf8;
+  box-shadow: 0 0 0 1px #202020;
+}
+.workspace-plan-card.is-disabled {
+  cursor: not-allowed;
+  opacity: 0.52;
+}
+.workspace-plan-card > input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+.workspace-plan-copy {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 7px;
+  color: #73736f;
+  font-size: 11px;
+  line-height: 1.4;
+}
+.workspace-plan-copy strong {
+  color: #202020;
+  font-size: 13px;
+}
+.workspace-plan-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+.workspace-plan-price {
+  padding: 2px 5px;
+  border-radius: 999px;
+  background: #ecece8;
+  color: #555;
+  font-size: 9px;
+  white-space: nowrap;
+}
+.paid-workspace-extras {
+  margin: 0 0 12px;
+  padding: 10px;
+  border: 1px solid #e1e1dd;
+  border-radius: 9px;
+  background: #fafaf8;
+}
+.paid-workspace-extras[hidden] {
+  display: none !important;
+}
+.paid-workspace-db-label {
+  display: block;
+  margin-bottom: 7px;
+  color: #444;
+  font-size: 12px;
+  font-weight: 600;
+}
 .gate-hint {
   margin: 0 0 8px !important;
   font-size: 12px !important;

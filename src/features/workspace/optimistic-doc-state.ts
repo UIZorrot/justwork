@@ -15,11 +15,13 @@ export function applyOptimisticMove(
   state: WorkspaceDocsState,
   itemId: string,
   parentId: string | null,
+  orderKey: number,
   updatedAt: string,
 ): WorkspaceDocsState {
   return updateDocInState(state, itemId, (doc) => ({
     ...doc,
     parentId,
+    orderKey,
     revision: doc.revision,
     updatedAt,
   }));

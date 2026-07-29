@@ -1,12 +1,22 @@
 import { STORAGE_KEYS, type WorkspaceDoc, type WorkspaceDocContent, type WorkspaceDocsState } from "../../shared/storage-keys";
 
-export type WorkspaceMutationKind = "create" | "edit" | "trash" | "restore" | "hard-delete";
+export type WorkspaceMutationKind =
+  | "create"
+  | "edit"
+  | "move"
+  | "pin"
+  | "trash"
+  | "restore"
+  | "hard-delete";
 export type WorkspaceMutationStatus = "pending" | "flushing" | "conflicted" | "failed";
 
 export type WorkspaceMutationPatch = {
   title?: string;
   markdown?: string;
   content?: WorkspaceDocContent | null;
+  parentId?: string | null;
+  orderKey?: number;
+  pinned?: boolean;
 };
 
 export type WorkspaceMutation = {
@@ -17,6 +27,7 @@ export type WorkspaceMutation = {
   status: WorkspaceMutationStatus;
   doc?: WorkspaceDoc;
   patch?: WorkspaceMutationPatch;
+  base?: WorkspaceMutationPatch;
   baseRevision?: number;
   clientSeq: number;
   createdAt: string;
@@ -32,10 +43,6 @@ export type WorkspaceMutationLogStorage = {
   get(keys?: string | string[] | Record<string, unknown> | null): Promise<Record<string, unknown>>;
   set(items: Record<string, unknown>): Promise<void>;
 };
-
-export type WorkspaceMutationConflictDecision =
-  | { action: "retry-local" }
-  | { action: "accept-remote" };
 
 function timestampMs(value: string | undefined): number {
   if (!value) return 0;
@@ -64,12 +71,6 @@ function collectAffectedIds(docs: WorkspaceDoc[], itemId: string): Set<string> {
   return affected;
 }
 
-function isRemoteNewerThanEdit(doc: WorkspaceDoc, mutation: WorkspaceMutation): boolean {
-  if (typeof mutation.baseRevision !== "number") return false;
-  if (doc.revision <= mutation.baseRevision) return false;
-  return timestampMs(doc.updatedAt) > timestampMs(mutation.createdAt);
-}
-
 function isDeleteMutationConfirmed(doc: WorkspaceDoc | undefined, mutation: WorkspaceMutation): boolean {
   if (mutation.kind === "trash") return !doc || doc.inTrash;
   if (mutation.kind === "restore") return Boolean(doc && !doc.inTrash);
@@ -77,12 +78,19 @@ function isDeleteMutationConfirmed(doc: WorkspaceDoc | undefined, mutation: Work
   return false;
 }
 
-function replayEdit(
+function isPatchConfirmed(doc: WorkspaceDoc, mutation: WorkspaceMutation): boolean {
+  const patch = mutation.patch ?? {};
+  if (mutation.kind === "move") return patch.parentId === doc.parentId;
+  if (mutation.kind === "pin") return patch.pinned === doc.pinned;
+  return false;
+}
+
+function replayPatch(
   state: WorkspaceDocsState,
   mutation: WorkspaceMutation,
 ): WorkspaceMutationReplayResult {
   const current = state.docs.find((doc) => doc.id === mutation.itemId);
-  if (!current || isRemoteNewerThanEdit(current, mutation)) {
+  if (!current || isPatchConfirmed(current, mutation)) {
     return { state, mutations: [] };
   }
   const patch = mutation.patch ?? {};
@@ -91,6 +99,12 @@ function replayEdit(
     title: patch.title ?? current.title,
     markdown: patch.markdown ?? current.markdown,
     content: patch.content ?? current.content ?? null,
+    parentId: patch.parentId === undefined ? current.parentId : patch.parentId,
+    orderKey: patch.orderKey ?? current.orderKey,
+    pinned: patch.pinned ?? current.pinned,
+    // Keep the revision the pending operation was authored against. Adopting
+    // the server's newer revision here would bypass conflict detection later.
+    revision: mutation.baseRevision === undefined ? current.revision : mutation.baseRevision,
     updatedAt: timestampMs(mutation.createdAt) >= timestampMs(current.updatedAt)
       ? mutation.createdAt
       : current.updatedAt,
@@ -166,11 +180,11 @@ export function enqueueWorkspaceMutation(
   current: WorkspaceMutation[],
   next: WorkspaceMutation,
 ): WorkspaceMutation[] {
-  if (next.kind === "edit") {
+  if (next.kind === "edit" || next.kind === "move" || next.kind === "pin") {
     const existing = current.find((entry) => (
       entry.workspaceId === next.workspaceId &&
       entry.itemId === next.itemId &&
-      entry.kind === "edit"
+      entry.kind === next.kind
     ));
     if (!existing) return [...current, next];
     return current.map((entry) => (
@@ -182,6 +196,7 @@ export function enqueueWorkspaceMutation(
               ...(entry.patch ?? {}),
               ...(next.patch ?? {}),
             },
+            id: next.kind === "edit" ? entry.id : next.id,
             clientSeq: next.clientSeq,
             createdAt: next.createdAt,
             lastError: next.lastError,
@@ -216,6 +231,8 @@ function isWorkspaceMutation(value: unknown): value is WorkspaceMutation {
     (
       value.kind === "create" ||
       value.kind === "edit" ||
+      value.kind === "move" ||
+      value.kind === "pin" ||
       value.kind === "trash" ||
       value.kind === "restore" ||
       value.kind === "hard-delete"
@@ -238,6 +255,26 @@ async function saveWorkspaceMutationLog(
   await storage.set({ [STORAGE_KEYS.WORKSPACE_MUTATION_LOG]: mutations });
 }
 
+const mutationLogWriteQueues = new WeakMap<object, Promise<void>>();
+
+async function mutateStoredWorkspaceLog(
+  storage: WorkspaceMutationLogStorage,
+  mutate: (current: WorkspaceMutation[]) => WorkspaceMutation[],
+): Promise<WorkspaceMutation[]> {
+  let result: WorkspaceMutation[] = [];
+  const previous = mutationLogWriteQueues.get(storage) ?? Promise.resolve();
+  const current = previous
+    .catch(() => undefined)
+    .then(async () => {
+      const stored = await loadWorkspaceMutationLog(storage);
+      result = mutate(stored);
+      await saveWorkspaceMutationLog(storage, result);
+    });
+  mutationLogWriteQueues.set(storage, current.catch(() => undefined));
+  await current;
+  return result;
+}
+
 export async function loadWorkspaceMutationLog(
   storage: WorkspaceMutationLogStorage,
   workspaceId?: string,
@@ -252,30 +289,27 @@ export async function enqueueStoredWorkspaceMutation(
   storage: WorkspaceMutationLogStorage,
   mutation: WorkspaceMutation,
 ): Promise<WorkspaceMutation[]> {
-  const current = await loadWorkspaceMutationLog(storage);
-  const next = enqueueWorkspaceMutation(current, mutation);
-  await saveWorkspaceMutationLog(storage, next);
-  return next;
+  return mutateStoredWorkspaceLog(storage, (current) => {
+    const maxSeq = current.reduce((max, entry) => Math.max(max, entry.clientSeq), 0);
+    const normalized = current.some((entry) => entry.id !== mutation.id && entry.clientSeq === mutation.clientSeq)
+      ? { ...mutation, clientSeq: maxSeq + 1 }
+      : mutation;
+    return enqueueWorkspaceMutation(current, normalized);
+  });
 }
 
 export async function removeStoredWorkspaceMutation(
   storage: WorkspaceMutationLogStorage,
   mutationId: string,
 ): Promise<WorkspaceMutation[]> {
-  const current = await loadWorkspaceMutationLog(storage);
-  const next = current.filter((entry) => entry.id !== mutationId);
-  await saveWorkspaceMutationLog(storage, next);
-  return next;
+  return mutateStoredWorkspaceLog(storage, (current) => current.filter((entry) => entry.id !== mutationId));
 }
 
 export async function clearStoredWorkspaceMutationsForWorkspace(
   storage: WorkspaceMutationLogStorage,
   workspaceId: string,
 ): Promise<WorkspaceMutation[]> {
-  const current = await loadWorkspaceMutationLog(storage);
-  const next = current.filter((entry) => entry.workspaceId !== workspaceId);
-  await saveWorkspaceMutationLog(storage, next);
-  return next;
+  return mutateStoredWorkspaceLog(storage, (current) => current.filter((entry) => entry.workspaceId !== workspaceId));
 }
 
 export async function replaceStoredWorkspaceMutationLogForWorkspace(
@@ -283,13 +317,10 @@ export async function replaceStoredWorkspaceMutationLogForWorkspace(
   workspaceId: string,
   workspaceMutations: WorkspaceMutation[],
 ): Promise<WorkspaceMutation[]> {
-  const current = await loadWorkspaceMutationLog(storage);
-  const next = [
+  return mutateStoredWorkspaceLog(storage, (current) => [
     ...current.filter((entry) => entry.workspaceId !== workspaceId),
     ...workspaceMutations.filter((entry) => entry.workspaceId === workspaceId),
-  ];
-  await saveWorkspaceMutationLog(storage, next);
-  return next;
+  ]);
 }
 
 export function applyWorkspaceMutationLog(
@@ -304,8 +335,8 @@ export function applyWorkspaceMutationLog(
   for (const mutation of sortMutations(mutations)) {
     const result = mutation.kind === "create"
       ? replayCreate(nextState, mutation)
-      : mutation.kind === "edit"
-        ? replayEdit(nextState, mutation)
+      : mutation.kind === "edit" || mutation.kind === "move" || mutation.kind === "pin"
+        ? replayPatch(nextState, mutation)
         : replayDelete(nextState, mutation);
     nextState = result.state;
     retained.push(...result.mutations);
@@ -314,13 +345,4 @@ export function applyWorkspaceMutationLog(
     state: nextState,
     mutations: retained,
   };
-}
-
-export function resolveWorkspaceMutationConflict(
-  mutation: Pick<WorkspaceMutation, "createdAt">,
-  remote: Pick<WorkspaceDoc, "updatedAt">,
-): WorkspaceMutationConflictDecision {
-  return timestampMs(mutation.createdAt) >= timestampMs(remote.updatedAt)
-    ? { action: "retry-local" }
-    : { action: "accept-remote" };
 }

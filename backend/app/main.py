@@ -6,6 +6,8 @@ import hmac
 import hashlib
 import secrets
 from pathlib import Path
+from threading import Lock
+from anyio import from_thread
 
 try:
     from dotenv import load_dotenv
@@ -22,6 +24,12 @@ from fastapi.responses import JSONResponse, HTMLResponse, PlainTextResponse, Res
 from fastapi.middleware.cors import CORSMiddleware
 
 from .db_gateway import DatabaseGateway, DatabaseUnavailableError
+from .billing import BillingConfigurationError, BillingProviderError, StripeBillingService
+from .database_routing import (
+    DatabaseRoutingConfigurationError,
+    encrypt_database_url,
+    validate_custom_database_url,
+)
 from .collab_relay import (
     get_collaborative_relay_hub as get_collab_relay_hub,
     reset_collaborative_relay_for_tests as reset_collaborative_relay_hub_for_tests,
@@ -32,6 +40,12 @@ from .models import (
     ErrorResponse,
     HealthResponse,
     ProfileBody,
+    PaidCheckoutRecord,
+    PaidWorkspaceBillingConfigResponse,
+    PaidWorkspaceCheckoutRequest,
+    PaidWorkspaceCheckoutResponse,
+    PaidWorkspaceCheckoutStatusResponse,
+    PaidWorkspaceCompleteRequest,
     WorkspaceMemberBody,
     WorkspaceMembersResponse,
     ProfileResponse,
@@ -42,6 +56,7 @@ from .models import (
     WorkspaceCollabJoinResponse,
     WorkspaceRelayJoinRequest,
     WorkspaceRelayJoinResponse,
+    WorkspaceRevisionHistoryResponse,
     WorkspaceCreateRequest,
     WorkspaceCreateResponse,
     WorkspaceGetResponse,
@@ -57,6 +72,7 @@ from .models import (
     WorkspacePatchRequest,
     WorkspacePatchResponse,
     WorkspacePasswordRequest,
+    WorkspaceRevisionMutationRequest,
     WorkspaceRecord,
     WorkspaceSearchRequest,
     WorkspaceSearchResponse,
@@ -65,11 +81,13 @@ from .models import (
     WorkspaceSummary,
     WorkspaceTreeResponse,
     WorkspaceUpsertRequest,
+    WorkspaceRouteRecord,
 )
 from .image_assets import get_image_asset_archive, reset_image_asset_archive_for_tests as reset_image_asset_archive_hub_for_tests
 from .image_relay import get_image_relay_hub, parse_relay_payload, reset_image_relay_for_tests as reset_image_relay_hub_for_tests
 from .write_signing import verify_signed_write_body
 from .workspace_crypto import InvalidWorkspacePassword, decrypt_workspace_payload, encrypt_workspace_payload
+from .revision_history import append_workspace_revision, list_workspace_revisions
 from .workspace_runtime import (
     create_doc,
     default_workspace_title,
@@ -108,10 +126,12 @@ app.add_middleware(
 )
 
 _gateway: DatabaseGateway | None = None
+_billing_service: StripeBillingService | None = None
+_paid_completion_lock = Lock()
 _backend_token = os.getenv("JUSTWORK_BACKEND_TOKEN", "").strip()
 
 QUOTA_PLAN_FREE = "free"
-QUOTA_PLAN_PRO = "pro"
+QUOTA_PLAN_PAID = "paid"
 MAX_WORKSPACES_PER_OWNER = 5
 AGENT_SKILL_PATH = Path(__file__).resolve().parent.parent / "agent" / "SKILL.md"
 SYNC_MUTATION_LOG_KEY = "__syncMutations"
@@ -128,20 +148,30 @@ def _int_env(name: str, default: int) -> int:
         return default
 
 
-def _quota_plan_for_workspace(_: WorkspaceRecord | None = None) -> str:
+def _quota_plan_for_workspace(record: WorkspaceRecord | None = None) -> str:
+    if record is not None and record.plan == QUOTA_PLAN_PAID and record.billing_status in {
+        "paid",
+        "active",
+        "trialing",
+    }:
+        return QUOTA_PLAN_PAID
     raw = os.getenv("JUSTWORK_QUOTA_PLAN", QUOTA_PLAN_FREE).strip().lower()
-    return QUOTA_PLAN_PRO if raw == QUOTA_PLAN_PRO else QUOTA_PLAN_FREE
+    return QUOTA_PLAN_PAID if raw in {"paid", "pro"} else QUOTA_PLAN_FREE
 
 
 def _quota_limits(plan: str) -> dict[str, int]:
-    if plan == QUOTA_PLAN_PRO:
+    free_workspace_bytes = max(1024, _int_env("JUSTWORK_QUOTA_WORKSPACE_MAX_BYTES_FREE", 41_943_040))
+    if plan == QUOTA_PLAN_PAID:
         return {
-            "workspace_max_bytes": max(1024, _int_env("JUSTWORK_QUOTA_WORKSPACE_MAX_BYTES_PRO", 209_715_200)),
+            "workspace_max_bytes": max(
+                free_workspace_bytes * 4,
+                _int_env("JUSTWORK_QUOTA_WORKSPACE_MAX_BYTES_PAID", free_workspace_bytes * 4),
+            ),
             "page_max_count": max(1, _int_env("JUSTWORK_QUOTA_PAGE_MAX_COUNT_PRO", 1_500)),
             "folder_max_count": max(1, _int_env("JUSTWORK_QUOTA_FOLDER_MAX_COUNT_PRO", 500)),
         }
     return {
-        "workspace_max_bytes": max(1024, _int_env("JUSTWORK_QUOTA_WORKSPACE_MAX_BYTES_FREE", 41_943_040)),
+        "workspace_max_bytes": free_workspace_bytes,
         "page_max_count": max(1, _int_env("JUSTWORK_QUOTA_PAGE_MAX_COUNT_FREE", 300)),
         "folder_max_count": max(1, _int_env("JUSTWORK_QUOTA_FOLDER_MAX_COUNT_FREE", 100)),
     }
@@ -248,9 +278,17 @@ def get_gateway() -> DatabaseGateway:
     return _gateway
 
 
+def get_billing_service() -> StripeBillingService:
+    global _billing_service
+    if _billing_service is None:
+        _billing_service = StripeBillingService()
+    return _billing_service
+
+
 def reset_gateway_for_tests() -> None:
-    global _gateway
+    global _gateway, _billing_service
     _gateway = None
+    _billing_service = None
 
 
 def reset_image_relay_for_tests() -> None:
@@ -297,6 +335,17 @@ async def _send_asset_to_websocket(websocket: WebSocket, meta: dict, payload: by
 async def _send_collaborative_updates(websocket: WebSocket, updates: list[bytes]) -> None:
     for update in updates:
         await websocket.send_bytes(update)
+
+
+def _broadcast_collaborative_update_from_http(workspace_id: str, item_id: str, update: bytes) -> None:
+    """Publish a committed REST/Agent edit to currently connected page clients."""
+    try:
+        from_thread.run(get_collab_relay_hub().broadcast, workspace_id, item_id, None, update)
+    except RuntimeError:
+        # Endpoint handlers normally run in an AnyIO worker thread. Keeping this
+        # fallback makes direct function calls in tests/tools non-fatal after the
+        # durable workspace and room snapshots have already committed.
+        pass
 
 
 def require_backend_token(authorization: str | None = Header(default=None)) -> None:
@@ -361,6 +410,8 @@ def summarize_workspace(record: WorkspaceRecord) -> WorkspaceSummary:
         owner_display_name=display_name(record.owner_nickname, record.owner_user_id),
         encrypted_payload=record.encrypted_payload,
         updated_at=record.updated_at,
+        plan=record.plan,
+        billing_status=record.billing_status,
     )
 
 
@@ -496,7 +547,9 @@ def require_expected_revision(state_payload: dict, item_id: str, expected_revisi
     doc = find_doc(state_payload, item_id)
     if doc is None:
         raise KeyError(item_id)
-    if expected_revision is not None and int(doc.get("revision", 0)) != expected_revision:
+    if expected_revision is None:
+        raise HTTPException(status_code=status.HTTP_428_PRECONDITION_REQUIRED, detail="expected_revision is required")
+    if int(doc.get("revision", 0)) != expected_revision:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="revision conflict")
     return doc
 
@@ -508,7 +561,7 @@ def require_workspace(gateway: DatabaseGateway, workspace_id: str) -> WorkspaceR
     return workspace
 
 
-def require_collaborative_markdown_item(
+def require_collaborative_item(
     gateway: DatabaseGateway,
     workspace_id: str,
     item_id: str,
@@ -520,7 +573,7 @@ def require_collaborative_markdown_item(
     if doc is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="item not found")
     if doc.get("kind") != "page":
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="collaboration requires markdown text")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="real-time collaboration requires markdown text")
     return record, state_payload, doc
 
 
@@ -533,10 +586,23 @@ def save_state(
     owner_nickname: str | None = None,
     actor_user_id: str | None = None,
 ) -> WorkspaceRecord:
-    state_payload.pop("history", None)
     next_owner_nickname = record.owner_nickname if owner_nickname is None else owner_nickname
     ensure_workspace_members(state_payload, record.owner_user_id, next_owner_nickname)
-    ensure_actor_workspace_member(state_payload, record.owner_user_id, actor_user_id)
+    actor = (actor_user_id or "").strip()
+    members_before = state_payload.get("members") if isinstance(state_payload.get("members"), dict) else {}
+    actor_before = dict(members_before.get(actor, {})) if actor and isinstance(members_before.get(actor), dict) else None
+    actor_member_changed = ensure_actor_workspace_member(state_payload, record.owner_user_id, actor_user_id)
+    if actor_member_changed and actor and actor_before is None:
+        actor_after = dict(state_payload.get("members", {}).get(actor, {}))
+        append_workspace_revision(
+            state_payload,
+            operation="member-join",
+            item_id=actor,
+            title=str(actor_after.get("nickname", actor)),
+            before={},
+            after=actor_after,
+            actor_user_id=actor,
+        )
     apply_workspace_quotas_or_raise(state_payload, _quota_plan_for_workspace(record))
     next_record = WorkspaceRecord(
         workspace_id=record.workspace_id,
@@ -544,8 +610,264 @@ def save_state(
         owner_nickname=next_owner_nickname,
         encrypted_payload=encrypt_workspace_payload(record.workspace_id, state_payload, password),
         updated_at=now_iso(),
+        plan=record.plan,
+        billing_status=record.billing_status,
+        stripe_customer_id=record.stripe_customer_id,
+        stripe_subscription_id=record.stripe_subscription_id,
     )
-    return gateway.upsert_workspace(next_record)
+    saved = gateway.compare_and_swap_workspace(next_record, record.encrypted_payload)
+    if saved is None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="workspace write conflict")
+    return saved
+
+
+def _workspace_create_response(record: WorkspaceRecord, state_payload: dict) -> WorkspaceCreateResponse:
+    return WorkspaceCreateResponse(
+        ok=True,
+        workspace=summarize_workspace(record),
+        workspace_title=get_workspace_title(state_payload, record.workspace_id),
+        workspace_revision=int(state_payload.get("workspaceRevision", 0)),
+        active_item_id=choose_active_item_id(state_payload),
+        items=tree_items(state_payload),
+    )
+
+
+def _stripe_object_id(value: object) -> str | None:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict) and isinstance(value.get("id"), str):
+        return value["id"]
+    return None
+
+
+def _sync_paid_checkout(
+    gateway: DatabaseGateway,
+    billing: StripeBillingService,
+    checkout_session_id: str,
+) -> tuple[PaidCheckoutRecord, dict]:
+    checkout = gateway.get_paid_checkout(checkout_session_id)
+    if checkout is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="paid checkout not found")
+    try:
+        session = billing.retrieve_checkout(checkout_session_id)
+    except BillingConfigurationError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+    except BillingProviderError as exc:
+        if checkout.status == "paid":
+            return checkout, {}
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+    metadata = session.get("metadata") if isinstance(session.get("metadata"), dict) else {}
+    if (
+        session.get("id") != checkout.checkout_session_id
+        or session.get("client_reference_id") != checkout.owner_user_id
+        or metadata.get("intent") != "paid_workspace"
+        or metadata.get("purchase_token") != checkout.purchase_token
+    ):
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Stripe checkout metadata mismatch")
+    next_status = "paid" if billing.checkout_is_paid(session) else str(session.get("status", "pending"))
+    updated = checkout.model_copy(
+        update={
+            "status": next_status,
+            "stripe_customer_id": _stripe_object_id(session.get("customer")) or checkout.stripe_customer_id,
+            "stripe_subscription_id": _stripe_object_id(session.get("subscription")) or checkout.stripe_subscription_id,
+            "updated_at": now_iso(),
+        }
+    )
+    gateway.save_paid_checkout(updated)
+    return updated, session
+
+
+@app.get("/v1/billing/paid-workspace/config", response_model=PaidWorkspaceBillingConfigResponse)
+def paid_workspace_billing_config(
+    _: None = Depends(require_backend_token),
+) -> PaidWorkspaceBillingConfigResponse:
+    config = get_billing_service().config()
+    routing_secret = os.getenv("JUSTWORK_DATABASE_ROUTING_SECRET", "").strip()
+    return PaidWorkspaceBillingConfigResponse(
+        enabled=config.enabled,
+        checkout_mode=config.checkout_mode,
+        price_label=config.price_label,
+        custom_database_enabled=len(routing_secret) >= 32,
+    )
+
+
+@app.post("/v1/billing/paid-workspace/checkout", response_model=PaidWorkspaceCheckoutResponse)
+def create_paid_workspace_checkout(
+    body: PaidWorkspaceCheckoutRequest,
+    _: None = Depends(require_backend_token),
+    gateway: DatabaseGateway = Depends(get_gateway),
+) -> PaidWorkspaceCheckoutResponse:
+    purchase_token = secrets.token_urlsafe(24)
+    billing = get_billing_service()
+    try:
+        session = billing.create_paid_workspace_checkout(body.owner_user_id, purchase_token)
+    except BillingConfigurationError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+    except BillingProviderError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+    session_id = str(session.get("id", "")).strip()
+    checkout_url = str(session.get("url", "")).strip()
+    if not session_id or not checkout_url:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Stripe did not return a checkout URL")
+    created_at = now_iso()
+    gateway.save_paid_checkout(
+        PaidCheckoutRecord(
+            purchase_token=purchase_token,
+            owner_user_id=body.owner_user_id,
+            checkout_session_id=session_id,
+            status="pending",
+            created_at=created_at,
+            updated_at=created_at,
+        )
+    )
+    return PaidWorkspaceCheckoutResponse(checkout_session_id=session_id, checkout_url=checkout_url)
+
+
+@app.get(
+    "/v1/billing/paid-workspace/checkout/{checkout_session_id}",
+    response_model=PaidWorkspaceCheckoutStatusResponse,
+)
+def get_paid_workspace_checkout_status(
+    checkout_session_id: str,
+    _: None = Depends(require_backend_token),
+    gateway: DatabaseGateway = Depends(get_gateway),
+) -> PaidWorkspaceCheckoutStatusResponse:
+    checkout, _ = _sync_paid_checkout(gateway, get_billing_service(), checkout_session_id)
+    return PaidWorkspaceCheckoutStatusResponse(
+        checkout_session_id=checkout_session_id,
+        status=checkout.status,
+        paid=checkout.status == "paid",
+    )
+
+
+@app.post("/v1/workspaces/paid/complete", response_model=WorkspaceCreateResponse)
+def complete_paid_workspace(
+    body: PaidWorkspaceCompleteRequest,
+    _: None = Depends(require_backend_token),
+    gateway: DatabaseGateway = Depends(get_gateway),
+) -> WorkspaceCreateResponse:
+    with _paid_completion_lock:
+        checkout, _ = _sync_paid_checkout(gateway, get_billing_service(), body.checkout_session_id)
+        if checkout.owner_user_id != body.owner_user_id or checkout.status != "paid":
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="paid checkout is not complete")
+        candidate_workspace_id = checkout.consumed_workspace_id or make_workspace_id()
+        try:
+            claimed = gateway.claim_paid_checkout(
+                body.checkout_session_id,
+                body.owner_user_id,
+                candidate_workspace_id,
+                now_iso(),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+        workspace_id = claimed.consumed_workspace_id or candidate_workspace_id
+        existing = gateway.get_workspace(workspace_id)
+        if existing is not None:
+            state_payload = load_decrypted_state(existing, body.password)
+            return _workspace_create_response(existing, state_payload)
+
+        database_url_ciphertext: str | None = None
+        if body.custom_database_url and body.custom_database_url.strip():
+            try:
+                custom_database_url = validate_custom_database_url(body.custom_database_url)
+                database_url_ciphertext = encrypt_database_url(custom_database_url)
+            except ValueError as exc:
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+            except DatabaseRoutingConfigurationError as exc:
+                raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+
+        workspace_title = (body.title or "").strip() or default_workspace_title(workspace_id)
+        state_payload = make_initial_workspace_state(workspace_title)
+        state_payload["billingPlan"] = QUOTA_PLAN_PAID
+        state_payload["historyLimit"] = 1000
+        ensure_workspace_members(state_payload, body.owner_user_id, body.nickname)
+        apply_workspace_quotas_or_raise(state_payload, QUOTA_PLAN_PAID)
+        created_at = now_iso()
+        record = WorkspaceRecord(
+            workspace_id=workspace_id,
+            owner_user_id=body.owner_user_id,
+            owner_nickname=body.nickname,
+            encrypted_payload=encrypt_workspace_payload(workspace_id, state_payload, body.password),
+            updated_at=created_at,
+            plan=QUOTA_PLAN_PAID,
+            billing_status="paid",
+            stripe_customer_id=claimed.stripe_customer_id,
+            stripe_subscription_id=claimed.stripe_subscription_id,
+        )
+        route = WorkspaceRouteRecord(
+            workspace_id=workspace_id,
+            owner_user_id=body.owner_user_id,
+            billing_status="paid",
+            stripe_customer_id=claimed.stripe_customer_id,
+            stripe_subscription_id=claimed.stripe_subscription_id,
+            database_url_ciphertext=database_url_ciphertext,
+            updated_at=created_at,
+        )
+        try:
+            saved = gateway.insert_paid_workspace(record, route)
+        except DatabaseUnavailableError:
+            raise
+        return _workspace_create_response(saved, state_payload)
+
+
+@app.post("/v1/billing/stripe/webhook")
+async def stripe_webhook(
+    request: Request,
+    stripe_signature: str | None = Header(default=None, alias="Stripe-Signature"),
+    gateway: DatabaseGateway = Depends(get_gateway),
+) -> dict[str, bool]:
+    payload = await request.body()
+    try:
+        event = get_billing_service().verify_webhook(payload, stripe_signature or "")
+    except (BillingConfigurationError, ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    event_id = str(event["id"])
+    event_type = str(event.get("type", ""))
+    event_object = event.get("data", {}).get("object", {})
+    if not isinstance(event_object, dict):
+        event_object = {}
+    if event_type in {
+        "checkout.session.completed",
+        "checkout.session.async_payment_succeeded",
+        "checkout.session.async_payment_failed",
+    }:
+        session_id = str(event_object.get("id", ""))
+        checkout = gateway.get_paid_checkout(session_id)
+        if checkout is not None:
+            paid = event_type == "checkout.session.async_payment_succeeded" or get_billing_service().checkout_is_paid(event_object)
+            next_status = "paid" if paid else "failed" if event_type.endswith("failed") else "pending"
+            gateway.save_paid_checkout(
+                checkout.model_copy(
+                    update={
+                        "status": next_status,
+                        "stripe_customer_id": _stripe_object_id(event_object.get("customer")) or checkout.stripe_customer_id,
+                        "stripe_subscription_id": _stripe_object_id(event_object.get("subscription")) or checkout.stripe_subscription_id,
+                        "updated_at": now_iso(),
+                    }
+                )
+            )
+    elif event_type in {"customer.subscription.updated", "customer.subscription.deleted"}:
+        subscription_id = str(event_object.get("id", ""))
+        subscription_status = str(event_object.get("status", "canceled" if event_type.endswith("deleted") else "inactive"))
+        gateway.update_billing_status_by_subscription(subscription_id, subscription_status, now_iso())
+    gateway.record_stripe_event_once(event_id, now_iso())
+    return {"ok": True}
+
+
+@app.get("/billing/paid-workspace/success", response_class=HTMLResponse)
+def paid_workspace_success_page() -> HTMLResponse:
+    return HTMLResponse(
+        "<main style='font:16px system-ui;padding:40px;max-width:560px;margin:auto'>"
+        "<h1>Payment complete</h1><p>Return to JustWork to finish creating the paid workspace.</p></main>"
+    )
+
+
+@app.get("/billing/paid-workspace/cancel", response_class=HTMLResponse)
+def paid_workspace_cancel_page() -> HTMLResponse:
+    return HTMLResponse(
+        "<main style='font:16px system-ui;padding:40px;max-width:560px;margin:auto'>"
+        "<h1>Payment canceled</h1><p>No workspace was created. You can close this page.</p></main>"
+    )
 
 
 @app.post("/v1/workspaces", response_model=WorkspaceCreateResponse)
@@ -559,6 +881,8 @@ def create_workspace(
     default_title = default_workspace_title(workspace_id)
     workspace_title = raw_title or default_title
     state_payload = make_initial_workspace_state(workspace_title)
+    state_payload["billingPlan"] = QUOTA_PLAN_FREE
+    state_payload["historyLimit"] = 200
     ensure_workspace_members(state_payload, body.owner_user_id, body.nickname)
     apply_workspace_quotas_or_raise(state_payload, _quota_plan_for_workspace(None))
     now = now_iso()
@@ -573,13 +897,7 @@ def create_workspace(
     saved = gateway.insert_workspace_with_owner_limit(record, MAX_WORKSPACES_PER_OWNER)
     if saved is None:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="workspace create limit exceeded")
-    return WorkspaceCreateResponse(
-        ok=True,
-        workspace=summarize_workspace(saved),
-        workspace_title=get_workspace_title(state_payload, workspace_id),
-        active_item_id=choose_active_item_id(state_payload),
-        items=tree_items(state_payload),
-    )
+    return _workspace_create_response(saved, state_payload)
 
 
 @app.get("/v1/workspaces/{workspace_id}/profile", response_model=ProfileResponse)
@@ -781,15 +1099,17 @@ async def join_workspace_collab(
     _: None = Depends(require_backend_token),
     gateway: DatabaseGateway = Depends(get_gateway),
 ) -> WorkspaceCollabJoinResponse:
-    require_collaborative_markdown_item(gateway, workspace_id, item_id, body.password)
+    require_collaborative_item(gateway, workspace_id, item_id, body.password)
     hub = get_collab_relay_hub()
     ticket, expires_at = await hub.issue_ticket(workspace_id, item_id)
+    bootstrap_owner = get_collaborative_update_store().claim_bootstrap(workspace_id, item_id)
     return WorkspaceCollabJoinResponse(
         ok=True,
         workspace_id=workspace_id,
         item_id=item_id,
         ticket=ticket,
         expires_at=expires_at,
+        bootstrap_owner=bootstrap_owner,
     )
 
 
@@ -801,8 +1121,8 @@ def get_workspace_collab_state(
     _: None = Depends(require_backend_token),
     gateway: DatabaseGateway = Depends(get_gateway),
 ) -> Response:
-    require_collaborative_markdown_item(gateway, workspace_id, item_id, body.password)
-    snapshot = b"".join(get_collaborative_update_store().load_updates(workspace_id, item_id))
+    require_collaborative_item(gateway, workspace_id, item_id, body.password)
+    snapshot = get_collaborative_update_store().get_snapshot(workspace_id, item_id) or b""
     return Response(content=snapshot, media_type="application/octet-stream")
 
 
@@ -851,43 +1171,38 @@ def update_profile(
     actor_user_id, _, _ = actor_from_body(body, request, workspace_id, "profile")
     record = require_workspace(gateway, workspace_id)
     target_user_id = actor_user_id or record.owner_user_id
-    password = (body.password or "").strip()
-    if password:
-        state_payload = load_decrypted_state(record, password)
-        member = upsert_workspace_member(state_payload, target_user_id, body.nickname)
-        saved = save_state(
-            gateway,
-            record,
-            state_payload,
-            password,
-            owner_nickname=body.nickname if target_user_id == record.owner_user_id else None,
-            actor_user_id=actor_user_id,
-        )
-        return ProfileResponse(
-            ok=True,
-            profile=ProfileBody(
-                user_id=target_user_id,
-                nickname=member["nickname"],
-                display_name=display_name(member["nickname"], target_user_id),
-            ),
-        )
-    if target_user_id != record.owner_user_id:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="password required to update non-owner profile")
-    saved = gateway.upsert_workspace(
-        WorkspaceRecord(
-            workspace_id=record.workspace_id,
-            owner_user_id=record.owner_user_id,
-            owner_nickname=body.nickname,
-            encrypted_payload=record.encrypted_payload,
-            updated_at=now_iso(),
-        )
+    state_payload = load_decrypted_state(record, body.password)
+    members = state_payload.get("members") if isinstance(state_payload.get("members"), dict) else {}
+    current = members.get(target_user_id) if isinstance(members.get(target_user_id), dict) else None
+    current_revision = int(current.get("revision", 0)) if current else 0
+    if current_revision != body.expected_revision:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="member revision conflict")
+    before_member = dict(current) if current else {}
+    member = upsert_workspace_member(state_payload, target_user_id, body.nickname)
+    append_workspace_revision(
+        state_payload,
+        operation="member-profile",
+        item_id=target_user_id,
+        title=member["nickname"],
+        before=before_member,
+        after=member,
+        actor_user_id=actor_user_id,
+    )
+    save_state(
+        gateway,
+        record,
+        state_payload,
+        body.password,
+        owner_nickname=body.nickname if target_user_id == record.owner_user_id else None,
+        actor_user_id=actor_user_id,
     )
     return ProfileResponse(
         ok=True,
         profile=ProfileBody(
-            user_id=saved.owner_user_id,
-            nickname=saved.owner_nickname,
-            display_name=display_name(saved.owner_nickname, saved.owner_user_id),
+            user_id=target_user_id,
+            nickname=member["nickname"],
+            display_name=display_name(member["nickname"], target_user_id),
+            revision=int(member.get("revision", 0)),
         ),
     )
 
@@ -905,8 +1220,39 @@ def get_workspace_tree(
         ok=True,
         workspace_id=workspace_id,
         workspace_title=get_workspace_title(state_payload, workspace_id),
+        workspace_revision=int(state_payload.get("workspaceRevision", 0)),
         active_item_id=state_payload["activeDocId"],
         items=tree_items(state_payload),
+    )
+
+
+@app.post("/v1/workspaces/{workspace_id}/revisions", response_model=WorkspaceRevisionHistoryResponse)
+def list_workspace_revision_history(
+    workspace_id: str,
+    body: WorkspacePasswordRequest,
+    _: None = Depends(require_backend_token),
+    gateway: DatabaseGateway = Depends(get_gateway),
+) -> WorkspaceRevisionHistoryResponse:
+    record = require_workspace(gateway, workspace_id)
+    state_payload = load_decrypted_state(record, body.password)
+    revisions = list_workspace_revisions(state_payload)
+    return WorkspaceRevisionHistoryResponse(
+        ok=True,
+        workspace_id=workspace_id,
+        revisions=[
+            {
+                "id": event["id"],
+                "operation": event["operation"],
+                "item_id": event["itemId"],
+                "title": event["title"],
+                "before": event["before"],
+                "after": event["after"],
+                "actor_user_id": event.get("actorUserId"),
+                "mutation_id": event.get("mutationId"),
+                "timestamp": event["timestamp"],
+            }
+            for event in revisions
+        ],
     )
 
 
@@ -921,9 +1267,26 @@ def update_workspace_settings(
     actor_user_id, _, _ = actor_from_body(body, request, workspace_id, "settings")
     record = require_workspace(gateway, workspace_id)
     state_payload = load_decrypted_state(record, body.password)
+    current_revision = int(state_payload.get("workspaceRevision", 0))
+    if current_revision != body.expected_revision:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="workspace settings revision conflict")
+    before = {
+        "title": get_workspace_title(state_payload, workspace_id),
+        "revision": current_revision,
+    }
     title = update_workspace_title(state_payload, body.title, workspace_id)
+    revision = int(state_payload.get("workspaceRevision", 0))
+    append_workspace_revision(
+        state_payload,
+        operation="workspace-settings",
+        item_id="workspace",
+        title=title,
+        before=before,
+        after={"title": title, "revision": revision},
+        actor_user_id=actor_user_id,
+    )
     save_state(gateway, record, state_payload, body.password, actor_user_id=actor_user_id)
-    return WorkspaceSettingsResponse(ok=True, workspace_id=workspace_id, title=title)
+    return WorkspaceSettingsResponse(ok=True, workspace_id=workspace_id, title=title, revision=revision)
 
 
 @app.post("/v1/workspaces/{workspace_id}/items/{item_id}", response_model=WorkspaceItemResponse)
@@ -1074,6 +1437,16 @@ def create_workspace_item(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     item = item_view(doc)
     record_mutation_item(state_payload, mutation_id, operation="create", target_id="", item=item)
+    append_workspace_revision(
+        state_payload,
+        operation="create",
+        item_id=doc["id"],
+        title=doc.get("title", ""),
+        before=None,
+        after=doc,
+        actor_user_id=au,
+        mutation_id=mutation_id,
+    )
     save_state(gateway, record, state_payload, body.password, actor_user_id=au)
     return WorkspaceItemResponse(ok=True, workspace_id=workspace_id, item=item)
 
@@ -1094,17 +1467,71 @@ def update_workspace_item(
     recorded_item = recorded_mutation_item(state_payload, mutation_id, operation="update", target_id=item_id)
     if recorded_item is not None:
         return WorkspaceItemResponse(ok=True, workspace_id=workspace_id, item=recorded_item)
+    collaborative_update: bytes | None = None
     try:
         cur = require_expected_revision(state_payload, item_id, body.expected_revision)
         before_doc = dict(cur)
+        if body.collaborative_update is not None:
+            if cur.get("kind") != "page" or body.markdown is None:
+                raise ValueError("collaborative_update requires page markdown")
+            try:
+                collaborative_update = base64.b64decode(body.collaborative_update, validate=True)
+            except Exception as exc:  # noqa: BLE001
+                raise ValueError("invalid collaborative update") from exc
         doc = update_doc(state_payload, item_id, body.title, body.markdown, body.content)
     except KeyError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="item not found") from exc
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-    item = item_view(doc)
-    record_mutation_item(state_payload, mutation_id, operation="update", target_id=item_id, item=item)
-    save_state(gateway, record, state_payload, body.password, actor_user_id=au)
+
+    def commit_doc(merged_markdown: str | None = None) -> dict:
+        if merged_markdown is not None:
+            doc["markdown"] = merged_markdown
+        item = item_view(doc)
+        record_mutation_item(state_payload, mutation_id, operation="update", target_id=item_id, item=item)
+        append_workspace_revision(
+            state_payload,
+            operation="update",
+            item_id=item_id,
+            title=doc.get("title", ""),
+            before=before_doc,
+            after=doc,
+            actor_user_id=au,
+            mutation_id=mutation_id,
+        )
+        save_state(gateway, record, state_payload, body.password, actor_user_id=au)
+        return item
+
+    committed_update: bytes | None = None
+    if collaborative_update is not None:
+        try:
+            committed_update, _, item = get_collaborative_update_store().commit_update(
+                workspace_id,
+                item_id,
+                collaborative_update,
+                commit_doc,
+            )
+        except HTTPException:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="invalid collaborative update") from exc
+    elif doc.get("kind") == "page" and body.markdown is not None:
+        try:
+            committed_update, _, item = get_collaborative_update_store().commit_markdown_change(
+                workspace_id,
+                item_id,
+                str(before_doc.get("markdown", "")),
+                doc.get("markdown", ""),
+                commit_doc,
+            )
+        except HTTPException:
+            raise
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    else:
+        item = commit_doc()
+    if committed_update is not None:
+        _broadcast_collaborative_update_from_http(workspace_id, item_id, committed_update)
     return WorkspaceItemResponse(ok=True, workspace_id=workspace_id, item=item)
 
 
@@ -1133,6 +1560,7 @@ def pin_workspace_item(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     item = item_view(doc)
     record_mutation_item(state_payload, mutation_id, operation="pin", target_id=item_id, item=item)
+    append_workspace_revision(state_payload, operation="pin", item_id=item_id, title=doc.get("title", ""), before=before_doc, after=doc, actor_user_id=au, mutation_id=mutation_id)
     save_state(gateway, record, state_payload, body.password, actor_user_id=au)
     return WorkspaceItemResponse(ok=True, workspace_id=workspace_id, item=item)
 
@@ -1155,13 +1583,14 @@ def move_workspace_item(
         return WorkspaceItemResponse(ok=True, workspace_id=workspace_id, item=recorded_item)
     try:
         before_doc = dict(require_expected_revision(state_payload, item_id, body.expected_revision))
-        doc = move_doc(state_payload, item_id, body.parent_id)
+        doc = move_doc(state_payload, item_id, body.parent_id, body.order_key)
     except KeyError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="item not found") from exc
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     item = item_view(doc)
     record_mutation_item(state_payload, mutation_id, operation="move", target_id=item_id, item=item)
+    append_workspace_revision(state_payload, operation="move", item_id=item_id, title=doc.get("title", ""), before=before_doc, after=doc, actor_user_id=au, mutation_id=mutation_id)
     save_state(gateway, record, state_payload, body.password, actor_user_id=au)
     return WorkspaceItemResponse(ok=True, workspace_id=workspace_id, item=item)
 
@@ -1170,7 +1599,7 @@ def move_workspace_item(
 def trash_workspace_item(
     workspace_id: str,
     item_id: str,
-    body: WorkspacePasswordRequest,
+    body: WorkspaceRevisionMutationRequest,
     request: Request,
     _: None = Depends(require_backend_token),
     gateway: DatabaseGateway = Depends(get_gateway),
@@ -1191,6 +1620,7 @@ def trash_workspace_item(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     item = item_view(doc)
     record_mutation_item(state_payload, mutation_id, operation="trash", target_id=item_id, item=item)
+    append_workspace_revision(state_payload, operation="trash", item_id=item_id, title=doc.get("title", ""), before=before_doc, after=doc, actor_user_id=au, mutation_id=mutation_id)
     save_state(gateway, record, state_payload, body.password, actor_user_id=au)
     return WorkspaceItemResponse(ok=True, workspace_id=workspace_id, item=item)
 
@@ -1199,7 +1629,7 @@ def trash_workspace_item(
 def restore_workspace_item(
     workspace_id: str,
     item_id: str,
-    body: WorkspacePasswordRequest,
+    body: WorkspaceRevisionMutationRequest,
     request: Request,
     _: None = Depends(require_backend_token),
     gateway: DatabaseGateway = Depends(get_gateway),
@@ -1220,6 +1650,7 @@ def restore_workspace_item(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     item = item_view(doc)
     record_mutation_item(state_payload, mutation_id, operation="restore", target_id=item_id, item=item)
+    append_workspace_revision(state_payload, operation="restore", item_id=item_id, title=doc.get("title", ""), before=before_doc, after=doc, actor_user_id=au, mutation_id=mutation_id)
     save_state(gateway, record, state_payload, body.password, actor_user_id=au)
     return WorkspaceItemResponse(ok=True, workspace_id=workspace_id, item=item)
 
@@ -1228,7 +1659,7 @@ def restore_workspace_item(
 def hard_delete_workspace_item(
     workspace_id: str,
     item_id: str,
-    body: WorkspacePasswordRequest,
+    body: WorkspaceRevisionMutationRequest,
     request: Request,
     _: None = Depends(require_backend_token),
     gateway: DatabaseGateway = Depends(get_gateway),
@@ -1249,8 +1680,9 @@ def hard_delete_workspace_item(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     item = item_view(doc)
     record_mutation_item(state_payload, mutation_id, operation="hard-delete", target_id=item_id, item=item)
-    get_collab_relay_hub().delete_snapshot(workspace_id, item_id)
+    append_workspace_revision(state_payload, operation="hard-delete", item_id=item_id, title=doc.get("title", ""), before=before_doc, after=None, actor_user_id=au, mutation_id=mutation_id)
     save_state(gateway, record, state_payload, body.password, actor_user_id=au)
+    get_collab_relay_hub().delete_snapshot(workspace_id, item_id)
     return WorkspaceItemResponse(ok=True, workspace_id=workspace_id, item=item)
 
 
@@ -1314,7 +1746,7 @@ def patch_workspace_item(
             preview_markdown=str(recorded_entry.get("previewMarkdown", "")),
         )
     try:
-        require_expected_revision(state_payload, item_id, body.expected_revision)
+        before_doc = dict(require_expected_revision(state_payload, item_id, body.expected_revision))
         doc, changed, preview = patch_doc(
             state_payload,
             item_id,
@@ -1329,17 +1761,52 @@ def patch_workspace_item(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="item not found") from exc
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-    item = item_view(doc)
     if not body.dry_run and changed:
-        record_patch_mutation(
-            state_payload,
-            mutation_id,
-            target_id=item_id,
-            item=item,
-            changed=changed,
-            preview_markdown=preview,
-        )
-        save_state(gateway, record, state_payload, body.password, actor_user_id=au)
+        def commit_patch(merged_markdown: str | None = None) -> dict:
+            nonlocal preview
+            if merged_markdown is not None:
+                doc["markdown"] = merged_markdown
+                preview = merged_markdown
+            item = item_view(doc)
+            record_patch_mutation(
+                state_payload,
+                mutation_id,
+                target_id=item_id,
+                item=item,
+                changed=changed,
+                preview_markdown=preview,
+            )
+            append_workspace_revision(
+                state_payload,
+                operation="patch",
+                item_id=item_id,
+                title=doc.get("title", ""),
+                before=before_doc,
+                after=doc,
+                actor_user_id=au,
+                mutation_id=mutation_id,
+            )
+            save_state(gateway, record, state_payload, body.password, actor_user_id=au)
+            return item
+
+        if doc.get("kind") == "page":
+            try:
+                committed_update, _, item = get_collaborative_update_store().commit_markdown_change(
+                    workspace_id,
+                    item_id,
+                    str(before_doc.get("markdown", "")),
+                    doc.get("markdown", ""),
+                    commit_patch,
+                )
+            except HTTPException:
+                raise
+            except ValueError as exc:
+                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+            _broadcast_collaborative_update_from_http(workspace_id, item_id, committed_update)
+        else:
+            item = commit_patch()
+    else:
+        item = item_view(doc)
     return WorkspacePatchResponse(
         ok=True,
         workspace_id=workspace_id,
@@ -1364,12 +1831,7 @@ def upsert_workspace(
     _: None = Depends(require_backend_token),
     gateway: DatabaseGateway = Depends(get_gateway),
 ) -> WorkspaceGetResponse:
-    record = WorkspaceRecord(
-        workspace_id=workspace_id,
-        owner_user_id=body.owner_user_id,
-        owner_nickname=body.owner_nickname,
-        encrypted_payload=body.encrypted_payload,
-        updated_at=body.updated_at,
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail="whole-workspace replacement is disabled; use item mutation endpoints",
     )
-    saved = gateway.upsert_workspace(record)
-    return WorkspaceGetResponse(ok=True, workspace=saved)

@@ -68,20 +68,22 @@ The backend enforces workspace quotas on every persisted write (`create/update/m
 - Page count (excludes system docs `root`/`welcome`)
 - Folder count (excludes system docs)
 
-Set plan via:
+Workspace plan is stored per workspace. `JUSTWORK_QUOTA_PLAN` remains an optional
+development override:
 
 ```powershell
-$env:JUSTWORK_QUOTA_PLAN="free"  # free | pro
+$env:JUSTWORK_QUOTA_PLAN="free"  # free | paid
 ```
 
 Defaults:
 
 - Free: `40MB`, pages `300`, folders `100`
-- Pro (reserved): `200MB`, pages `1500`, folders `500`
+- Paid: exactly 4x the configured free workspace bytes by default (`160MB` with
+  the default free quota), pages `1500`, folders `500`
 
 Override by setting:
 
-- `JUSTWORK_QUOTA_WORKSPACE_MAX_BYTES_FREE|PRO`
+- `JUSTWORK_QUOTA_WORKSPACE_MAX_BYTES_FREE|PAID`
 - `JUSTWORK_QUOTA_PAGE_MAX_COUNT_FREE|PRO`
 - `JUSTWORK_QUOTA_FOLDER_MAX_COUNT_FREE|PRO`
 When page/folder/payload exceeds, API returns `409` with error codes:
@@ -90,11 +92,52 @@ When page/folder/payload exceeds, API returns `409` with error codes:
 - `page_count_exceeded`
 - `folder_count_exceeded`
 
+## Paid workspaces (Stripe)
+
+Paid workspace creation uses Stripe-hosted Checkout. Configure an existing Stripe
+Price; the backend deliberately does not create or hard-code an amount or currency:
+
+```text
+STRIPE_SECRET_KEY=sk_...
+STRIPE_WEBHOOK_SECRET=whsec_...
+STRIPE_PAID_WORKSPACE_PRICE_ID=price_...
+STRIPE_PAID_WORKSPACE_CHECKOUT_MODE=payment  # payment | subscription
+JUSTWORK_PAID_WORKSPACE_PRICE_LABEL=$20
+JUSTWORK_PUBLIC_BASE_URL=https://api.example.com
+```
+
+Send Stripe webhooks to `POST /v1/billing/stripe/webhook`. The handler verifies the
+raw request body and `Stripe-Signature`, and processes Checkout and subscription
+status events idempotently. A Checkout Session can provision at most one workspace.
+Paid workspaces do not count toward the five-free-workspace owner limit, retain 1000
+revision events, and receive at least four times the free byte quota.
+
+Customer-supplied PostgreSQL is optional. When the field is left blank, the paid
+workspace uses JustWork's default storage. To enable this optional database route,
+configure a random secret of at least 32 characters:
+
+```text
+JUSTWORK_DATABASE_ROUTING_SECRET=replace-with-a-long-random-server-secret
+```
+
+The database URL is submitted only after payment, validated as PostgreSQL, encrypted
+before central route storage, and never placed in Stripe metadata. The backend needs
+network access to the customer database and permission to create/migrate the
+`workspaces` table. Treat this feature as outbound database access and apply an
+egress allowlist in production.
+
 ## Current Agent Endpoints
 
 - `GET /v1/health`
+- `GET /v1/billing/paid-workspace/config`
+- `POST /v1/billing/paid-workspace/checkout`
+- `GET /v1/billing/paid-workspace/checkout/{checkout_session_id}`
+- `POST /v1/workspaces/paid/complete`
+- `POST /v1/billing/stripe/webhook`
 - `POST /v1/workspaces`
 - `POST /v1/workspaces/{workspace_id}/tree`
+- `POST /v1/workspaces/{workspace_id}/revisions`
+- `PUT /v1/workspaces/{workspace_id}/settings`
 - `GET /v1/workspaces/{workspace_id}/quota`
 - `POST /v1/workspaces/{workspace_id}/items/{item_id}/share`
 - `POST /v1/workspaces/{workspace_id}/items/{item_id}`
@@ -113,7 +156,20 @@ When page/folder/payload exceeds, API returns `409` with error codes:
 - `GET /shares/{token}` readonly share page (password required)
 - `POST /v1/shares/{token}/view` resolve shared document by workspace password
 - `GET /v1/workspaces/{workspace_id}` legacy encrypted payload fetch
-- `PUT /v1/workspaces/{workspace_id}` legacy encrypted payload upsert
+- `PUT /v1/workspaces/{workspace_id}` disabled legacy whole-workspace replacement (`410`)
+
+Every item mutation requires `expected_revision`. Workspace settings use
+`workspace_revision` from the tree response, and member profile writes use the
+member's `revision`. A stale revision returns `409`; a missing revision returns
+`428`. Clients must re-read and either apply an explicit inverse operation or merge
+page text through the collaborative state. The backend does not expose history
+rewriting or rebase operations. Hard-delete only accepts items already in trash.
+
+Real-time relay rooms and CRDT snapshots currently support one backend process/replica.
+Do not enable multiple uvicorn workers or horizontally scale this service until the
+relay is moved to shared pub/sub and shared snapshot storage. Workspace writes in
+PostgreSQL remain CAS-protected, but process-local WebSocket fan-out is not a
+multi-replica transport.
 
 ## Local Test
 
@@ -124,7 +180,7 @@ yarn test:e2e:backend
 
 The backend test verifies that an Agent can use only backend API/OpenAPI-facing paths to create a workspace, reject a wrong password, read the tree, create/update/pin/move/trash/restore/delete items, update profile, search/outline, and dry-run/apply patch.
 
-`yarn test:e2e:backend` starts a real FastAPI process and a headless workbench, switches chrome storage to Backend mode, creates a workspace, saves through the plugin UI, creates a folder/page, pins, trashes, restores, hard-deletes, checks backend state, locks, and unlocks again.
+`yarn test:e2e:backend` starts a real FastAPI process and two headless workbenches, verifies bidirectional page collaboration and merged persistence, then covers create/pin/trash/restore/hard-delete, lock, and unlock flows.
 
 ## CORS
 

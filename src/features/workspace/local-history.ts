@@ -12,6 +12,9 @@ export type LocalHistoryOp =
   | "workspace.item.trash"
   | "workspace.item.restore"
   | "workspace.item.hard_delete"
+  | "workspace.settings"
+  | "workspace.member.profile"
+  | "workspace.member.join"
   | "doc.patch"
   | "history.revert";
 
@@ -22,6 +25,7 @@ export type LocalHistorySnapshot = {
   pinned?: boolean;
   inTrash?: boolean;
   parentId?: string | null;
+  orderKey?: number;
 };
 
 export type LocalHistoryEvent = {
@@ -41,6 +45,16 @@ export type LocalHistoryState = {
 };
 
 type HistoryStorageArea = Pick<chrome.storage.StorageArea, "get" | "set">;
+
+const historyStorageQueues = new WeakMap<object, Promise<void>>();
+
+function mutateHistoryStorage<T>(storage: HistoryStorageArea, mutation: () => Promise<T>): Promise<T> {
+  const key = storage as object;
+  const previous = historyStorageQueues.get(key) ?? Promise.resolve();
+  const result = previous.catch(() => undefined).then(mutation);
+  historyStorageQueues.set(key, result.then(() => undefined, () => undefined));
+  return result;
+}
 
 function historyStorageKey(workspaceId: string): string {
   return `${LOCAL_HISTORY_STORAGE_PREFIX}:${workspaceId}`;
@@ -66,6 +80,7 @@ function normalizeSnapshot(value: unknown): LocalHistorySnapshot {
   if (record.parentId === null || typeof record.parentId === "string") {
     snapshot.parentId = record.parentId ?? null;
   }
+  if (typeof record.orderKey === "number") snapshot.orderKey = record.orderKey;
   return snapshot;
 }
 
@@ -120,14 +135,29 @@ export function shouldRecordLocalHistoryEvent(
 }
 
 export function isRevertableLocalHistoryEvent(event: LocalHistoryEvent): boolean {
-  if (event.op !== "workspace.item.set" && event.op !== "doc.patch" && event.op !== "history.revert") {
-    return false;
+  if (event.op === "workspace.item.create") {
+    return event.after.inTrash === false;
   }
-  return (
-    event.before.markdown !== undefined ||
-    event.before.title !== undefined ||
-    event.before.content !== undefined
-  );
+  if (event.op === "workspace.item.move") {
+    return event.before.parentId === null || typeof event.before.parentId === "string";
+  }
+  if (event.op === "workspace.item.pin") {
+    return typeof event.before.pinned === "boolean";
+  }
+  if (event.op === "workspace.item.trash" || event.op === "workspace.item.restore") {
+    return typeof event.before.inTrash === "boolean";
+  }
+  if (event.op === "workspace.settings" || event.op === "workspace.member.profile") {
+    return event.before.title !== undefined;
+  }
+  if (event.op === "workspace.item.set" || event.op === "doc.patch" || event.op === "history.revert") {
+    return (
+      event.before.markdown !== undefined ||
+      event.before.title !== undefined ||
+      event.before.content !== undefined
+    );
+  }
+  return false;
 }
 
 export function buildLocalHistoryRevertPatch(event: LocalHistoryEvent): OfflineMutationPatch {
@@ -170,26 +200,28 @@ export async function appendLocalHistoryEvent(
   if (!shouldRecordLocalHistoryEvent(input.before, input.after)) {
     return null;
   }
-  const state = await loadLocalHistory(storage, input.workspaceId);
-  const event: LocalHistoryEvent = {
-    id: makeHistoryEventId(),
-    workspaceId: input.workspaceId,
-    op: input.op,
-    itemId: input.itemId,
-    timestamp: input.createdAt ?? new Date().toISOString(),
-    title: input.title,
-    before: input.before,
-    after: input.after,
-    actorUserId: input.actorUserId,
-  };
-  const nextEvents = [...state.events, event];
-  const trimmed = nextEvents.length > LOCAL_HISTORY_MAX_EVENTS
-    ? nextEvents.slice(nextEvents.length - LOCAL_HISTORY_MAX_EVENTS)
-    : nextEvents;
-  await storage.set({
-    [historyStorageKey(input.workspaceId)]: { events: trimmed } satisfies LocalHistoryState,
+  return mutateHistoryStorage(storage, async () => {
+    const state = await loadLocalHistory(storage, input.workspaceId);
+    const event: LocalHistoryEvent = {
+      id: makeHistoryEventId(),
+      workspaceId: input.workspaceId,
+      op: input.op,
+      itemId: input.itemId,
+      timestamp: input.createdAt ?? new Date().toISOString(),
+      title: input.title,
+      before: input.before,
+      after: input.after,
+      actorUserId: input.actorUserId,
+    };
+    const nextEvents = [...state.events, event];
+    const trimmed = nextEvents.length > LOCAL_HISTORY_MAX_EVENTS
+      ? nextEvents.slice(nextEvents.length - LOCAL_HISTORY_MAX_EVENTS)
+      : nextEvents;
+    await storage.set({
+      [historyStorageKey(input.workspaceId)]: { events: trimmed } satisfies LocalHistoryState,
+    });
+    return event;
   });
-  return event;
 }
 
 export async function findLocalHistoryEvent(
