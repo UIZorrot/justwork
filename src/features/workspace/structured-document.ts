@@ -214,19 +214,27 @@ export function boardCardSummary(card: BoardCard, maxItems = 3): string[] {
   return items;
 }
 
-function defaultTableColumns(): TableColumn[] {
+export type DefaultTableContentLabels = {
+  nameColumn?: string;
+  notesColumn?: string;
+  untitledRow?: string;
+  sheetName?: string;
+  locale?: "en" | "zh-CN";
+};
+
+function defaultTableColumns(labels: DefaultTableContentLabels = {}): TableColumn[] {
   return [
-    { id: "col_name", title: "Name", type: "text", width: 180 },
-    { id: "col_notes", title: "Notes", type: "text", width: 220 },
+    { id: "col_name", title: labels.nameColumn ?? "Name", type: "text", width: 180 },
+    { id: "col_notes", title: labels.notesColumn ?? "Notes", type: "text", width: 220 },
   ];
 }
 
-function defaultTableRows(): TableRow[] {
+function defaultTableRows(labels: DefaultTableContentLabels = {}): TableRow[] {
   return [
     {
       id: "row_1",
       cells: {
-        col_name: "Untitled row",
+        col_name: labels.untitledRow ?? "Untitled row",
         col_notes: "",
       },
     },
@@ -275,7 +283,10 @@ function getPrimaryWorksheet(workbookData: Record<string, unknown>): Record<stri
   return fallback ? asRecord(fallback) : null;
 }
 
-export function tableContentToWorkbookData(content: TableDocumentContent): Record<string, unknown> {
+export function tableContentToWorkbookData(
+  content: TableDocumentContent,
+  defaults: Pick<DefaultTableContentLabels, "sheetName" | "locale"> = {},
+): Record<string, unknown> {
   const existing = content.workbookData ? cloneJson(content.workbookData) : {};
   const existingSheets = asRecord(existing.sheets);
   const existingSheetOrder = Array.isArray(existing.sheetOrder)
@@ -284,7 +295,8 @@ export function tableContentToWorkbookData(content: TableDocumentContent): Recor
   const existingSheet = getPrimaryWorksheet(existing);
   const workbookId = asTrimmedString(existing.id, createStructuredId("template"));
   const sheetId = asTrimmedString(existingSheet?.id, "sheet_1");
-  const sheetName = asTrimmedString(existingSheet?.name, DEFAULT_TABLE_WORKBOOK_NAME);
+  const defaultSheetName = defaults.sheetName?.trim() || DEFAULT_TABLE_WORKBOOK_NAME;
+  const sheetName = asTrimmedString(existingSheet?.name, defaultSheetName);
   const columnData: Record<string, unknown> = {};
   const rowData: Record<string, unknown> = {
     "0": { h: DEFAULT_TABLE_DEFAULT_ROW_HEIGHT },
@@ -328,9 +340,9 @@ export function tableContentToWorkbookData(content: TableDocumentContent): Recor
 
   return {
     id: workbookId,
-    name: asTrimmedString(existing.name, DEFAULT_TABLE_WORKBOOK_NAME),
+    name: asTrimmedString(existing.name, defaultSheetName),
     appVersion: typeof existing.appVersion === "string" ? existing.appVersion : DEFAULT_TABLE_APP_VERSION,
-    locale: typeof existing.locale === "string" ? existing.locale : "zhCN",
+    locale: typeof existing.locale === "string" ? existing.locale : defaults.locale === "en" ? "enUS" : "zhCN",
     styles: asRecord(existing.styles),
     sheetOrder: [sheetId, ...preservedSheetIds],
     sheets: {
@@ -469,28 +481,38 @@ function extractTableFromWorkbookData(workbookData: Record<string, unknown>): {
   };
 }
 
-export function createDefaultTableContent(): TableDocumentContent {
+export function createDefaultTableContent(labels: DefaultTableContentLabels = {}): TableDocumentContent {
   const content: TableDocumentContent = {
     kind: "table",
     frozenHeader: true,
-    columns: defaultTableColumns(),
-    rows: defaultTableRows(),
+    columns: defaultTableColumns(labels),
+    rows: defaultTableRows(labels),
   };
   return {
     ...content,
-    workbookData: tableContentToWorkbookData(content),
+    workbookData: tableContentToWorkbookData(content, labels),
   };
 }
 
-export function createDefaultBoardContent(): BoardDocumentContent {
+export type DefaultBoardContentLabels = {
+  templateTitle?: string;
+  untitledCard?: string;
+  summaryField?: string;
+  detailsField?: string;
+  todoColumn?: string;
+  doingColumn?: string;
+  doneColumn?: string;
+};
+
+export function createDefaultBoardContent(labels: DefaultBoardContentLabels = {}): BoardDocumentContent {
   const template: BoardTemplateDefinition = {
     columnId: "template_lane",
-    title: "Card template",
-    cardTitle: "Untitled card",
+    title: labels.templateTitle ?? "Card template",
+    cardTitle: labels.untitledCard ?? "Untitled card",
     cardIds: [],
     fields: [
-      { id: "template_summary", name: "Summary", defaultValue: "" },
-      { id: "template_details", name: "Details", defaultValue: "" },
+      { id: "template_summary", name: labels.summaryField ?? "Summary", defaultValue: "" },
+      { id: "template_details", name: labels.detailsField ?? "Details", defaultValue: "" },
     ],
   };
   const templateCard = createBoardCardFromTemplate(template, template.cardTitle);
@@ -500,9 +522,9 @@ export function createDefaultBoardContent(): BoardDocumentContent {
     kind: "board",
     template,
     columns: [
-      { id: "todo", title: "To do", color: BOARD_COLUMN_COLORS[0], cardIds: [starterCard.id] },
-      { id: "doing", title: "Doing", color: BOARD_COLUMN_COLORS[1], cardIds: [] },
-      { id: "done", title: "Done", color: BOARD_COLUMN_COLORS[2], cardIds: [] },
+      { id: "todo", title: labels.todoColumn ?? "To do", color: BOARD_COLUMN_COLORS[0], cardIds: [starterCard.id] },
+      { id: "doing", title: labels.doingColumn ?? "Doing", color: BOARD_COLUMN_COLORS[1], cardIds: [] },
+      { id: "done", title: labels.doneColumn ?? "Done", color: BOARD_COLUMN_COLORS[2], cardIds: [] },
     ],
     cards: [templateCard, starterCard],
   };

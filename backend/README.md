@@ -111,6 +111,13 @@ raw request body and `Stripe-Signature`, and processes Checkout and subscription
 status events idempotently. A Checkout Session can provision at most one workspace.
 Paid workspaces do not count toward the five-free-workspace owner limit, retain 1000
 revision events, and receive at least four times the free byte quota.
+When a paid workspace uses a customer-supplied PostgreSQL route, JustWork does not
+enforce workspace-byte, page-count, or folder-count limits; the database provider's
+own capacity limits still apply. Revision history remains capped at 1000 events.
+
+Use the `*_PAID` quota names for new deployments. The backend still reads the old
+`*_PRO` capacity/count names as a migration fallback, but paid history is fixed at
+the product-supported limit of 1000 events.
 
 Customer-supplied PostgreSQL is optional. When the field is left blank, the paid
 workspace uses JustWork's default storage. To enable this optional database route,

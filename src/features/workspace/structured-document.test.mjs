@@ -22,6 +22,32 @@ test("structured document defaults and normalization cover table and board conte
   assert.equal(board.columns[0].title, "To do");
   assert.equal(board.cards.length, 2);
 
+  const localizedTable = mod.createDefaultTableContent({
+    nameColumn: "名称",
+    notesColumn: "备注",
+    untitledRow: "未命名行",
+    sheetName: "工作表",
+    locale: "zh-CN",
+  });
+  assert.deepEqual(localizedTable.columns.map((column) => column.title), ["名称", "备注"]);
+  assert.equal(localizedTable.rows[0].cells.col_name, "未命名行");
+  assert.equal(localizedTable.workbookData.name, "工作表");
+  assert.equal(localizedTable.workbookData.locale, "zhCN");
+
+  const localizedBoard = mod.createDefaultBoardContent({
+    templateTitle: "卡片模板",
+    untitledCard: "未命名卡片",
+    summaryField: "摘要",
+    detailsField: "详细内容",
+    todoColumn: "待开始",
+    doingColumn: "进行中",
+    doneColumn: "已完成",
+  });
+  assert.equal(localizedBoard.template.title, "卡片模板");
+  assert.equal(localizedBoard.template.cardTitle, "未命名卡片");
+  assert.deepEqual(localizedBoard.template.fields.map((field) => field.name), ["摘要", "详细内容"]);
+  assert.deepEqual(localizedBoard.columns.map((column) => column.title), ["待开始", "进行中", "已完成"]);
+
   const normalizedTable = mod.normalizeStructuredDocumentContent("table", {
     frozenHeader: false,
     columns: [{ id: "col_a", title: "Name", type: "text", width: 180 }],

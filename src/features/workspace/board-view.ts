@@ -37,6 +37,16 @@ type Labels = {
   addField: string;
   removeField: string;
   template: string;
+  expand: string;
+  collapse: string;
+  columnTemplate: string;
+  card: string;
+  close: string;
+  untitledCard: string;
+  noDetails: string;
+  columnColor: string;
+  newColumn: string;
+  newField: string;
   statuses: Record<BoardCardStatus, string>;
 };
 
@@ -199,6 +209,7 @@ function restoreFocusState(root: HTMLElement, state: FocusState | null): void {
 function appendColorSwatches(
   document: DocumentLike,
   selectedColor: string,
+  colorLabel: string,
   onPick: (color: string) => void,
 ): HTMLElement {
   const palette = document.createElement("div") as HTMLElement;
@@ -209,7 +220,7 @@ function appendColorSwatches(
     button.className = color === selectedColor
       ? "structured-board-color-swatch is-selected"
       : "structured-board-color-swatch";
-    button.setAttribute("aria-label", color);
+    button.setAttribute("aria-label", `${colorLabel}: ${color}`);
     button.dataset.color = color;
     button.setAttribute("style", `--board-column-color:${color};`);
     button.addEventListener("click", () => onPick(color));
@@ -234,6 +245,16 @@ export function createBoardView(options: BoardViewOptions): BoardViewHandle {
     addField: options.labels?.addField ?? "Add field",
     removeField: options.labels?.removeField ?? "Remove field",
     template: options.labels?.template ?? "Template",
+    expand: options.labels?.expand ?? "Expand",
+    collapse: options.labels?.collapse ?? "Collapse",
+    columnTemplate: options.labels?.columnTemplate ?? "Column template",
+    card: options.labels?.card ?? "Card",
+    close: options.labels?.close ?? "Close",
+    untitledCard: options.labels?.untitledCard ?? "Untitled card",
+    noDetails: options.labels?.noDetails ?? "No details yet",
+    columnColor: options.labels?.columnColor ?? "Column color",
+    newColumn: options.labels?.newColumn ?? "New column",
+    newField: options.labels?.newField ?? "New field",
     statuses: options.labels?.statuses ?? {
       todo: "To do",
       doing: "Doing",
@@ -351,7 +372,7 @@ export function createBoardView(options: BoardViewOptions): BoardViewHandle {
         render();
       },
     );
-    toggle.setAttribute("aria-label", templateCollapsed ? "Expand" : "Collapse");
+    toggle.setAttribute("aria-label", templateCollapsed ? labels.expand : labels.collapse);
     const spacer = options.document.createElement("div") as HTMLElement;
     spacer.className = "structured-board-template-spacer";
     header.append(badge, spacer, toggle);
@@ -398,13 +419,13 @@ export function createBoardView(options: BoardViewOptions): BoardViewHandle {
     header.className = "structured-board-drawer-header";
     const kicker = options.document.createElement("span") as HTMLElement;
     kicker.className = "structured-board-drawer-kicker";
-    kicker.textContent = templateEditorOpen ? "Column template" : "Card";
+    kicker.textContent = templateEditorOpen ? labels.columnTemplate : labels.card;
     const close = createButton(options.document, "structured-board-drawer-close", "\u00D7", () => {
       templateEditorOpen = false;
       selectedCardId = null;
       render();
     });
-    close.setAttribute("aria-label", "Close");
+    close.setAttribute("aria-label", labels.close);
     header.append(kicker, close);
     drawer.append(header);
 
@@ -459,7 +480,7 @@ export function createBoardView(options: BoardViewOptions): BoardViewHandle {
         options.document,
         "structured-action-btn structured-action-btn--subtle",
         labels.addField,
-        () => emit(addBoardTemplateField(current)),
+        () => emit(addBoardTemplateField(current, labels.newField)),
       ));
       if (current.template.cardIds.length > 1) {
         drawer.append(createButton(
@@ -536,7 +557,7 @@ export function createBoardView(options: BoardViewOptions): BoardViewHandle {
       options.document,
       "structured-action-btn structured-action-btn--subtle",
       labels.addField,
-      () => emit(addBoardCardField(current, card.id)),
+      () => emit(addBoardCardField(current, card.id, labels.newField)),
     ));
     drawer.append(createButton(
       options.document,
@@ -568,7 +589,7 @@ export function createBoardView(options: BoardViewOptions): BoardViewHandle {
     head.className = "structured-board-card-head";
     const title = options.document.createElement("h3") as HTMLElement;
     title.className = "structured-board-card-summary-title";
-    title.textContent = card.title || "Untitled card";
+    title.textContent = card.title || labels.untitledCard;
     if (!opts?.template) {
       const grip = options.document.createElement("span") as HTMLElement;
       grip.className = "structured-board-card-grip";
@@ -582,7 +603,7 @@ export function createBoardView(options: BoardViewOptions): BoardViewHandle {
     if (summaryLines.length === 0) {
       const empty = options.document.createElement("p") as HTMLElement;
       empty.className = "structured-board-card-summary-line structured-board-card-summary-line--muted";
-      empty.textContent = "No details yet";
+      empty.textContent = labels.noDetails;
       cardEl.append(empty);
       return cardEl;
     }
@@ -630,7 +651,7 @@ export function createBoardView(options: BoardViewOptions): BoardViewHandle {
     topRow.append(meta);
     section.append(topRow);
 
-    section.append(appendColorSwatches(options.document, column.color, (color) => {
+    section.append(appendColorSwatches(options.document, column.color, labels.columnColor, (color) => {
       emit(recolorBoardColumn(current, column.id, color));
     }));
 
@@ -676,7 +697,7 @@ export function createBoardView(options: BoardViewOptions): BoardViewHandle {
       options.document,
       "structured-board-column-adder-btn",
       "+",
-      () => emit(addBoardColumn(current, `Column ${current.columns.length + 1}`)),
+      () => emit(addBoardColumn(current, labels.newColumn)),
     ));
     board.append(addColumnLane);
     return board;

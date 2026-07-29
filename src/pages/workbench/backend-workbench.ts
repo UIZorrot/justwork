@@ -1115,6 +1115,13 @@ export async function startBackendWorkbench(): Promise<void> {
     applyI18n(document, i18n);
     renderLanguageSwitcher();
     renderWorkspacePlan();
+    tableView?.destroy?.();
+    boardView?.destroy?.();
+    tableView = undefined;
+    boardView = undefined;
+    structuredSurfaceDocId = null;
+    structuredSurfaceKind = null;
+    structuredHost.replaceChildren();
     void refreshHealth();
     void renderGateRecents();
     rerenderActiveWorkbench?.();
@@ -1446,7 +1453,13 @@ export async function startBackendWorkbench(): Promise<void> {
       })();
     });
 
-    const renderQuotaBar = (usedBytes: number, limitBytes: number): void => {
+    const renderQuotaBar = (usedBytes: number, limitBytes: number, unlimited = false): void => {
+      if (unlimited) {
+        topbarQuotaFill.style.width = "0%";
+        topbarQuotaText.textContent = `${formatBytesCompact(usedBytes)} · ${t("quota.externalUnlimited")}`;
+        topbarQuota.dataset.level = "ok";
+        return;
+      }
       const ratio = limitBytes <= 0 ? 1 : Math.max(0, Math.min(1, usedBytes / limitBytes));
       topbarQuotaFill.style.width = `${Math.round(ratio * 100)}%`;
       topbarQuotaText.textContent = `${formatBytesCompact(usedBytes)} / ${formatBytesCompact(limitBytes)}`;
@@ -1461,7 +1474,7 @@ export async function startBackendWorkbench(): Promise<void> {
     const pullQuota = async (): Promise<void> => {
       try {
         const q = await backendClient.getQuota(workspaceId);
-        renderQuotaBar(q.quota.used_bytes, q.quota.limit_bytes);
+        renderQuotaBar(q.quota.used_bytes, q.quota.limit_bytes, q.quota.unlimited === true);
       } catch {
         // Keep previous quota display on transient failure.
       }
@@ -2146,7 +2159,7 @@ export async function startBackendWorkbench(): Promise<void> {
 
     const renderInboxPanel = (): void => {
       const unreadCount = inboxState.notifications.filter((notification) => !notification.isRead).length;
-      workspaceMessageDrawerCount.textContent = unreadCount === 1 ? "1 unread" : `${unreadCount} unread`;
+      workspaceMessageDrawerCount.textContent = t("drawer.message.unreadCount", { count: unreadCount });
       workspaceMessageUnreadBadge.hidden = unreadCount === 0;
       workspaceMessageUnreadBadge.textContent = String(unreadCount);
       renderPeoplePanel();
@@ -2215,7 +2228,7 @@ export async function startBackendWorkbench(): Promise<void> {
           title.className = "workspace-message-author";
           title.textContent = notification.docTitle;
           const timeEl = document.createElement("span");
-          timeEl.textContent = new Date(notification.createdAt).toLocaleTimeString(undefined, {
+          timeEl.textContent = new Date(notification.createdAt).toLocaleTimeString(i18n.locale, {
             hour: "2-digit",
             minute: "2-digit",
           });
@@ -2394,14 +2407,32 @@ export async function startBackendWorkbench(): Promise<void> {
 
     const isStructuredDoc = (doc: WorkspaceDoc): boolean => doc.kind === "table" || doc.kind === "board";
 
+    const createLocalizedDefaultTableContent = (): TableDocumentContent => createDefaultTableContent({
+      nameColumn: t("structured.table.defaultNameColumn"),
+      notesColumn: t("structured.table.defaultNotesColumn"),
+      untitledRow: t("structured.table.defaultUntitledRow"),
+      sheetName: t("structured.table.defaultSheetName"),
+      locale: i18n.locale,
+    });
+
+    const createLocalizedDefaultBoardContent = (): BoardDocumentContent => createDefaultBoardContent({
+      templateTitle: t("structured.board.defaultTemplateTitle"),
+      untitledCard: t("structured.board.untitledCard"),
+      summaryField: t("structured.board.defaultSummaryField"),
+      detailsField: t("structured.board.defaultDetailsField"),
+      todoColumn: t("structured.board.defaultTodoColumn"),
+      doingColumn: t("structured.board.defaultDoingColumn"),
+      doneColumn: t("structured.board.defaultDoneColumn"),
+    });
+
     const normalizedContentForDoc = (doc: WorkspaceDoc): WorkspaceDocContent | null => {
       if (doc.kind === "table") {
         const collaborator = collaborativeStructuredDocs.get(doc.id);
-        return collaborator?.getContent() ?? normalizeStructuredDocumentContent("table", doc.content ?? createDefaultTableContent());
+        return collaborator?.getContent() ?? normalizeStructuredDocumentContent("table", doc.content ?? createLocalizedDefaultTableContent());
       }
       if (doc.kind === "board") {
         const collaborator = collaborativeStructuredDocs.get(doc.id);
-        return collaborator?.getContent() ?? normalizeStructuredDocumentContent("board", doc.content ?? createDefaultBoardContent());
+        return collaborator?.getContent() ?? normalizeStructuredDocumentContent("board", doc.content ?? createLocalizedDefaultBoardContent());
       }
       return null;
     };
@@ -2423,9 +2454,7 @@ export async function startBackendWorkbench(): Promise<void> {
       if (children.length === 0) {
         const empty = document.createElement("p");
         empty.className = "folder-surface-empty";
-        empty.textContent = i18n.locale === "zh-CN"
-          ? "\u8FD9\u4E2A\u6587\u4EF6\u5939\u91CC\u8FD8\u6CA1\u6709\u5185\u5BB9\u3002"
-          : "This folder is empty.";
+        empty.textContent = t("doc.folderEmpty");
         surface.appendChild(empty);
         structuredHost.appendChild(surface);
         return;
@@ -2522,7 +2551,12 @@ export async function startBackendWorkbench(): Promise<void> {
             deleteColumn: t("structured.table.deleteColumn"),
             deleteRow: t("structured.table.deleteRow"),
             freezeHeader: t("structured.table.freezeHeader"),
+            addSheet: t("structured.table.addSheet"),
+            createSheet: t("structured.table.createSheet"),
+            cancelSheet: t("structured.table.cancelSheet"),
+            sheetNamePlaceholder: t("structured.table.sheetNamePlaceholder"),
           },
+          locale: i18n.locale,
           onChange: (nextContent) => {
             if (active.id !== doc.id) return;
             if (isCreatePendingDocId(doc.id) || isCreatePendingDocId(active.id)) {
@@ -2570,19 +2604,22 @@ export async function startBackendWorkbench(): Promise<void> {
             addField: t("structured.board.addField"),
             removeField: t("structured.board.removeField"),
             template: t("structured.board.template"),
-            statuses: i18n.locale === "zh-CN"
-              ? {
-                  todo: "待开始",
-                  doing: "进行中",
-                  done: "已完成",
-                  paused: "已暂停",
-                }
-              : {
-                  todo: "To do",
-                  doing: "In progress",
-                  done: "Done",
-                  paused: "Paused",
-                },
+            expand: t("structured.board.expand"),
+            collapse: t("structured.board.collapse"),
+            columnTemplate: t("structured.board.columnTemplate"),
+            card: t("structured.board.card"),
+            close: t("structured.board.close"),
+            untitledCard: t("structured.board.untitledCard"),
+            noDetails: t("structured.board.noDetails"),
+            columnColor: t("structured.board.columnColor"),
+            newColumn: t("structured.board.newColumn"),
+            newField: t("structured.board.newField"),
+            statuses: {
+              todo: t("structured.board.statusTodo"),
+              doing: t("structured.board.statusDoing"),
+              done: t("structured.board.statusDone"),
+              paused: t("structured.board.statusPaused"),
+            },
           },
           onChange: (nextContent) => {
             if (active.id !== doc.id) return;
@@ -4570,9 +4607,9 @@ export async function startBackendWorkbench(): Promise<void> {
     const createOptimisticDoc = (kind: BackendWorkspaceItemKind, title: string, parentId: string | null): WorkspaceDoc => {
       const now = new Date().toISOString();
       const content = kind === "table"
-        ? normalizeStructuredDocumentContent("table", createDefaultTableContent())
+        ? normalizeStructuredDocumentContent("table", createLocalizedDefaultTableContent())
         : kind === "board"
-          ? normalizeStructuredDocumentContent("board", createDefaultBoardContent())
+          ? normalizeStructuredDocumentContent("board", createLocalizedDefaultBoardContent())
           : null;
       return {
         id: createClientDocId(),
@@ -4645,7 +4682,7 @@ export async function startBackendWorkbench(): Promise<void> {
       insertOptimisticDoc(optimistic);
       syncEditorWithActive();
       renderAll();
-      saveStatus(saveStatusEl, i18n.locale === "zh-CN" ? "正在创建…" : "Creating…");
+      saveStatus(saveStatusEl, t("status.creating"));
       try {
         const submitCreate = (): Promise<WorkspaceDoc> => session.createItem(
           kind,
@@ -4967,13 +5004,13 @@ export async function startBackendWorkbench(): Promise<void> {
               break;
             }
             if (checkoutStatus.status === "expired" || checkoutStatus.status === "failed") {
-              throw new Error(`Stripe Checkout ${checkoutStatus.status}`);
+              throw new Error(t("gate.plan.checkoutStatusError", { status: checkoutStatus.status }));
             }
             if (checkoutWindow.closed && attempt > 1) {
-              throw new Error("Stripe Checkout was closed before payment completed");
+              throw new Error(t("gate.plan.checkoutClosed"));
             }
           }
-          if (!paid) throw new Error("Stripe Checkout timed out before payment completed");
+          if (!paid) throw new Error(t("gate.plan.checkoutTimeout"));
           if (!checkoutWindow.closed) checkoutWindow.close();
           created = await backendClient.completePaidWorkspace({
             checkout_session_id: checkout.checkout_session_id,

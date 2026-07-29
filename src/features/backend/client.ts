@@ -126,6 +126,7 @@ export type WorkspaceQuotaBody = {
   used_bytes: number;
   limit_bytes: number;
   usage_ratio: number;
+  unlimited?: boolean;
 };
 
 export type SearchResult = {

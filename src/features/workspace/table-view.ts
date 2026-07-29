@@ -1,5 +1,6 @@
 import { createUniver, LocaleType, mergeLocales } from "@univerjs/presets";
 import { UniverSheetsCorePreset } from "@univerjs/preset-sheets-core";
+import UniverPresetSheetsCoreEnUS from "@univerjs/preset-sheets-core/locales/en-US";
 import UniverPresetSheetsCoreZhCN from "@univerjs/preset-sheets-core/locales/zh-CN";
 import {
   normalizeStructuredDocumentContent,
@@ -13,6 +14,7 @@ type DocumentLike = Pick<Document, "createElement" | "defaultView">;
 export type TableViewOptions = {
   document: DocumentLike;
   content: TableDocumentContent;
+  locale?: "en" | "zh-CN";
   onChange?: (content: TableDocumentContent) => void;
   labels?: {
     addColumn?: string;
@@ -101,10 +103,12 @@ export function createTableView(options: TableViewOptions): TableViewHandle {
   sheetFooter.append(sheetComposer);
   host.append(sheetFooter);
 
+  const univerLocale = options.locale === "en" ? LocaleType.EN_US : LocaleType.ZH_CN;
+  const univerMessages = options.locale === "en" ? UniverPresetSheetsCoreEnUS : UniverPresetSheetsCoreZhCN;
   const { univer, univerAPI } = createUniver({
-    locale: LocaleType.ZH_CN,
+    locale: univerLocale,
     locales: {
-      [LocaleType.ZH_CN]: mergeLocales(UniverPresetSheetsCoreZhCN),
+      [univerLocale]: mergeLocales(univerMessages),
     },
     presets: [
       UniverSheetsCorePreset({

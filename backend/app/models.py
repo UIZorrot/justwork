@@ -28,6 +28,7 @@ class WorkspaceRecord(BaseModel):
     billing_status: str = "free"
     stripe_customer_id: str | None = None
     stripe_subscription_id: str | None = None
+    custom_database: bool = False
 
 
 class WorkspaceUpsertRequest(BaseModel):
@@ -290,6 +291,7 @@ class WorkspaceQuotaBody(BaseModel):
     used_bytes: int
     limit_bytes: int
     usage_ratio: float
+    unlimited: bool = False
 
 
 class WorkspaceQuotaResponse(BaseModel):

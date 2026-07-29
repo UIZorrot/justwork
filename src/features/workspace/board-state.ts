@@ -55,7 +55,7 @@ function createCardFromTemplateLane(content: BoardDocumentContent, index = 0): B
   return createBoardCardFromTemplate(content.template, content.template.cardTitle || "Untitled card");
 }
 
-export function addBoardCard(content: BoardDocumentContent, columnId: string, title = "Untitled card"): BoardDocumentContent {
+export function addBoardCard(content: BoardDocumentContent, columnId: string, title = ""): BoardDocumentContent {
   const next = cloneBoard(content);
   const seededCard = createCardFromTemplateLane(next);
   const newCard = {

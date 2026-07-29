@@ -192,6 +192,7 @@ class DatabaseGateway:
                 "billing_status": route.billing_status,
                 "stripe_customer_id": route.stripe_customer_id,
                 "stripe_subscription_id": route.stripe_subscription_id,
+                "custom_database": bool(route.database_url_ciphertext),
             }
         )
 

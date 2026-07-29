@@ -132,6 +132,7 @@ _backend_token = os.getenv("JUSTWORK_BACKEND_TOKEN", "").strip()
 
 QUOTA_PLAN_FREE = "free"
 QUOTA_PLAN_PAID = "paid"
+QUOTA_PLAN_CUSTOM_DATABASE = "paid_custom_database"
 MAX_WORKSPACES_PER_OWNER = 5
 AGENT_SKILL_PATH = Path(__file__).resolve().parent.parent / "agent" / "SKILL.md"
 SYNC_MUTATION_LOG_KEY = "__syncMutations"
@@ -148,27 +149,59 @@ def _int_env(name: str, default: int) -> int:
         return default
 
 
+def _int_env_with_legacy(primary_name: str, legacy_name: str, default: int) -> int:
+    if os.getenv(primary_name, "").strip():
+        return _int_env(primary_name, default)
+    return _int_env(legacy_name, default)
+
+
 def _quota_plan_for_workspace(record: WorkspaceRecord | None = None) -> str:
     if record is not None and record.plan == QUOTA_PLAN_PAID and record.billing_status in {
         "paid",
         "active",
         "trialing",
     }:
+        if record.custom_database:
+            return QUOTA_PLAN_CUSTOM_DATABASE
         return QUOTA_PLAN_PAID
     raw = os.getenv("JUSTWORK_QUOTA_PLAN", QUOTA_PLAN_FREE).strip().lower()
     return QUOTA_PLAN_PAID if raw in {"paid", "pro"} else QUOTA_PLAN_FREE
 
 
 def _quota_limits(plan: str) -> dict[str, int]:
+    if plan == QUOTA_PLAN_CUSTOM_DATABASE:
+        return {
+            "workspace_max_bytes": 0,
+            "page_max_count": 0,
+            "folder_max_count": 0,
+        }
     free_workspace_bytes = max(1024, _int_env("JUSTWORK_QUOTA_WORKSPACE_MAX_BYTES_FREE", 41_943_040))
     if plan == QUOTA_PLAN_PAID:
         return {
             "workspace_max_bytes": max(
                 free_workspace_bytes * 4,
-                _int_env("JUSTWORK_QUOTA_WORKSPACE_MAX_BYTES_PAID", free_workspace_bytes * 4),
+                _int_env_with_legacy(
+                    "JUSTWORK_QUOTA_WORKSPACE_MAX_BYTES_PAID",
+                    "JUSTWORK_QUOTA_WORKSPACE_MAX_BYTES_PRO",
+                    free_workspace_bytes * 4,
+                ),
             ),
-            "page_max_count": max(1, _int_env("JUSTWORK_QUOTA_PAGE_MAX_COUNT_PRO", 1_500)),
-            "folder_max_count": max(1, _int_env("JUSTWORK_QUOTA_FOLDER_MAX_COUNT_PRO", 500)),
+            "page_max_count": max(
+                1,
+                _int_env_with_legacy(
+                    "JUSTWORK_QUOTA_PAGE_MAX_COUNT_PAID",
+                    "JUSTWORK_QUOTA_PAGE_MAX_COUNT_PRO",
+                    1_500,
+                ),
+            ),
+            "folder_max_count": max(
+                1,
+                _int_env_with_legacy(
+                    "JUSTWORK_QUOTA_FOLDER_MAX_COUNT_PAID",
+                    "JUSTWORK_QUOTA_FOLDER_MAX_COUNT_PRO",
+                    500,
+                ),
+            ),
         }
     return {
         "workspace_max_bytes": free_workspace_bytes,
@@ -177,14 +210,29 @@ def _quota_limits(plan: str) -> dict[str, int]:
     }
 
 
+def _history_limit_for_plan(plan: str) -> int:
+    if plan in {QUOTA_PLAN_PAID, QUOTA_PLAN_CUSTOM_DATABASE}:
+        # Paid workspaces guarantee exactly the supported 1000-event history.
+        return 1_000
+    return max(1, min(1_000, _int_env("JUSTWORK_QUOTA_HISTORY_MAX_EVENTS_FREE", 200)))
+
+
 def _state_payload_size_bytes(state_payload: dict) -> int:
     return len(json.dumps(state_payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
 
 
 def get_workspace_quota_snapshot(record: WorkspaceRecord) -> WorkspaceQuotaBody:
     plan = _quota_plan_for_workspace(record)
-    limits = _quota_limits(plan)
     used_bytes = len(record.encrypted_payload.encode("utf-8"))
+    if plan == QUOTA_PLAN_CUSTOM_DATABASE:
+        return WorkspaceQuotaBody(
+            plan=plan,
+            used_bytes=used_bytes,
+            limit_bytes=0,
+            usage_ratio=0,
+            unlimited=True,
+        )
+    limits = _quota_limits(plan)
     limit_bytes = limits["workspace_max_bytes"]
     usage_ratio = 1.0 if limit_bytes <= 0 else min(1.0, used_bytes / limit_bytes)
     return WorkspaceQuotaBody(
@@ -196,6 +244,8 @@ def get_workspace_quota_snapshot(record: WorkspaceRecord) -> WorkspaceQuotaBody:
 
 
 def apply_workspace_quotas_or_raise(state_payload: dict, plan: str) -> None:
+    if plan == QUOTA_PLAN_CUSTOM_DATABASE:
+        return
     limits = _quota_limits(plan)
 
     docs = state_payload.get("docs", [])
@@ -614,6 +664,7 @@ def save_state(
         billing_status=record.billing_status,
         stripe_customer_id=record.stripe_customer_id,
         stripe_subscription_id=record.stripe_subscription_id,
+        custom_database=record.custom_database,
     )
     saved = gateway.compare_and_swap_workspace(next_record, record.encrypted_payload)
     if saved is None:
@@ -687,6 +738,7 @@ def paid_workspace_billing_config(
         enabled=config.enabled,
         checkout_mode=config.checkout_mode,
         price_label=config.price_label,
+        history_limit=_history_limit_for_plan(QUOTA_PLAN_PAID),
         custom_database_enabled=len(routing_secret) >= 32,
     )
 
@@ -779,9 +831,12 @@ def complete_paid_workspace(
         workspace_title = (body.title or "").strip() or default_workspace_title(workspace_id)
         state_payload = make_initial_workspace_state(workspace_title)
         state_payload["billingPlan"] = QUOTA_PLAN_PAID
-        state_payload["historyLimit"] = 1000
+        state_payload["historyLimit"] = _history_limit_for_plan(QUOTA_PLAN_PAID)
         ensure_workspace_members(state_payload, body.owner_user_id, body.nickname)
-        apply_workspace_quotas_or_raise(state_payload, QUOTA_PLAN_PAID)
+        apply_workspace_quotas_or_raise(
+            state_payload,
+            QUOTA_PLAN_CUSTOM_DATABASE if database_url_ciphertext is not None else QUOTA_PLAN_PAID,
+        )
         created_at = now_iso()
         record = WorkspaceRecord(
             workspace_id=workspace_id,
@@ -793,6 +848,7 @@ def complete_paid_workspace(
             billing_status="paid",
             stripe_customer_id=claimed.stripe_customer_id,
             stripe_subscription_id=claimed.stripe_subscription_id,
+            custom_database=database_url_ciphertext is not None,
         )
         route = WorkspaceRouteRecord(
             workspace_id=workspace_id,
@@ -882,7 +938,7 @@ def create_workspace(
     workspace_title = raw_title or default_title
     state_payload = make_initial_workspace_state(workspace_title)
     state_payload["billingPlan"] = QUOTA_PLAN_FREE
-    state_payload["historyLimit"] = 200
+    state_payload["historyLimit"] = _history_limit_for_plan(QUOTA_PLAN_FREE)
     ensure_workspace_members(state_payload, body.owner_user_id, body.nickname)
     apply_workspace_quotas_or_raise(state_payload, _quota_plan_for_workspace(None))
     now = now_iso()
