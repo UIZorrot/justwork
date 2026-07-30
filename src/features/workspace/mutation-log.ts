@@ -16,6 +16,7 @@ export type WorkspaceMutationPatch = {
   content?: WorkspaceDocContent | null;
   parentId?: string | null;
   orderKey?: number;
+  orderRank?: string;
   pinned?: boolean;
 };
 
@@ -80,7 +81,10 @@ function isDeleteMutationConfirmed(doc: WorkspaceDoc | undefined, mutation: Work
 
 function isPatchConfirmed(doc: WorkspaceDoc, mutation: WorkspaceMutation): boolean {
   const patch = mutation.patch ?? {};
-  if (mutation.kind === "move") return patch.parentId === doc.parentId;
+  if (mutation.kind === "move") {
+    return patch.parentId === doc.parentId
+      && (patch.orderRank === undefined || patch.orderRank === doc.orderRank);
+  }
   if (mutation.kind === "pin") return patch.pinned === doc.pinned;
   return false;
 }
@@ -101,6 +105,7 @@ function replayPatch(
     content: patch.content ?? current.content ?? null,
     parentId: patch.parentId === undefined ? current.parentId : patch.parentId,
     orderKey: patch.orderKey ?? current.orderKey,
+    orderRank: patch.orderRank ?? current.orderRank,
     pinned: patch.pinned ?? current.pinned,
     // Keep the revision the pending operation was authored against. Adopting
     // the server's newer revision here would bypass conflict detection later.

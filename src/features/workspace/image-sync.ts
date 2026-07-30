@@ -38,6 +38,7 @@ type WorkspaceImageSyncOptions = {
   userId?: string;
   onAssetChanged?: () => void;
   onCommunityStateChange?: (state: WorkspaceCommunityState) => void;
+  onWorkspaceInvalidated?: () => void;
 };
 
 export async function createWorkspaceImageSync(opts: WorkspaceImageSyncOptions): Promise<WorkspaceImageSync> {
@@ -165,6 +166,9 @@ export async function createWorkspaceImageSync(opts: WorkspaceImageSyncOptions):
     onPresenceLeave: (message) => {
       communityMembers.delete(message.sessionId);
       emitCommunityState();
+    },
+    onWorkspaceInvalidated: () => {
+      opts.onWorkspaceInvalidated?.();
     },
     onAssetComplete: async (meta, bytes) => {
       const next = await store.put({

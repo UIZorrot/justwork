@@ -156,6 +156,7 @@ class WorkspaceRelayJoinRequest(BaseModel):
 
 class WorkspaceCollabJoinRequest(BaseModel):
     password: str = Field(min_length=1)
+    protocol_version: int = 1
 
 
 class WorkspaceTreeItem(BaseModel):
@@ -164,6 +165,7 @@ class WorkspaceTreeItem(BaseModel):
     kind: Literal["page", "folder", "table", "board"]
     parent_id: str | None = None
     order_key: float = 0
+    order_rank: str = ""
     pinned: bool = False
     in_trash: bool = False
     revision: int = 0
@@ -187,6 +189,7 @@ class WorkspaceItem(BaseModel):
     kind: Literal["page", "folder", "table", "board"]
     parent_id: str | None = None
     order_key: float = 0
+    order_rank: str = ""
     pinned: bool = False
     in_trash: bool = False
     revision: int = 0
@@ -222,6 +225,7 @@ class WorkspaceItemUpdateRequest(WriteSigningEnvelope):
     markdown: str | None = None
     content: dict[str, Any] | None = None
     collaborative_update: str | None = None
+    collaborative_epoch: str | None = None
     expected_revision: int
 
 
@@ -314,6 +318,16 @@ class WorkspaceCollabJoinResponse(BaseModel):
     ticket: str
     expires_at: str
     bootstrap_owner: bool = False
+    room_epoch: str
+    snapshot_base64: str | None = None
+
+
+class WorkspaceCollabStateResponse(BaseModel):
+    ok: bool
+    workspace_id: str
+    item_id: str
+    room_epoch: str
+    snapshot_base64: str | None = None
 
 
 class WorkspaceRevisionEvent(BaseModel):
@@ -337,7 +351,8 @@ class WorkspaceRevisionHistoryResponse(BaseModel):
 class WorkspaceItemMoveRequest(WriteSigningEnvelope):
     password: str = Field(min_length=1)
     parent_id: str | None = None
-    order_key: float = 0
+    order_key: float | None = None
+    order_rank: str | None = Field(default=None, max_length=128)
     expected_revision: int
 
 

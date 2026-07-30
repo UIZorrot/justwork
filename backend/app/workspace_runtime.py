@@ -5,6 +5,23 @@ from datetime import datetime, timezone
 
 ROOT_FOLDER_ID = "root"
 WELCOME_DOC_ID = "welcome"
+ORDER_RANK_MAX = (1 << 128) - 1
+ORDER_RANK_STEP = 1 << 64
+ORDER_RANK_PATTERN = re.compile(r"^[0-9a-f]{32}(?:~[A-Za-z0-9_-]{1,80})?$")
+
+
+def normalize_order_rank(value: object) -> str | None:
+    rank = str(value or "").strip()
+    return rank if ORDER_RANK_PATTERN.fullmatch(rank) else None
+
+
+def order_rank_base(value: object) -> int:
+    rank = normalize_order_rank(value)
+    return int(rank[:32], 16) if rank else 0
+
+
+def format_order_rank(value: int) -> str:
+    return f"{max(0, min(ORDER_RANK_MAX, value)):032x}"
 
 
 def now_iso() -> str:
@@ -279,6 +296,7 @@ def make_initial_workspace_state(workspace_title: str, initial_doc_title: str = 
                 "updatedAt": now,
                 "lastVisitedAt": now,
                 "parentId": None,
+                "orderRank": format_order_rank(ORDER_RANK_STEP),
                 "pinned": False,
                 "inTrash": False,
                 "kind": "folder",
@@ -292,6 +310,7 @@ def make_initial_workspace_state(workspace_title: str, initial_doc_title: str = 
                 "updatedAt": now,
                 "lastVisitedAt": now,
                 "parentId": ROOT_FOLDER_ID,
+                "orderRank": format_order_rank(ORDER_RANK_STEP),
                 "pinned": False,
                 "inTrash": False,
                 "kind": "page",
@@ -363,6 +382,16 @@ def normalize_workspace_state(state: dict) -> dict:
             order_key = next_order_by_parent.get(parent_key, 0.0)
         doc["orderKey"] = order_key
         next_order_by_parent[parent_key] = max(next_order_by_parent.get(parent_key, 0.0), order_key + 1024.0)
+    docs_by_parent: dict[str, list[dict]] = {}
+    for doc in docs:
+        docs_by_parent.setdefault(str(doc.get("parentId") or ""), []).append(doc)
+    for siblings in docs_by_parent.values():
+        if all(normalize_order_rank(doc.get("orderRank")) for doc in siblings):
+            continue
+        ordered = sorted(siblings, key=lambda doc: (float(doc.get("orderKey", 0)), str(doc.get("id", ""))))
+        step = ORDER_RANK_MAX // (len(ordered) + 1)
+        for index, doc in enumerate(ordered, start=1):
+            doc["orderRank"] = format_order_rank(step * index)
     active_doc_id = state.get("activeDocId")
     active = find_doc({**state, "docs": docs}, active_doc_id) if active_doc_id else None
     if active is None or active.get("inTrash", False):
@@ -443,6 +472,7 @@ def tree_items(state: dict) -> list[dict]:
             "kind": doc.get("kind", "page"),
             "parent_id": doc.get("parentId"),
             "order_key": float(doc.get("orderKey", 0)),
+            "order_rank": normalize_order_rank(doc.get("orderRank")) or format_order_rank(0),
             "pinned": bool(doc.get("pinned", False)),
             "in_trash": bool(doc.get("inTrash", False)),
             "revision": int(doc.get("revision", 0)),
@@ -461,6 +491,7 @@ def item_view(doc: dict) -> dict:
         "kind": doc.get("kind", "page"),
         "parent_id": doc.get("parentId"),
         "order_key": float(doc.get("orderKey", 0)),
+        "order_rank": normalize_order_rank(doc.get("orderRank")) or format_order_rank(0),
         "pinned": bool(doc.get("pinned", False)),
         "in_trash": bool(doc.get("inTrash", False)),
         "revision": int(doc.get("revision", 0)),
@@ -486,14 +517,19 @@ def update_doc(state: dict, item_id: str, title: str | None, markdown: str | Non
             raise ValueError(f"{kind} markdown cannot be updated")
     else:
         raise ValueError("unsupported item kind")
-    if title is not None:
+    changed = False
+    if title is not None and title != doc.get("title", ""):
         doc["title"] = title
-    if markdown is not None:
+        changed = True
+    if markdown is not None and markdown != doc.get("markdown", ""):
         doc["markdown"] = markdown
-    if content is not None:
+        changed = True
+    if content is not None and content != doc.get("content"):
         doc["content"] = content
-    doc["revision"] = int(doc.get("revision", 0)) + 1
-    doc["updatedAt"] = now_iso()
+        changed = True
+    if changed:
+        doc["revision"] = int(doc.get("revision", 0)) + 1
+        doc["updatedAt"] = now_iso()
     return doc
 
 
@@ -521,6 +557,7 @@ def create_doc(state: dict, kind: str, title: str, parent_id: str | None, doc_id
         raise ValueError("item id already exists")
 
     sibling_order = [float(entry.get("orderKey", 0)) for entry in child_docs(state, parent["id"])]
+    sibling_ranks = [order_rank_base(entry.get("orderRank")) for entry in child_docs(state, parent["id"])]
     doc = {
         "id": chosen_id,
         "title": normalized_title,
@@ -531,6 +568,12 @@ def create_doc(state: dict, kind: str, title: str, parent_id: str | None, doc_id
         "lastVisitedAt": now,
         "parentId": parent["id"],
         "orderKey": (max(sibling_order) + 1024.0) if sibling_order else 0.0,
+        "orderRank": format_order_rank(
+            min(
+                ORDER_RANK_MAX,
+                (max(sibling_ranks) if sibling_ranks else 0) + ORDER_RANK_STEP,
+            )
+        ),
         "pinned": False,
         "inTrash": False,
         "kind": kind,
@@ -603,7 +646,13 @@ def hard_delete_doc(state: dict, item_id: str) -> dict:
     return doc
 
 
-def move_doc(state: dict, item_id: str, parent_id: str | None, order_key: float = 0) -> dict:
+def move_doc(
+    state: dict,
+    item_id: str,
+    parent_id: str | None,
+    order_key: float | None = None,
+    order_rank: str | None = None,
+) -> dict:
     doc = find_doc(state, item_id)
     if doc is None:
         raise KeyError(item_id)
@@ -616,7 +665,24 @@ def move_doc(state: dict, item_id: str, parent_id: str | None, order_key: float 
         if parent is None or parent.get("kind") != "folder":
             raise ValueError("parent must be a folder")
     doc["parentId"] = parent_id
-    doc["orderKey"] = float(order_key)
+    normalized_rank = normalize_order_rank(order_rank)
+    if order_rank is not None and normalized_rank is None:
+        raise ValueError("invalid order rank")
+    if normalized_rank is not None:
+        doc["orderRank"] = normalized_rank
+    if order_key is not None:
+        doc["orderKey"] = float(order_key)
+        if normalized_rank is None:
+            # Compatibility for pre-rank clients: preserve their requested
+            # float ordering once, then rebalance the affected sibling set into
+            # stable ranks used by current clients.
+            siblings = sorted(
+                child_docs(state, parent_id),
+                key=lambda entry: (float(entry.get("orderKey", 0)), str(entry.get("id", ""))),
+            )
+            step = ORDER_RANK_MAX // (len(siblings) + 1)
+            for index, sibling in enumerate(siblings, start=1):
+                sibling["orderRank"] = format_order_rank(step * index)
     doc["updatedAt"] = now_iso()
     doc["revision"] = int(doc.get("revision", 0)) + 1
     return doc

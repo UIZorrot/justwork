@@ -133,3 +133,9 @@ test("an old idempotent response cannot confirm newer editor text", async () => 
     markdown: "newer typing",
   }, request), false);
 });
+
+test("remote-only changes do not masquerade as a newer local save generation", async () => {
+  const mod = await importTsModule("src/features/collaboration/save-race.ts");
+  assert.equal(mod.hasNewerLocalEditGeneration(4, 4), false);
+  assert.equal(mod.hasNewerLocalEditGeneration(4, 5), true);
+});

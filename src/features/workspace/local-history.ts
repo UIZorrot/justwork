@@ -26,6 +26,7 @@ export type LocalHistorySnapshot = {
   inTrash?: boolean;
   parentId?: string | null;
   orderKey?: number;
+  orderRank?: string;
 };
 
 export type LocalHistoryEvent = {
@@ -81,6 +82,7 @@ function normalizeSnapshot(value: unknown): LocalHistorySnapshot {
     snapshot.parentId = record.parentId ?? null;
   }
   if (typeof record.orderKey === "number") snapshot.orderKey = record.orderKey;
+  if (typeof record.orderRank === "string") snapshot.orderRank = record.orderRank;
   return snapshot;
 }
 

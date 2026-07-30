@@ -21,6 +21,7 @@ def item_snapshot(item: dict | None) -> dict:
         "inTrash": bool(item.get("inTrash", False)),
         "parentId": item.get("parentId"),
         "orderKey": float(item.get("orderKey", 0)),
+        "orderRank": str(item.get("orderRank", "")),
         "revision": int(item.get("revision", 0)),
         "kind": str(item.get("kind", "page")),
     }

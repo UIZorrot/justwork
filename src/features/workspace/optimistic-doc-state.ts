@@ -17,11 +17,13 @@ export function applyOptimisticMove(
   parentId: string | null,
   orderKey: number,
   updatedAt: string,
+  orderRank?: string,
 ): WorkspaceDocsState {
   return updateDocInState(state, itemId, (doc) => ({
     ...doc,
     parentId,
     orderKey,
+    orderRank: orderRank ?? doc.orderRank,
     revision: doc.revision,
     updatedAt,
   }));

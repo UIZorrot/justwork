@@ -25,6 +25,7 @@ export function apiTreeItemToPartialDoc(item: WorkspaceTreeItem): WorkspaceDoc {
     lastVisitedAt: item.updated_at,
     parentId: item.parent_id,
     orderKey: item.order_key,
+    orderRank: item.order_rank,
     pinned: item.pinned,
     inTrash: item.in_trash,
     kind: item.kind as WorkspaceDoc["kind"],
@@ -42,6 +43,7 @@ export function apiItemToDoc(item: WorkspaceItem): WorkspaceDoc {
     lastVisitedAt: item.updated_at,
     parentId: item.parent_id,
     orderKey: item.order_key,
+    orderRank: item.order_rank,
     pinned: item.pinned,
     inTrash: item.in_trash,
     kind: item.kind as WorkspaceDoc["kind"],
@@ -94,7 +96,10 @@ export function createBackendWorkspaceSession(opts: BackendWorkspaceSessionOptio
     },
 
     async joinCollaborativeMarkdown(itemId: string) {
-      return client.joinCollaborativeMarkdown(opts.workspaceId, itemId, { password: opts.password });
+      return client.joinCollaborativeMarkdown(opts.workspaceId, itemId, {
+        password: opts.password,
+        protocol_version: 3,
+      });
     },
 
     async loadCollaborativeMarkdownState(itemId: string) {
@@ -151,6 +156,7 @@ export function createBackendWorkspaceSession(opts: BackendWorkspaceSessionOptio
         markdown?: string;
         content?: WorkspaceDocContent | null;
         collaborativeUpdate?: string;
+        collaborativeEpoch?: string;
         expectedRevision: number;
         mutationId?: string;
       },
@@ -161,6 +167,7 @@ export function createBackendWorkspaceSession(opts: BackendWorkspaceSessionOptio
         markdown: patch.markdown ?? null,
         content: patch.content ?? null,
         collaborative_update: patch.collaborativeUpdate ?? null,
+        collaborative_epoch: patch.collaborativeEpoch ?? null,
         expected_revision: patch.expectedRevision,
         client_mutation_id: patch.mutationId ?? null,
       });
@@ -198,14 +205,15 @@ export function createBackendWorkspaceSession(opts: BackendWorkspaceSessionOptio
     async moveItem(
       itemId: string,
       parentId: string | null,
-      orderKey: number,
+      order: number | string,
       expectedRevision: number,
       clientMutationId?: string | null,
     ) {
       const r = await client.moveItem(opts.workspaceId, itemId, {
         password: opts.password,
         parent_id: parentId,
-        order_key: orderKey,
+        order_key: typeof order === "number" ? order : null,
+        order_rank: typeof order === "string" ? order : null,
         expected_revision: expectedRevision,
         client_mutation_id: clientMutationId ?? null,
       });

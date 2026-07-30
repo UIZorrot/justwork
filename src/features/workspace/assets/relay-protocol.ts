@@ -39,6 +39,12 @@ export type WorkspacePresenceSyncMessage = {
   workspaceId: string;
 };
 
+export type WorkspaceInvalidatedMessage = {
+  type: "workspace.invalidated";
+  workspaceId: string;
+  updatedAt: string;
+};
+
 export type WorkspacePresenceMember = {
   sessionId: string;
   displayName: string;
@@ -89,7 +95,8 @@ export type RelayMessage =
   | WorkspacePresenceSnapshotMessage
   | WorkspacePresenceJoinMessage
   | WorkspacePresenceLeaveMessage
-  | WorkspacePresenceSyncMessage;
+  | WorkspacePresenceSyncMessage
+  | WorkspaceInvalidatedMessage;
 
 function isString(value: unknown): value is string {
   return typeof value === "string";
@@ -186,6 +193,10 @@ export function parseRelayMessage(value: unknown): RelayMessage | null {
         : null;
     case "workspace.presence.sync":
       return isString(msg.workspaceId) ? { type: "workspace.presence.sync", workspaceId: msg.workspaceId } : null;
+    case "workspace.invalidated":
+      return isString(msg.workspaceId) && isString(msg.updatedAt)
+        ? { type: "workspace.invalidated", workspaceId: msg.workspaceId, updatedAt: msg.updatedAt }
+        : null;
     default:
       return null;
   }

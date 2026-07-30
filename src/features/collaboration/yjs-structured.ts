@@ -3,7 +3,7 @@ import {
   normalizeStructuredDocumentContent,
   type StructuredDocumentContent,
   type StructuredDocumentKind,
-} from "@/features/workspace/structured-document";
+} from "../workspace/structured-document";
 
 export type StructuredCollaborator = {
   readonly doc: Y.Doc;
@@ -20,18 +20,78 @@ export type StructuredCollaboratorOptions = {
   initialContent?: StructuredDocumentContent;
 };
 
+const KEYED_ARRAY_TYPE = "justwork-keyed-array-v1";
+
+function stableArrayEntryKey(value: unknown): string | null {
+  if (typeof value === "string" && value) return `value:${value}`;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  for (const field of ["id", "columnId", "templateFieldId", "sheetId"]) {
+    if (typeof record[field] === "string" && record[field]) return `${field}:${record[field]}`;
+  }
+  return null;
+}
+
+function canUseKeyedArray(values: unknown[]): boolean {
+  const keys = values.map(stableArrayEntryKey);
+  return keys.every((key): key is string => key !== null) && new Set(keys).size === keys.length;
+}
+
+function createKeyedArray(values: unknown[]): Y.Map<unknown> {
+  const entries = values.map((value) => [stableArrayEntryKey(value)!, toYValue(value)] as const);
+  const rankEntries = values.map((value, index) => [stableArrayEntryKey(value)!, index * 1024] as const);
+  return new Y.Map<unknown>([
+    ["__type", KEYED_ARRAY_TYPE],
+    ["items", new Y.Map<unknown>(entries)],
+    ["ranks", new Y.Map<number>(rankEntries)],
+  ]);
+}
+
+function isKeyedArray(value: unknown): boolean {
+  return value instanceof Y.Map && value.get("__type") === KEYED_ARRAY_TYPE;
+}
+
+function syncKeyedArray(container: Y.Map<unknown>, values: unknown[]): void {
+  const items = container.get("items") as Y.Map<unknown> | undefined;
+  const ranks = container.get("ranks") as Y.Map<number> | undefined;
+  if (!(items instanceof Y.Map) || !(ranks instanceof Y.Map)) return;
+  const nextKeys = values.map(stableArrayEntryKey);
+  if (nextKeys.some((key) => key === null)) return;
+  const keep = new Set(nextKeys as string[]);
+  for (const key of [...items.keys()]) {
+    if (!keep.has(key)) items.delete(key);
+  }
+  for (const key of [...ranks.keys()]) {
+    if (!keep.has(key)) ranks.delete(key);
+  }
+  values.forEach((value, index) => {
+    const key = nextKeys[index]!;
+    const existing = items.get(key);
+    if (existing instanceof Y.Map && value && typeof value === "object" && !Array.isArray(value)) {
+      syncYMap(existing, value as Record<string, unknown>);
+    } else if (existing === undefined || fromYValue(existing) !== value) {
+      items.set(key, toYValue(value));
+    }
+    // Each item's rank is an independent CRDT register. Concurrent cell/card
+    // edits no longer delete and recreate unrelated rows, columns, or cards.
+    const nextRank = index * 1024;
+    if (ranks.get(key) !== nextRank) ranks.set(key, nextRank);
+  });
+}
+
 function toYValue(value: unknown): Y.Map<unknown> | Y.Array<unknown> | string | number | boolean | null {
   if (Array.isArray(value)) {
+    if (value.length > 0 && canUseKeyedArray(value)) return createKeyedArray(value);
     const array = new Y.Array<unknown>();
     array.insert(0, value.map((entry) => toYValue(entry)));
     return array;
   }
   if (value && typeof value === "object") {
-    const map = new Y.Map<unknown>();
-    for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
-      map.set(key, toYValue(entry));
-    }
-    return map;
+    return new Y.Map<unknown>(
+      Object.entries(value as Record<string, unknown>).map(
+        ([key, entry]) => [key, toYValue(entry)] as const,
+      ),
+    );
   }
   if (
     typeof value === "string" ||
@@ -46,6 +106,16 @@ function toYValue(value: unknown): Y.Map<unknown> | Y.Array<unknown> | string | 
 
 function fromYValue(value: unknown): unknown {
   if (value instanceof Y.Map) {
+    if (isKeyedArray(value)) {
+      const items = (value as Y.Map<unknown>).get("items") as Y.Map<unknown> | undefined;
+      const ranks = (value as Y.Map<unknown>).get("ranks") as Y.Map<number> | undefined;
+      if (!(items instanceof Y.Map) || !(ranks instanceof Y.Map)) return [];
+      return [...items.entries()]
+        .sort(([leftKey], [rightKey]) => (
+          (ranks.get(leftKey) ?? 0) - (ranks.get(rightKey) ?? 0) || leftKey.localeCompare(rightKey)
+        ))
+        .map(([, entry]) => fromYValue(entry));
+    }
     const result: Record<string, unknown> = {};
     for (const [key, entry] of value.entries()) {
       result[key] = fromYValue(entry);
@@ -66,12 +136,23 @@ function syncYMap(target: Y.Map<unknown>, next: Record<string, unknown>): void {
   }
   for (const [key, value] of Object.entries(next)) {
     const existing = target.get(key);
+    if (isKeyedArray(existing) && Array.isArray(value) && canUseKeyedArray(value)) {
+      syncKeyedArray(existing as Y.Map<unknown>, value);
+      continue;
+    }
     if (existing instanceof Y.Map && value && typeof value === "object" && !Array.isArray(value)) {
       syncYMap(existing, value as Record<string, unknown>);
       continue;
     }
     if (existing instanceof Y.Array && Array.isArray(value)) {
+      if (canUseKeyedArray(value)) {
+        target.set(key, createKeyedArray(value));
+        continue;
+      }
       syncYArray(existing, value);
+      continue;
+    }
+    if (!(existing instanceof Y.Map) && !(existing instanceof Y.Array) && Object.is(existing, value)) {
       continue;
     }
     target.set(key, toYValue(value));

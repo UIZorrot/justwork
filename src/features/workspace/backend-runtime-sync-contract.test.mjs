@@ -10,4 +10,5 @@ test("backend runtime forwards sync metadata to backend write requests", async (
   assert.match(source, /expected_revision:\s*expectedRevision/);
   assert.doesNotMatch(source, /expected_revision:\s*(?:patch\.)?expectedRevision\s*\?\?\s*null/);
   assert.match(source, /collaborative_update:\s*patch\.collaborativeUpdate\s*\?\?\s*null/);
+  assert.match(source, /collaborative_epoch:\s*patch\.collaborativeEpoch\s*\?\?\s*null/);
 });

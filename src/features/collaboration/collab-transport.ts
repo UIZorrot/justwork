@@ -9,6 +9,44 @@ export type CollaborativeTransport = {
   close: () => void;
 };
 
+type PendingUpdate = {
+  id: string;
+  update: Uint8Array;
+  lastSentAt: number;
+  attempts: number;
+};
+
+const MAX_PENDING_UPDATES = 256;
+const MAX_PENDING_BYTES = 8 * 1024 * 1024;
+const MAX_SOCKET_BUFFERED_BYTES = 1024 * 1024;
+const RETRY_AFTER_MS = 1_500;
+const SEND_WINDOW = 32;
+const durablePendingByRoom = new Map<string, Map<string, PendingUpdate>>();
+
+function roomKey(url: string): string {
+  const parsed = new URL(url);
+  parsed.searchParams.delete("ticket");
+  return parsed.toString();
+}
+
+function updateId(): string {
+  if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
+  const bytes = new Uint8Array(16);
+  globalThis.crypto?.getRandomValues?.(bytes);
+  return `${Date.now().toString(36)}-${Array.from(bytes, (value) => value.toString(16).padStart(2, "0")).join("")}`;
+}
+
+function encodeBase64(update: Uint8Array): string {
+  let binary = "";
+  for (const byte of update) binary += String.fromCharCode(byte);
+  return btoa(binary);
+}
+
+function decodeBase64(encoded: string): Uint8Array {
+  const binary = atob(encoded);
+  return Uint8Array.from(binary, (character) => character.charCodeAt(0));
+}
+
 export function createCollaborativeTransport(
   url: string,
   protocols?: string | string[],
@@ -16,15 +54,29 @@ export function createCollaborativeTransport(
   const socket = new WebSocket(url, protocols);
   const handlers = new Set<CollaborativeUpdateHandler>();
   const statusHandlers = new Set<CollaborativeStatusHandler>();
-  const pendingUpdates: Uint8Array[] = [];
+  const key = roomKey(url);
+  const pendingUpdates = durablePendingByRoom.get(key) ?? new Map<string, PendingUpdate>();
+  durablePendingByRoom.set(key, pendingUpdates);
 
   const flushPendingUpdates = (): void => {
     if (socket.readyState !== WebSocket.OPEN) return;
-    while (pendingUpdates.length > 0) {
-      const next = pendingUpdates.shift();
-      if (next) socket.send(next);
+    const now = Date.now();
+    let sent = 0;
+    for (const pending of pendingUpdates.values()) {
+      if (sent >= SEND_WINDOW || socket.bufferedAmount >= MAX_SOCKET_BUFFERED_BYTES) break;
+      if (pending.lastSentAt > 0 && now - pending.lastSentAt < RETRY_AFTER_MS) continue;
+      socket.send(JSON.stringify({
+        type: "collab.update",
+        updateId: pending.id,
+        payloadBase64: encodeBase64(pending.update),
+      }));
+      pending.lastSentAt = now;
+      pending.attempts += 1;
+      sent += 1;
     }
   };
+
+  const retryTimer = window.setInterval(flushPendingUpdates, 500);
 
   socket.binaryType = "arraybuffer";
   const notifyStatus = (): void => {
@@ -38,6 +90,28 @@ export function createCollaborativeTransport(
   socket.addEventListener("error", notifyStatus);
   socket.addEventListener("message", (event) => {
     const payload = event.data;
+    if (typeof payload === "string") {
+      try {
+        const message = JSON.parse(payload) as {
+          type?: string;
+          updateId?: string;
+          payloadBase64?: string;
+        };
+        if (message.type === "collab.ack" && message.updateId) {
+          pendingUpdates.delete(message.updateId);
+          if (pendingUpdates.size === 0) durablePendingByRoom.delete(key);
+          flushPendingUpdates();
+          return;
+        }
+        if (message.type === "collab.update" && message.payloadBase64) {
+          const update = decodeBase64(message.payloadBase64);
+          for (const handler of handlers) handler(update);
+        }
+      } catch {
+        // Ignore malformed control frames; canonical state is reloaded on reconnect.
+      }
+      return;
+    }
     if (payload instanceof ArrayBuffer) {
       const update = new Uint8Array(payload);
       for (const handler of handlers) handler(update);
@@ -59,7 +133,18 @@ export function createCollaborativeTransport(
       if (socket.readyState === WebSocket.CLOSING || socket.readyState === WebSocket.CLOSED) {
         throw new Error("Collaborative transport is closed");
       }
-      pendingUpdates.push(update.slice());
+      const pendingBytes = Array.from(pendingUpdates.values()).reduce(
+        (total, entry) => total + entry.update.byteLength,
+        0,
+      );
+      if (
+        pendingUpdates.size >= MAX_PENDING_UPDATES ||
+        pendingBytes + update.byteLength > MAX_PENDING_BYTES
+      ) {
+        throw new Error("Collaborative transport backpressure limit reached");
+      }
+      const id = updateId();
+      pendingUpdates.set(id, { id, update: update.slice(), lastSentAt: 0, attempts: 0 });
       flushPendingUpdates();
     },
     onUpdate: (handler) => {
@@ -75,6 +160,7 @@ export function createCollaborativeTransport(
       };
     },
     close: () => {
+      window.clearInterval(retryTimer);
       socket.close();
       handlers.clear();
       statusHandlers.clear();

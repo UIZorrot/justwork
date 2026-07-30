@@ -1,6 +1,7 @@
 /** JustWork online workbench: all durable document operations go through the fixed Backend API. */
 
 import { loadOrCreateLocalIdentity } from "@justwork/workspace-runtime";
+import { mergeUpdates } from "yjs";
 import {
   BackendApiError,
   createBackendClient,
@@ -110,20 +111,23 @@ import {
 } from "@/features/workspace/optimistic-create-patches";
 import { applyBackendDocDraft, type BackendDocDraft } from "@/features/workspace/backend-doc-drafts";
 import { mergeSyncValue, syncValuesEqual } from "@/features/workspace/three-way-merge";
-import { compareDocumentOrder, orderKeyForInsertion } from "@/features/workspace/document-order";
+import { compareDocumentOrder, orderKeyForInsertion, orderRankForInsertion } from "@/features/workspace/document-order";
 import { createTableView, type TableViewHandle } from "@/features/workspace/table-view";
 import {
   loadCollaborativeSnapshot,
+  loadCollaborativeSnapshotEpoch,
   removeCollaborativeSnapshot,
   saveCollaborativeSnapshot,
+  saveCollaborativeSnapshotEpoch,
 } from "@/features/collaboration/collab-storage";
 import { overlayDirtyCollaborativeDocs } from "@/features/collaboration/dirty-docs";
 import { planPageEditPersistence } from "@/features/collaboration/page-edit-persistence";
+import { shouldResetCollaborativeLineage } from "@/features/collaboration/room-epoch";
 import { isTransportUsable, safeSendCollaborativeUpdate } from "@/features/collaboration/transport-resilience";
 import { createMarkdownCollaborator } from "@/features/collaboration/yjs-markdown";
 import { createStructuredCollaborator } from "@/features/collaboration/yjs-structured";
 import {
-  hasStaleCollaborativeSave,
+  hasNewerLocalEditGeneration,
   hasUnexpectedCollaborativeSaveResult,
   reconcileCollaborativeSave,
   resolveSaveMutationId,
@@ -295,15 +299,24 @@ function draftMapKey(workspaceId: string, itemId: string): string {
 }
 
 function collaborativeMarkdownSnapshotKey(workspaceId: string, itemId: string): string {
-  // v2 snapshots are guaranteed to descend from the server-elected bootstrap.
-  // Ignore legacy snapshots that may have been independently seeded per client.
-  return `${workspaceId}::crdt-v2::${itemId}`;
+  // v3 snapshots are accepted only after their durable server room epoch matches.
+  return `${workspaceId}::crdt-v3::${itemId}`;
 }
 
 function encodeCollaborativeUpdate(update: Uint8Array): string {
   let binary = "";
   for (const byte of update) binary += String.fromCharCode(byte);
   return btoa(binary);
+}
+
+function decodeCollaborativeUpdate(encoded: string | null | undefined): Uint8Array {
+  if (!encoded) return new Uint8Array();
+  const binary = atob(encoded);
+  const update = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    update[index] = binary.charCodeAt(index);
+  }
+  return update;
 }
 
 type WorkspaceNicknameMap = Record<string, string>;
@@ -686,7 +699,7 @@ function historyEventTitle(op: string, translate: Translator["t"]): string {
 }
 
 function docSnapshotFromDoc(
-  doc: Pick<WorkspaceDoc, "title" | "markdown" | "content" | "pinned" | "inTrash" | "parentId" | "orderKey">,
+  doc: Pick<WorkspaceDoc, "title" | "markdown" | "content" | "pinned" | "inTrash" | "parentId" | "orderKey" | "orderRank">,
 ): LocalHistorySnapshot {
   return {
     title: doc.title,
@@ -696,6 +709,7 @@ function docSnapshotFromDoc(
     inTrash: doc.inTrash,
     parentId: doc.parentId,
     orderKey: doc.orderKey,
+    orderRank: doc.orderRank,
   };
 }
 
@@ -1765,20 +1779,38 @@ export async function startBackendWorkbench(): Promise<void> {
     const collaborativeMarkdownDocs = new Map<string, ReturnType<typeof createMarkdownCollaborator>>();
     const collaborativeStructuredDocs = new Map<string, ReturnType<typeof createStructuredCollaborator>>();
     const collaborationReadyDocIds = new Set<string>();
+    const collaborationEpochByDoc = new Map<string, string>();
+    const pendingCollaborativeUpdatesByDoc = new Map<string, Uint8Array[]>();
+    const cachedCollaborationEpochByDoc = new Map<string, string>();
     const getCollaboratorForDoc = (doc: WorkspaceDoc): ReturnType<typeof createMarkdownCollaborator> => {
       const existing = collaborativeMarkdownDocs.get(doc.id);
       if (existing) return existing;
       const collaborator = createMarkdownCollaborator();
-      const snapshot = loadCollaborativeSnapshot(collaborativeMarkdownSnapshotKey(workspaceId, doc.id));
-      if (snapshot) {
+      const storageKey = collaborativeMarkdownSnapshotKey(workspaceId, doc.id);
+      const snapshot = loadCollaborativeSnapshot(storageKey);
+      const cachedEpoch = loadCollaborativeSnapshotEpoch(storageKey);
+      if (snapshot && cachedEpoch) {
         try {
           collaborator.applyRemoteUpdate(snapshot);
-          collaborationReadyDocIds.add(doc.id);
+          cachedCollaborationEpochByDoc.set(doc.id, cachedEpoch);
         } catch {
-          removeCollaborativeSnapshot(collaborativeMarkdownSnapshotKey(workspaceId, doc.id));
+          removeCollaborativeSnapshot(storageKey);
         }
+      } else if (snapshot) {
+        // A snapshot without an epoch cannot be proven to descend from the room.
+        removeCollaborativeSnapshot(storageKey);
       }
       collaborativeMarkdownDocs.set(doc.id, collaborator);
+      return collaborator;
+    };
+    const resetMarkdownCollaborator = (doc: WorkspaceDoc): ReturnType<typeof createMarkdownCollaborator> => {
+      const existing = collaborativeMarkdownDocs.get(doc.id);
+      existing?.destroy();
+      const collaborator = createMarkdownCollaborator();
+      collaborativeMarkdownDocs.set(doc.id, collaborator);
+      collaborationReadyDocIds.delete(doc.id);
+      collaborationEpochByDoc.delete(doc.id);
+      cachedCollaborationEpochByDoc.delete(doc.id);
       return collaborator;
     };
     const getStructuredCollaboratorForDoc = (
@@ -1790,24 +1822,43 @@ export async function startBackendWorkbench(): Promise<void> {
         kind: doc.kind === "table" ? "table" : "board",
       });
       const snapshot = loadCollaborativeSnapshot(collaborativeMarkdownSnapshotKey(workspaceId, doc.id));
-      if (snapshot) {
+      const cachedEpoch = loadCollaborativeSnapshotEpoch(
+        collaborativeMarkdownSnapshotKey(workspaceId, doc.id),
+      );
+      if (snapshot && cachedEpoch) {
         try {
           collaborator.applyRemoteUpdate(snapshot);
-          collaborationReadyDocIds.add(doc.id);
+          cachedCollaborationEpochByDoc.set(doc.id, cachedEpoch);
         } catch {
           removeCollaborativeSnapshot(collaborativeMarkdownSnapshotKey(workspaceId, doc.id));
         }
+      } else if (snapshot) {
+        removeCollaborativeSnapshot(collaborativeMarkdownSnapshotKey(workspaceId, doc.id));
       }
       collaborativeStructuredDocs.set(doc.id, collaborator);
       return collaborator;
     };
-    const collaborativeTransportUrl = (itemId: string, ticket: string): string => {
+    const resetStructuredCollaborator = (
+      doc: WorkspaceDoc,
+    ): ReturnType<typeof createStructuredCollaborator> => {
+      collaborativeStructuredDocs.get(doc.id)?.destroy();
+      const collaborator = createStructuredCollaborator({
+        kind: doc.kind === "table" ? "table" : "board",
+      });
+      collaborativeStructuredDocs.set(doc.id, collaborator);
+      collaborationReadyDocIds.delete(doc.id);
+      collaborationEpochByDoc.delete(doc.id);
+      cachedCollaborationEpochByDoc.delete(doc.id);
+      return collaborator;
+    };
+    const collaborativeTransportUrl = (itemId: string, ticket: string, roomEpoch: string): string => {
       const url = new URL(
         `/v1/workspaces/${encodeURIComponent(workspaceId)}/items/${encodeURIComponent(itemId)}/collab`,
         JUSTWORK_BACKEND_URL,
       );
       url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
       url.searchParams.set("ticket", ticket);
+      url.searchParams.set("room_epoch", roomEpoch);
       return url.toString();
     };
     let activeCollaborativeItemId: string | null = null;
@@ -1826,6 +1877,10 @@ export async function startBackendWorkbench(): Promise<void> {
     };
     const markCollaborationReady = (doc: WorkspaceDoc): void => {
       collaborationReadyDocIds.add(doc.id);
+      const epoch = collaborationEpochByDoc.get(doc.id);
+      if (epoch) {
+        saveCollaborativeSnapshotEpoch(collaborativeMarkdownSnapshotKey(workspaceId, doc.id), epoch);
+      }
       setCollaborationSurfacePending(doc, false);
       if (active.id !== doc.id || doc.kind !== "page" || !editor) return;
       const collaborator = getCollaboratorForDoc(doc);
@@ -1843,7 +1898,7 @@ export async function startBackendWorkbench(): Promise<void> {
       activeCollaborativeItemId = null;
     };
     const startCollaborativeTransport = async (doc: WorkspaceDoc): Promise<void> => {
-      if (doc.kind !== "page" || doc.id === WELCOME_DOC_ID) {
+      if (!(["page", "table", "board"] as const).includes(doc.kind as "page" | "table" | "board") || doc.id === WELCOME_DOC_ID) {
         stopActiveCollaborativeTransport();
         return;
       }
@@ -1852,7 +1907,7 @@ export async function startBackendWorkbench(): Promise<void> {
         activeCollaborativeTransport &&
         isTransportUsable(activeCollaborativeTransport.readyState)
       ) {
-        setCollaborationSurfacePending(doc, false);
+        setCollaborationSurfacePending(doc, !collaborationReadyDocIds.has(doc.id));
         return;
       }
       stopActiveCollaborativeTransport();
@@ -1862,47 +1917,91 @@ export async function startBackendWorkbench(): Promise<void> {
       setCollaborationSurfacePending(doc, true);
       const generation = collaborativeTransportGeneration;
       let join: Awaited<ReturnType<typeof session.joinCollaborativeMarkdown>>;
-      let remoteState: Uint8Array;
       try {
-        [join, remoteState] = await Promise.all([
-          session.joinCollaborativeMarkdown(doc.id),
-          session.loadCollaborativeMarkdownState(doc.id),
-        ]);
+        join = await session.joinCollaborativeMarkdown(doc.id);
       } catch {
         if (generation !== collaborativeTransportGeneration || active.id !== doc.id) return;
-        // A cached canonical lineage remains safe for offline editing. Its full
-        // state will be sent on the next successful rejoin.
-        if (collaborationReadyDocIds.has(doc.id)) {
-          setCollaborationSurfacePending(doc, false);
-        }
         window.setTimeout(() => {
           if (active.id === doc.id) void startCollaborativeTransport(doc);
         }, 1_000);
         return;
       }
       if (generation !== collaborativeTransportGeneration || active.id !== doc.id) return;
-      if (remoteState.length > 0) {
-        const collaborator = getCollaboratorForDoc(doc);
-        const previousMarkdown = collaborator.getMarkdown();
-        const changed = collaborator.applyRemoteUpdate(remoteState);
-        const nextMarkdown = collaborator.getMarkdown();
-        saveCollaborativeSnapshot(collaborativeMarkdownSnapshotKey(workspaceId, doc.id), collaborator.encodeUpdate());
-        const currentDoc = workspace.docs.find((candidate) => candidate.id === doc.id);
-        if (changed && currentDoc && nextMarkdown !== previousMarkdown) {
-          updateDocById(doc.id, (candidate) => ({
-            ...candidate,
-            markdown: nextMarkdown,
-            updatedAt: new Date().toISOString(),
-          }));
-        }
-        collaborationReadyDocIds.add(doc.id);
-      } else if (join.bootstrap_owner) {
-        const collaborator = getCollaboratorForDoc(doc);
-        collaborator.applyLocalMarkdown(stripAutoTitleHeading(doc.markdown, doc.title));
-        saveCollaborativeSnapshot(collaborativeMarkdownSnapshotKey(workspaceId, doc.id), collaborator.encodeUpdate());
-        collaborationReadyDocIds.add(doc.id);
+      if (typeof join.room_epoch !== "string" || !join.room_epoch) {
+        const error = new Error("Backend update required: collaborative room epoch is unavailable");
+        saveStatus(saveStatusEl, error.message);
+        throw error;
       }
-      const transport = createCollaborativeTransport(collaborativeTransportUrl(doc.id, join.ticket));
+      const remoteState = decodeCollaborativeUpdate(join.snapshot_base64);
+      const resetLineage = shouldResetCollaborativeLineage(
+        collaborationEpochByDoc.get(doc.id),
+        cachedCollaborationEpochByDoc.get(doc.id),
+        join.room_epoch,
+      );
+      let markdownCollaborator = doc.kind === "page" ? getCollaboratorForDoc(doc) : undefined;
+      let structuredCollaborator = doc.kind === "table" || doc.kind === "board"
+        ? getStructuredCollaboratorForDoc(doc)
+        : undefined;
+      if (resetLineage) {
+        if (active.id === doc.id) editor?.bindCollaborator(undefined);
+        removeCollaborativeSnapshot(collaborativeMarkdownSnapshotKey(workspaceId, doc.id));
+        if (doc.kind === "page") {
+          markdownCollaborator = resetMarkdownCollaborator(doc);
+        } else {
+          structuredCollaborator = resetStructuredCollaborator(doc);
+        }
+      }
+      collaborationEpochByDoc.set(doc.id, join.room_epoch);
+      const applyRemoteState = (update: Uint8Array): void => {
+        if (markdownCollaborator) {
+          const previousMarkdown = markdownCollaborator.getMarkdown();
+          const changed = markdownCollaborator.applyRemoteUpdate(update);
+          const nextMarkdown = markdownCollaborator.getMarkdown();
+          if (changed && nextMarkdown !== previousMarkdown) {
+            syncMentionInboxFromMarkdown({
+              previousMarkdown,
+              nextMarkdown,
+              docId: doc.id,
+              docTitle: displayDocTitle(doc),
+            });
+            updateDocById(doc.id, (candidate) => ({
+              ...candidate,
+              markdown: nextMarkdown,
+              updatedAt: new Date().toISOString(),
+            }));
+          }
+        } else if (structuredCollaborator) {
+          const previousContent = JSON.stringify(structuredCollaborator.getContent());
+          structuredCollaborator.applyRemoteUpdate(update);
+          const nextContent = structuredCollaborator.getContent();
+          if (JSON.stringify(nextContent) !== previousContent) {
+            updateDocById(doc.id, (candidate) => ({
+              ...candidate,
+              content: nextContent,
+              updatedAt: new Date().toISOString(),
+            }));
+            if (active.id === doc.id) renderAll();
+          }
+        }
+        const snapshot = markdownCollaborator?.encodeUpdate() ?? structuredCollaborator?.encodeUpdate();
+        if (snapshot) {
+          saveCollaborativeSnapshot(collaborativeMarkdownSnapshotKey(workspaceId, doc.id), snapshot);
+        }
+      };
+      if (remoteState.length > 0) {
+        applyRemoteState(remoteState);
+        markCollaborationReady(doc);
+      } else if (join.bootstrap_owner) {
+        if (markdownCollaborator) {
+          markdownCollaborator.applyLocalMarkdown(stripAutoTitleHeading(doc.markdown, doc.title));
+        } else if (structuredCollaborator && (doc.kind === "table" || doc.kind === "board")) {
+          structuredCollaborator.applyLocalContent(
+            normalizeStructuredDocumentContent(doc.kind, doc.content ?? {}),
+          );
+        }
+        markCollaborationReady(doc);
+      }
+      const transport = createCollaborativeTransport(collaborativeTransportUrl(doc.id, join.ticket, join.room_epoch));
       activeCollaborativeItemId = doc.id;
       activeCollaborativeTransport = transport;
       const requestTransportRejoin = (): void => {
@@ -1913,14 +2012,17 @@ export async function startBackendWorkbench(): Promise<void> {
         if (isTransportUsable(readyState) || active.id !== doc.id) return;
         window.setTimeout(requestTransportRejoin, 250);
       });
-      const collaborator = getCollaboratorForDoc(doc);
-      const stopCollaboratorUpdates = collaborator.onUpdate((_, origin) => {
+      const activeCollaborator = markdownCollaborator ?? structuredCollaborator;
+      if (!activeCollaborator) return;
+      const stopCollaboratorUpdates = activeCollaborator.onUpdate((update, origin) => {
           if (origin !== "local" || !collaborationReadyDocIds.has(doc.id)) return;
-          saveCollaborativeSnapshot(collaborativeMarkdownSnapshotKey(workspaceId, doc.id), collaborator.encodeUpdate());
+          const pending = pendingCollaborativeUpdatesByDoc.get(doc.id) ?? [];
+          pending.push(update.slice());
+          pendingCollaborativeUpdatesByDoc.set(doc.id, pending);
           safeSendCollaborativeUpdate(
             transport.readyState,
             () => {
-              transport.sendUpdate(collaborator.encodeUpdate());
+              transport.sendUpdate(update);
             },
             requestTransportRejoin,
           );
@@ -1930,34 +2032,15 @@ export async function startBackendWorkbench(): Promise<void> {
         stopTransportStatus();
       };
       transport.onUpdate((update) => {
-          const previousMarkdown = collaborator.getMarkdown();
-          const changed = collaborator.applyRemoteUpdate(update);
+          applyRemoteState(update);
           markCollaborationReady(doc);
-          saveCollaborativeSnapshot(collaborativeMarkdownSnapshotKey(workspaceId, doc.id), collaborator.encodeUpdate());
-          const nextMarkdown = collaborator.getMarkdown();
-          syncMentionInboxFromMarkdown({
-            previousMarkdown,
-            nextMarkdown,
-            docId: doc.id,
-            docTitle: displayDocTitle(doc),
-          });
-          if (changed) {
-            const currentDoc = workspace.docs.find((candidate) => candidate.id === doc.id);
-            if (currentDoc && nextMarkdown !== previousMarkdown) {
-              updateDocById(doc.id, (candidate) => ({
-                ...candidate,
-                markdown: nextMarkdown,
-                updatedAt: new Date().toISOString(),
-              }));
-            }
-          }
       });
       if (collaborationReadyDocIds.has(doc.id)) {
         markCollaborationReady(doc);
         safeSendCollaborativeUpdate(
           transport.readyState,
           () => {
-            transport.sendUpdate(collaborator.encodeUpdate());
+            transport.sendUpdate(activeCollaborator.encodeUpdate());
           },
           requestTransportRejoin,
         );
@@ -2312,6 +2395,12 @@ export async function startBackendWorkbench(): Promise<void> {
         syncEditorWithActive();
         renderAll();
       },
+      onWorkspaceInvalidated: () => {
+        // Workspace metadata, structure, trash, and member changes share this
+        // durable invalidation channel. The operation journal overlays local
+        // optimistic state while the fresh tree is loaded.
+        scheduleTreeRefresh(40);
+      },
       onCommunityStateChange: (nextState) => {
         communityState = nextState;
         void upsertWorkspaceJoinedMembers(
@@ -2566,8 +2655,15 @@ export async function startBackendWorkbench(): Promise<void> {
             }
             const previousContent = normalizedContentForDoc(active) as TableDocumentContent;
             const expectedRevision = active.revision;
-            commitLocalEdit(doc.id, { content: nextContent });
-            scheduleDocSave(doc.id, expectedRevision, { content: nextContent }, active.title, "", "", 180, {
+            const collaborator = getStructuredCollaboratorForDoc(doc);
+            collaborator.applyLocalContent(nextContent);
+            const convergedContent = collaborator.getContent();
+            saveCollaborativeSnapshot(
+              collaborativeMarkdownSnapshotKey(workspaceId, doc.id),
+              collaborator.encodeUpdate(),
+            );
+            commitLocalEdit(doc.id, { content: convergedContent });
+            scheduleDocSave(doc.id, expectedRevision, { content: convergedContent }, active.title, "", "", 180, {
               content: previousContent,
             });
           },
@@ -2630,8 +2726,15 @@ export async function startBackendWorkbench(): Promise<void> {
             }
             const previousContent = normalizedContentForDoc(active) as BoardDocumentContent;
             const expectedRevision = active.revision;
-            commitLocalEdit(doc.id, { content: nextContent });
-            scheduleDocSave(doc.id, expectedRevision, { content: nextContent }, active.title, "", "", 180, {
+            const collaborator = getStructuredCollaboratorForDoc(doc);
+            collaborator.applyLocalContent(nextContent);
+            const convergedContent = collaborator.getContent();
+            saveCollaborativeSnapshot(
+              collaborativeMarkdownSnapshotKey(workspaceId, doc.id),
+              collaborator.encodeUpdate(),
+            );
+            commitLocalEdit(doc.id, { content: convergedContent });
+            scheduleDocSave(doc.id, expectedRevision, { content: convergedContent }, active.title, "", "", 180, {
               content: previousContent,
             });
           },
@@ -2734,13 +2837,28 @@ export async function startBackendWorkbench(): Promise<void> {
       previousContent?: WorkspaceDocContent | null;
       doneText: string;
       usesDraftQueue: boolean;
+      localGeneration: number;
     };
 
     type SavePatchResult =
       | { status: "saved"; doc: WorkspaceDoc }
       | { status: "skipped" };
 
-    let saveQueue: Promise<void> = Promise.resolve();
+    const docSaveQueues = new Map<string, Promise<void>>();
+    const waitForDocSaveQueueToSettle = async (itemId: string): Promise<void> => {
+      const queue = docSaveQueues.get(itemId);
+      if (queue) await waitForPendingDocSavesToSettle(queue);
+    };
+    const waitForAllDocSaveQueuesToSettle = async (): Promise<void> => {
+      // A completion callback can enqueue a follow-up request. Keep draining until
+      // the map is empty instead of taking a single stale Promise snapshot.
+      while (docSaveQueues.size > 0) {
+        await Promise.all(
+          [...docSaveQueues.values()].map((queue) => waitForPendingDocSavesToSettle(queue)),
+        );
+      }
+    };
+    const localEditGenerationByDoc = new Map<string, number>();
 
     const savePatchWithConflictRetry = async (
       itemId: string,
@@ -2749,24 +2867,41 @@ export async function startBackendWorkbench(): Promise<void> {
       mutationId: string,
       base?: { title?: string; content?: WorkspaceDocContent | null },
     ): Promise<SavePatchResult> => {
-      const collaborator = collaborativeMarkdownDocs.get(itemId);
+      const markdownCollaborator = collaborativeMarkdownDocs.get(itemId);
+      const structuredCollaborator = collaborativeStructuredDocs.get(itemId);
       let revision = expectedRevision;
       let nextPatch = patch;
       let lastConflict: BackendApiError | undefined;
       for (let attempt = 0; attempt < 8; attempt += 1) {
-        const collaborativeUpdate = nextPatch.markdown !== undefined && collaborator && collaborationReadyDocIds.has(itemId)
-          ? encodeCollaborativeUpdate(collaborator.encodeUpdate())
+        const activeCollaborator = nextPatch.markdown !== undefined
+          ? markdownCollaborator
+          : nextPatch.content !== undefined
+            ? structuredCollaborator
+            : undefined;
+        const pendingCollaborativeUpdates = pendingCollaborativeUpdatesByDoc.get(itemId) ?? [];
+        const pendingUpdateCount = pendingCollaborativeUpdates.length;
+        const collaborativeUpdate = activeCollaborator
+          && collaborationReadyDocIds.has(itemId)
+          && pendingUpdateCount > 0
+          ? encodeCollaborativeUpdate(mergeUpdates(pendingCollaborativeUpdates.slice(0, pendingUpdateCount)))
           : undefined;
+        const collaborativeEpoch = collaborativeUpdate ? collaborationEpochByDoc.get(itemId) : undefined;
         try {
-          return {
-            status: "saved",
-            doc: await session.saveItem(itemId, {
+          const savedDoc = await session.saveItem(itemId, {
               ...nextPatch,
               collaborativeUpdate,
+              collaborativeEpoch,
               expectedRevision: revision,
               mutationId,
-            }),
-          };
+            });
+          if (pendingUpdateCount > 0) {
+            const currentPending = pendingCollaborativeUpdatesByDoc.get(itemId);
+            if (currentPending) {
+              currentPending.splice(0, Math.min(pendingUpdateCount, currentPending.length));
+              if (currentPending.length === 0) pendingCollaborativeUpdatesByDoc.delete(itemId);
+            }
+          }
+          return { status: "saved", doc: savedDoc };
         } catch (error) {
           if (!(error instanceof BackendApiError) || error.code !== "conflict") throw error;
           lastConflict = error;
@@ -2777,16 +2912,21 @@ export async function startBackendWorkbench(): Promise<void> {
         }
         const mergedPatch: OfflineMutationPatch = {};
         if (nextPatch.markdown !== undefined) {
-          if (!collaborator || !collaborationReadyDocIds.has(itemId)) throw lastConflict;
+          if (!markdownCollaborator || !collaborationReadyDocIds.has(itemId)) throw lastConflict;
           const canonicalState = await session.loadCollaborativeMarkdownState(itemId);
-          if (canonicalState.length > 0) {
-            collaborator.applyRemoteUpdate(canonicalState);
+          const currentEpoch = collaborationEpochByDoc.get(itemId);
+          if (!currentEpoch || canonicalState.room_epoch !== currentEpoch) {
+            throw new Error("Collaborative room changed; refusing to merge an unrelated document history");
+          }
+          const canonicalUpdate = decodeCollaborativeUpdate(canonicalState.snapshot_base64);
+          if (canonicalUpdate.length > 0) {
+            markdownCollaborator.applyRemoteUpdate(canonicalUpdate);
             saveCollaborativeSnapshot(
               collaborativeMarkdownSnapshotKey(workspaceId, itemId),
-              collaborator.encodeUpdate(),
+              markdownCollaborator.encodeUpdate(),
             );
           }
-          mergedPatch.markdown = collaborator.getMarkdown();
+          mergedPatch.markdown = markdownCollaborator.getMarkdown();
         }
         if (nextPatch.title !== undefined) {
           if (base?.title === undefined) throw lastConflict;
@@ -2795,15 +2935,22 @@ export async function startBackendWorkbench(): Promise<void> {
           if (!syncValuesEqual(mergedTitle.value, latest.title)) mergedPatch.title = mergedTitle.value;
         }
         if (nextPatch.content !== undefined) {
-          if (base?.content === undefined) throw lastConflict;
-          const mergedContent = mergeSyncValue(
-            base.content,
-            nextPatch.content,
-            latest.content ?? null,
-            "content",
-          );
-          if (mergedContent.conflicts.length > 0) throw lastConflict;
-          if (!syncValuesEqual(mergedContent.value, latest.content ?? null)) mergedPatch.content = mergedContent.value;
+          if (!structuredCollaborator || !collaborationReadyDocIds.has(itemId)) throw lastConflict;
+          const canonicalState = await session.loadCollaborativeMarkdownState(itemId);
+          const currentEpoch = collaborationEpochByDoc.get(itemId);
+          if (!currentEpoch || canonicalState.room_epoch !== currentEpoch) {
+            throw new Error("Collaborative room changed; refusing to merge unrelated structured history");
+          }
+          const canonicalUpdate = decodeCollaborativeUpdate(canonicalState.snapshot_base64);
+          if (canonicalUpdate.length > 0) {
+            structuredCollaborator.applyRemoteUpdate(canonicalUpdate);
+            saveCollaborativeSnapshot(
+              collaborativeMarkdownSnapshotKey(workspaceId, itemId),
+              structuredCollaborator.encodeUpdate(),
+            );
+          }
+          const mergedContent = structuredCollaborator.getContent();
+          if (!syncValuesEqual(mergedContent, latest.content ?? null)) mergedPatch.content = mergedContent;
         }
         if (Object.keys(mergedPatch).length === 0) {
           return { status: "saved", doc: latest };
@@ -2818,6 +2965,7 @@ export async function startBackendWorkbench(): Promise<void> {
       const currentDoc = workspace.docs.find((doc) => doc.id === itemId);
       const baseRevision = currentDoc?.revision ?? 0;
       dirtyDocIds.add(itemId);
+      localEditGenerationByDoc.set(itemId, (localEditGenerationByDoc.get(itemId) ?? 0) + 1);
       if (!isCreatePendingDocId(itemId)) {
         recordLocalEditOperation(itemId, baseRevision, patch);
       }
@@ -2850,7 +2998,8 @@ export async function startBackendWorkbench(): Promise<void> {
       if (isCreatePendingDocId(request.itemId)) {
         return;
       }
-      saveQueue = saveQueue
+      const previousQueue = docSaveQueues.get(request.itemId) ?? Promise.resolve();
+      const nextQueue = previousQueue
         .then(async () => {
           const currentDoc = workspace.docs.find((doc) => doc.id === request.itemId);
           if (shouldSkipDocSave(blockedDocSaveIds, request.itemId, currentDoc)) {
@@ -2885,9 +3034,19 @@ export async function startBackendWorkbench(): Promise<void> {
               nextMarkdown: request.nextMarkdown,
               content: request.patch.content,
             };
-            const isStale = (
-              hasStaleCollaborativeSave(liveDoc, collaborativeSaveRequest) ||
-              hasUnexpectedCollaborativeSaveResult(next, collaborativeSaveRequest)
+            const hasNewerLocalEdit = hasNewerLocalEditGeneration(
+              request.localGeneration,
+              localEditGenerationByDoc.get(request.itemId) ?? 0,
+            );
+            const hasCollaborativeMarkdown = request.patch.markdown !== undefined
+              && collaborativeMarkdownDocs.has(request.itemId);
+            const isStale = hasNewerLocalEdit || hasUnexpectedCollaborativeSaveResult(
+              next,
+              collaborativeSaveRequest,
+              {
+                ignoreMarkdown: hasCollaborativeMarkdown,
+                ignoreTitle: request.patch.title === undefined,
+              },
             );
             const saveResolution = reconcileCollaborativeSave(liveDoc, isStale, hasNewerDraft);
             if (request.usesDraftQueue && !hasNewerDraft) {
@@ -2949,11 +3108,20 @@ export async function startBackendWorkbench(): Promise<void> {
               return;
             }
             notifyError(e);
+            if (request.itemId === active.id) {
+              saveStatus(saveStatusEl, formatBackendOrUnknownError(e));
+            }
           }
         })
         .catch(() => {
           // Keep queue alive after an error.
         });
+      docSaveQueues.set(request.itemId, nextQueue);
+      void nextQueue.then(() => {
+        if (docSaveQueues.get(request.itemId) === nextQueue) {
+          docSaveQueues.delete(request.itemId);
+        }
+      });
     };
 
     async function hydrateDocWithLocalDraft(doc: WorkspaceDoc): Promise<WorkspaceDoc> {
@@ -2990,7 +3158,7 @@ export async function startBackendWorkbench(): Promise<void> {
       const summary = workspace.docs.find((d) => d.id === replayedActiveId && !d.inTrash)
         ?? workspace.docs.find((d) => !d.inTrash)
         ?? workspace.docs[0]!;
-      const collaborator = summary.kind === "page" ? getCollaboratorForDoc(summary) : null;
+      let collaborator = summary.kind === "page" ? getCollaboratorForDoc(summary) : null;
       const local = localCollaborativeDocCache.get(summary.id) ?? null;
       const isComposingActivePage = summary.kind === "page" && summary.id === active.id && editor?.isComposing() === true;
       const shouldReloadPage = (
@@ -3013,13 +3181,23 @@ export async function startBackendWorkbench(): Promise<void> {
           : await session.loadItem(summary.id);
       if (summary.kind === "page" && collaborator && shouldReloadPage) {
         const canonicalState = await session.loadCollaborativeMarkdownState(summary.id);
-        if (canonicalState.length > 0) {
-          collaborator.applyRemoteUpdate(canonicalState);
+        const currentEpoch = collaborationEpochByDoc.get(summary.id);
+        if (currentEpoch && canonicalState.room_epoch !== currentEpoch) {
+          if (active.id === summary.id) editor?.bindCollaborator(undefined);
+          stopActiveCollaborativeTransport();
+          removeCollaborativeSnapshot(collaborativeMarkdownSnapshotKey(workspaceId, summary.id));
+          collaborator = resetMarkdownCollaborator(summary);
+          void startCollaborativeTransport(summary).catch(() => undefined);
+        } else {
+          const canonicalUpdate = decodeCollaborativeUpdate(canonicalState.snapshot_base64);
+          if (canonicalUpdate.length > 0) {
+            collaborator.applyRemoteUpdate(canonicalUpdate);
+          }
           saveCollaborativeSnapshot(
             collaborativeMarkdownSnapshotKey(workspaceId, summary.id),
             collaborator.encodeUpdate(),
           );
-          markCollaborationReady(summary);
+          if (currentEpoch) markCollaborationReady(summary);
         }
       }
       if (summary.kind !== "welcome") {
@@ -3171,6 +3349,40 @@ export async function startBackendWorkbench(): Promise<void> {
       }
     };
 
+    const applyAuthoritativeCollaborativeState = async (doc: WorkspaceDoc): Promise<WorkspaceDoc> => {
+      if (doc.kind !== "page" || doc.id === WELCOME_DOC_ID) return doc;
+      const state = await session.loadCollaborativeMarkdownState(doc.id);
+      let collaborator = getCollaboratorForDoc(doc);
+      if (shouldResetCollaborativeLineage(
+        collaborationEpochByDoc.get(doc.id),
+        cachedCollaborationEpochByDoc.get(doc.id),
+        state.room_epoch,
+      )) {
+        if (active.id === doc.id) editor?.bindCollaborator(undefined);
+        stopActiveCollaborativeTransport();
+        removeCollaborativeSnapshot(collaborativeMarkdownSnapshotKey(workspaceId, doc.id));
+        collaborator = resetMarkdownCollaborator(doc);
+      }
+      collaborationEpochByDoc.set(doc.id, state.room_epoch);
+      const canonicalUpdate = decodeCollaborativeUpdate(state.snapshot_base64);
+      if (canonicalUpdate.length > 0) {
+        collaborator.applyRemoteUpdate(canonicalUpdate);
+      }
+      saveCollaborativeSnapshot(
+        collaborativeMarkdownSnapshotKey(workspaceId, doc.id),
+        collaborator.encodeUpdate(),
+      );
+      saveCollaborativeSnapshotEpoch(
+        collaborativeMarkdownSnapshotKey(workspaceId, doc.id),
+        state.room_epoch,
+      );
+      markCollaborationReady(doc);
+      return {
+        ...doc,
+        markdown: collaborator.getMarkdown(),
+      };
+    };
+
     refreshHistoryPanel = async (): Promise<void> => {
       try {
         const remoteEvents = await session.listRevisions();
@@ -3199,6 +3411,7 @@ export async function startBackendWorkbench(): Promise<void> {
             ? { parentId: snapshot.parentId as string | null }
             : {}),
           ...(typeof snapshot.orderKey === "number" ? { orderKey: snapshot.orderKey } : {}),
+          ...(typeof snapshot.orderRank === "string" ? { orderRank: snapshot.orderRank } : {}),
           ...(typeof snapshot.nickname === "string" ? { title: snapshot.nickname } : {}),
         });
         const events = remoteEvents.length > 0
@@ -3249,6 +3462,9 @@ export async function startBackendWorkbench(): Promise<void> {
             revertBtn.setAttribute("data-testid", "history-revert");
             revertBtn.addEventListener("click", () => {
               void (async () => {
+                revertBtn.disabled = true;
+                revertBtn.setAttribute("aria-busy", "true");
+                saveStatus(saveStatusEl, t("status.saving"));
                 try {
                   if (ev.op === "workspace.settings") {
                     const revertedSettings = await session.updateWorkspaceTitle(ev.before.title ?? "", workspaceRevision);
@@ -3276,15 +3492,19 @@ export async function startBackendWorkbench(): Promise<void> {
                     saveStatus(saveStatusEl, t("status.reverted"));
                     return;
                   }
+                  // A delayed local save must never run after the authoritative
+                  // history inverse and silently re-apply the newer content.
+                  flushPendingDocSave(ev.itemId);
+                  await waitForDocSaveQueueToSettle(ev.itemId);
                   const current = await session.loadItem(ev.itemId);
                   const revertMutationId = mutationId();
-                  const reverted = ev.op === "workspace.item.create"
+                  let reverted = ev.op === "workspace.item.create"
                     ? await session.trashItem(ev.itemId, current.revision, revertMutationId)
                     : ev.op === "workspace.item.move"
                       ? await session.moveItem(
                       ev.itemId,
                       ev.before.parentId ?? null,
-                      ev.before.orderKey ?? current.orderKey,
+                      ev.before.orderRank ?? ev.before.orderKey ?? current.orderRank ?? current.orderKey,
                       current.revision,
                       revertMutationId,
                       )
@@ -3304,6 +3524,16 @@ export async function startBackendWorkbench(): Promise<void> {
                           expectedRevision: current.revision,
                           mutationId: revertMutationId,
                         });
+                  if (reverted.kind === "page" && ev.before.markdown !== undefined) {
+                    // REST history restoration mutates the canonical Yjs room.
+                    // Read that state back synchronously so an older in-memory
+                    // collaborator cannot repaint the just-restored document.
+                    reverted = await applyAuthoritativeCollaborativeState(reverted);
+                  }
+                  dirtyDocIds.delete(ev.itemId);
+                  removeLocalEditOperations(ev.itemId);
+                  localCollaborativeDocCache.set(ev.itemId, reverted);
+                  await removeBackendDocDraft(workspaceId, ev.itemId, Number.MAX_SAFE_INTEGER);
                   recordLocalHistory(
                     "history.revert",
                     ev.itemId,
@@ -3316,9 +3546,16 @@ export async function startBackendWorkbench(): Promise<void> {
                   await persistRefreshTree();
                   syncEditorWithActive();
                   renderAll();
+                  await refreshHistoryPanel?.();
                   saveStatus(saveStatusEl, t("status.reverted"));
                 } catch (e) {
                   notifyError(e);
+                  saveStatus(saveStatusEl, formatBackendOrUnknownError(e));
+                } finally {
+                  if (revertBtn.isConnected) {
+                    revertBtn.disabled = false;
+                    revertBtn.removeAttribute("aria-busy");
+                  }
                 }
               })();
             });
@@ -3547,7 +3784,7 @@ export async function startBackendWorkbench(): Promise<void> {
               ? session.moveItem(
                 mutation.itemId,
                 mutation.patch?.parentId ?? current.parentId,
-                mutation.patch?.orderKey ?? current.orderKey,
+                mutation.patch?.orderRank ?? mutation.patch?.orderKey ?? current.orderRank ?? current.orderKey,
                 expectedRevision,
                 mutation.id,
               )
@@ -3565,8 +3802,16 @@ export async function startBackendWorkbench(): Promise<void> {
             (latest) => (
               mutation.kind === "move"
                 ? mutation.base?.parentId !== undefined && (
-                    (latest.parentId === mutation.base.parentId && latest.orderKey === mutation.base.orderKey) ||
-                    (latest.parentId === mutation.patch?.parentId && latest.orderKey === mutation.patch?.orderKey)
+                    (latest.parentId === mutation.base.parentId && (
+                      mutation.base.orderRank !== undefined
+                        ? latest.orderRank === mutation.base.orderRank
+                        : latest.orderKey === mutation.base.orderKey
+                    )) ||
+                    (latest.parentId === mutation.patch?.parentId && (
+                      mutation.patch?.orderRank !== undefined
+                        ? latest.orderRank === mutation.patch.orderRank
+                        : latest.orderKey === mutation.patch?.orderKey
+                    ))
                   )
                 : mutation.base?.pinned !== undefined && (
                     latest.pinned === mutation.base.pinned ||
@@ -3594,7 +3839,7 @@ export async function startBackendWorkbench(): Promise<void> {
         try {
           if (mutation.kind !== "restore") {
             blockDocSavesForItem(mutation.itemId);
-            await waitForPendingDocSavesToSettle(saveQueue);
+            await waitForAllDocSaveQueuesToSettle();
           }
           const submitDeleteMutation = async (expectedRevision: number): Promise<WorkspaceDoc> => {
             if (mutation.kind === "trash") {
@@ -3807,16 +4052,18 @@ export async function startBackendWorkbench(): Promise<void> {
           ancestor = ancestor.parentId ? workspace.docs.find((doc) => doc.id === ancestor?.parentId) : undefined;
         }
         const nextOrderKey = orderKeyForInsertion(workspace.docs, targetParentId, beforeId, draggedId);
-        if (previous.parentId === targetParentId && previous.orderKey === nextOrderKey) return;
+        const nextOrderRank = orderRankForInsertion(workspace.docs, targetParentId, beforeId, draggedId);
         const moveMutationId = recordLocalStructuralOperation(
           draggedId,
           "move",
           previous.revision,
-          { parentId: targetParentId, orderKey: nextOrderKey },
-          { parentId: previous.parentId, orderKey: previous.orderKey },
+          { parentId: targetParentId, orderKey: nextOrderKey, orderRank: nextOrderRank },
+          { parentId: previous.parentId, orderKey: previous.orderKey, orderRank: previous.orderRank },
         );
         const optimisticUpdatedAt = new Date().toISOString();
-        workspace = applyOptimisticMove(workspace, draggedId, targetParentId, nextOrderKey, optimisticUpdatedAt);
+        workspace = applyOptimisticMove(
+          workspace, draggedId, targetParentId, nextOrderKey, optimisticUpdatedAt, nextOrderRank,
+        );
         const optimistic = workspace.docs.find((doc) => doc.id === draggedId);
         if (!optimistic) return;
         localCollaborativeDocCache.set(draggedId, optimistic);
@@ -3828,10 +4075,14 @@ export async function startBackendWorkbench(): Promise<void> {
           const moved = await submitRevisionMutationWithConflictRetry(
             draggedId,
             previous.revision,
-            (revision) => session.moveItem(draggedId, targetParentId, nextOrderKey, revision, moveMutationId),
+            (revision) => session.moveItem(draggedId, targetParentId, nextOrderRank, revision, moveMutationId),
             (latest) => (
-              (latest.parentId === previous.parentId && latest.orderKey === previous.orderKey) ||
-              (latest.parentId === targetParentId && latest.orderKey === nextOrderKey)
+              (latest.parentId === previous.parentId && (
+                previous.orderRank !== undefined
+                  ? latest.orderRank === previous.orderRank
+                  : latest.orderKey === previous.orderKey
+              )) ||
+              (latest.parentId === targetParentId && latest.orderRank === nextOrderRank)
             ),
           );
           if (!isCurrentStructuralOperation(moveMutationId)) {
@@ -3844,8 +4095,8 @@ export async function startBackendWorkbench(): Promise<void> {
           recordLocalHistory(
             "workspace.item.move",
             draggedId,
-            { parentId: previous.parentId, orderKey: previous.orderKey },
-            { parentId: moved.parentId, orderKey: moved.orderKey },
+            { parentId: previous.parentId, orderKey: previous.orderKey, orderRank: previous.orderRank },
+            { parentId: moved.parentId, orderKey: moved.orderKey, orderRank: moved.orderRank },
             moved.title,
           );
           renderAll();
@@ -4029,7 +4280,7 @@ export async function startBackendWorkbench(): Promise<void> {
                 removeDocById(doc.id);
                 syncEditorWithActive();
                 renderAll();
-                await waitForPendingDocSavesToSettle(saveQueue);
+                await waitForAllDocSaveQueuesToSettle();
                 await submitDeleteWithConflictRetry(doc.id, "hard-delete", full.revision, localOperationId);
                 recordLocalHistory(
                   "workspace.item.hard_delete",
@@ -4078,7 +4329,7 @@ export async function startBackendWorkbench(): Promise<void> {
                 applyOptimisticTrash(doc.id);
                 syncEditorWithActive();
                 renderAll();
-                await waitForPendingDocSavesToSettle(saveQueue);
+                await waitForAllDocSaveQueuesToSettle();
                 const trashed = await submitDeleteWithConflictRetry(doc.id, "trash", doc.revision, localOperationId);
                 updateDocById(doc.id, () => trashed);
                 markDocHydrated(doc.id);
@@ -4126,6 +4377,7 @@ export async function startBackendWorkbench(): Promise<void> {
       previousTitle?: string;
       previousContent?: WorkspaceDocContent | null;
       delayMs: number;
+      localGeneration: number;
     };
 
     const pendingDocSaves = new Map<string, PendingDocSave>();
@@ -4210,6 +4462,7 @@ export async function startBackendWorkbench(): Promise<void> {
         previousTitle: mergedPreviousTitle,
         previousContent: mergedPreviousContent,
         delayMs,
+        localGeneration: localEditGenerationByDoc.get(itemId) ?? 0,
       };
       pendingDocSaves.set(itemId, nextPending);
       nextPending.timer = window.setTimeout(() => {
@@ -4232,6 +4485,7 @@ export async function startBackendWorkbench(): Promise<void> {
               previousContent: current.previousContent,
               doneText: t("status.saved"),
               usesDraftQueue: false,
+              localGeneration: current.localGeneration,
             });
             return;
           }
@@ -4249,6 +4503,7 @@ export async function startBackendWorkbench(): Promise<void> {
               previousContent: current.previousContent,
               doneText: t("status.saved"),
               usesDraftQueue: false,
+              localGeneration: current.localGeneration,
             });
             return;
           }
@@ -4266,6 +4521,7 @@ export async function startBackendWorkbench(): Promise<void> {
             previousContent: current.previousContent,
             doneText: t("status.saved"),
             usesDraftQueue: true,
+            localGeneration: current.localGeneration,
           });
         })();
       }, delayMs);
@@ -4294,6 +4550,7 @@ export async function startBackendWorkbench(): Promise<void> {
             previousContent: current.previousContent,
             doneText: t("status.saved"),
             usesDraftQueue: false,
+            localGeneration: current.localGeneration,
           });
           return;
         }
@@ -4311,6 +4568,7 @@ export async function startBackendWorkbench(): Promise<void> {
             previousContent: current.previousContent,
             doneText: t("status.saved"),
             usesDraftQueue: false,
+            localGeneration: current.localGeneration,
           });
           return;
         }
@@ -4326,6 +4584,7 @@ export async function startBackendWorkbench(): Promise<void> {
           nextMarkdown: current.nextMarkdown,
           doneText: t("status.saved"),
           usesDraftQueue: true,
+          localGeneration: current.localGeneration,
         });
       })();
     };
@@ -4622,6 +4881,7 @@ export async function startBackendWorkbench(): Promise<void> {
         lastVisitedAt: now,
         parentId,
         orderKey: orderKeyForInsertion(workspace.docs, parentId, null),
+        orderRank: orderRankForInsertion(workspace.docs, parentId, null),
         pinned: false,
         inTrash: false,
       };
@@ -4901,7 +5161,7 @@ export async function startBackendWorkbench(): Promise<void> {
         syncEditorWithActive();
         renderAll();
         try {
-          await waitForPendingDocSavesToSettle(saveQueue);
+          await waitForAllDocSaveQueuesToSettle();
           const trashed = await submitDeleteWithConflictRetry(itemId, "trash", previous.revision, localOperationId);
           updateDocById(trashed.id, () => trashed);
           recordLocalHistory(
@@ -4951,14 +5211,23 @@ export async function startBackendWorkbench(): Promise<void> {
         void persistRefreshTree().then(() => renderAll()).catch(() => undefined);
       }
     }, REMOTE_WORKSPACE_POLL_MS);
+    let resumeRefreshTimer: number | undefined;
+    const scheduleResumeRefresh = (): void => {
+      if (resumeRefreshTimer !== undefined) window.clearTimeout(resumeRefreshTimer);
+      resumeRefreshTimer = window.setTimeout(() => {
+        resumeRefreshTimer = undefined;
+        if (!mounted || document.visibilityState !== "visible") return;
+        void persistRefreshTree().then(() => renderAll()).catch(() => undefined);
+      }, 80);
+    };
     window.addEventListener("focus", () => {
       if (mounted) {
-        void persistRefreshTree().then(() => renderAll()).catch(() => undefined);
+        scheduleResumeRefresh();
       }
     });
     document.addEventListener("visibilitychange", () => {
       if (mounted && document.visibilityState === "visible") {
-        void persistRefreshTree().then(() => renderAll()).catch(() => undefined);
+        scheduleResumeRefresh();
       }
     });
 

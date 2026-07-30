@@ -57,6 +57,14 @@ async function emitModule(sourceFilename) {
     compiled = compiled.replaceAll(specifier, relativeImportPath(outputFilename, dependencyOutput));
   }
 
+  const packageSpecifiers = [
+    ...compiled.matchAll(/from\s+["']([^./][^"']*)["']/g),
+    ...compiled.matchAll(/import\(\s*["']([^./][^"']*)["']\s*\)/g),
+  ].map((match) => match[1]);
+  for (const specifier of new Set(packageSpecifiers)) {
+    compiled = compiled.replaceAll(specifier, import.meta.resolve(specifier));
+  }
+
   await mkdir(path.dirname(outputFilename), { recursive: true });
   await writeFile(outputFilename, compiled, "utf8");
   return outputFilename;

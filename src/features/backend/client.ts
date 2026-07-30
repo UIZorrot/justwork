@@ -72,6 +72,7 @@ export type WorkspaceTreeItem = {
   kind: BackendWorkspaceItemKind;
   parent_id: string | null;
   order_key: number;
+  order_rank: string;
   pinned: boolean;
   in_trash: boolean;
   revision: number;
@@ -86,6 +87,7 @@ export type WorkspaceItem = {
   kind: BackendWorkspaceItemKind;
   parent_id: string | null;
   order_key: number;
+  order_rank: string;
   pinned: boolean;
   in_trash: boolean;
   revision: number;
@@ -174,6 +176,7 @@ export type UpdateItemBody = {
   markdown?: string | null;
   content?: WorkspaceDocContent | null;
   collaborative_update?: string | null;
+  collaborative_epoch?: string | null;
   expected_revision: number;
   client_mutation_id?: string | null;
 };
@@ -203,7 +206,8 @@ export type UpdateWorkspaceSettingsBody = {
 export type MoveItemBody = {
   password: string;
   parent_id: string | null;
-  order_key: number;
+  order_key?: number | null;
+  order_rank?: string | null;
   expected_revision: number;
   client_mutation_id?: string | null;
 };
@@ -243,6 +247,7 @@ export type RelayJoinResponse = {
 
 export type CollaborativeJoinBody = {
   password: string;
+  protocol_version?: number;
 };
 
 export type CollaborativeJoinResponse = {
@@ -252,6 +257,16 @@ export type CollaborativeJoinResponse = {
   ticket: string;
   expires_at: string;
   bootstrap_owner: boolean;
+  room_epoch: string;
+  snapshot_base64: string | null;
+};
+
+export type CollaborativeStateResponse = {
+  ok: boolean;
+  workspace_id: string;
+  item_id: string;
+  room_epoch: string;
+  snapshot_base64: string | null;
 };
 
 /** Same shape as `@justwork/security` IdentityKeyPair — inlined to avoid circular workspace deps in types. */
@@ -605,10 +620,10 @@ export function createBackendClient(opts: BackendClientOptions) {
       workspaceId: string,
       itemId: string,
       body: PasswordBody,
-    ): Promise<Uint8Array> {
-      return requestBytes(
+    ): Promise<CollaborativeStateResponse> {
+      return request(
         "POST",
-        `/v1/workspaces/${encodeURIComponent(workspaceId)}/items/${encodeURIComponent(itemId)}/collab/state`,
+        `/v1/workspaces/${encodeURIComponent(workspaceId)}/items/${encodeURIComponent(itemId)}/collab/state?protocol_version=2`,
         body,
       );
     },

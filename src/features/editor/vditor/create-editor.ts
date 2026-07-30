@@ -99,6 +99,23 @@ export function createWysiwygEditor(options: CreateEditorOptions): DocEditor {
   let stopCollaboratorObserver: (() => void) | undefined;
   let collaboratorBinding: ReturnType<typeof createVditorMarkdownBinding> | undefined;
   let collaboratorState: CollaborativeMarkdownBinding | undefined;
+  let collaborativeSnapshotTimer: number | undefined;
+  const flushCollaborativeSnapshot = (): void => {
+    if (collaborativeSnapshotTimer !== undefined) {
+      window.clearTimeout(collaborativeSnapshotTimer);
+      collaborativeSnapshotTimer = undefined;
+    }
+    if (!collaboratorState) return;
+    saveCollaborativeSnapshot(collaboratorState.storageKey, collaboratorState.collaborator.encodeUpdate());
+  };
+  const scheduleCollaborativeSnapshot = (): void => {
+    if (collaborativeSnapshotTimer !== undefined) window.clearTimeout(collaborativeSnapshotTimer);
+    collaborativeSnapshotTimer = window.setTimeout(() => {
+      collaborativeSnapshotTimer = undefined;
+      if (!collaboratorState) return;
+      saveCollaborativeSnapshot(collaboratorState.storageKey, collaboratorState.collaborator.encodeUpdate());
+    }, 250);
+  };
   let compositionBaseMarkdown: string | null = null;
   const compositionGate = createCompositionGate();
   const clearMentionQuery = (): void => onMentionQueryChange?.(null);
@@ -159,6 +176,7 @@ export function createWysiwygEditor(options: CreateEditorOptions): DocEditor {
   };
   const applyMarkdown = (markdown: string, clearHistory: boolean): void => {
     lastKnownMarkdown = markdown;
+    lastInputMarkdown = markdown;
     vditor?.setValue(imageSync?.toEditorMarkdown(markdown) ?? markdown, clearHistory);
   };
   const setMarkdown = (markdown: string, clearHistory?: boolean): void => {
@@ -222,6 +240,7 @@ export function createWysiwygEditor(options: CreateEditorOptions): DocEditor {
   };
 
   const unbindCollaborator = (): void => {
+    flushCollaborativeSnapshot();
     if (collaboratorBinding) {
       collaboratorBinding.destroy();
       collaboratorBinding = undefined;
@@ -247,7 +266,7 @@ export function createWysiwygEditor(options: CreateEditorOptions): DocEditor {
     if (!binding) return;
     collaboratorState = binding;
     stopCollaboratorObserver = binding.collaborator.onUpdate((_update, origin) => {
-      saveCollaborativeSnapshot(binding.storageKey, binding.collaborator.encodeUpdate());
+      scheduleCollaborativeSnapshot();
       if (origin === "local") {
         onChange?.(binding.collaborator.getMarkdown());
       }

@@ -7,6 +7,10 @@ function storageKey(documentKey: string): string {
   return `${SNAPSHOT_PREFIX}${documentKey}`;
 }
 
+function epochStorageKey(documentKey: string): string {
+  return `${storageKey(documentKey)}:epoch`;
+}
+
 function encodeSnapshot(snapshot: Uint8Array): string {
   let binary = "";
   for (const byte of snapshot) binary += String.fromCharCode(byte);
@@ -39,7 +43,28 @@ function getLocalStorage(): Storage | undefined {
 export function saveCollaborativeSnapshot(documentKey: string, snapshot: Uint8Array): void {
   const storage = getLocalStorage();
   if (!storage) return;
-  storage.setItem(storageKey(documentKey), encodeSnapshot(snapshot));
+  try {
+    storage.setItem(storageKey(documentKey), encodeSnapshot(snapshot));
+  } catch {
+    // A local recovery cache must never interrupt the editor or realtime transport.
+    // The server remains authoritative if the browser storage quota is exhausted.
+  }
+}
+
+export function saveCollaborativeSnapshotEpoch(documentKey: string, epoch: string): void {
+  const storage = getLocalStorage();
+  if (!storage) return;
+  try {
+    storage.setItem(epochStorageKey(documentKey), epoch);
+  } catch {
+    // Best effort for the same reason as the snapshot write above.
+  }
+}
+
+export function loadCollaborativeSnapshotEpoch(documentKey: string): string | null {
+  const storage = getLocalStorage();
+  if (!storage) return null;
+  return storage.getItem(epochStorageKey(documentKey));
 }
 
 export function loadCollaborativeSnapshot(documentKey: string): Uint8Array | null {
@@ -59,4 +84,5 @@ export function removeCollaborativeSnapshot(documentKey: string): void {
   const storage = getLocalStorage();
   if (!storage) return;
   storage.removeItem(storageKey(documentKey));
+  storage.removeItem(epochStorageKey(documentKey));
 }

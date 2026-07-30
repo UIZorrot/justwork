@@ -27,6 +27,10 @@ export function resolveSaveMutationId(
   return pendingMutationId ?? createMutationId();
 }
 
+export function hasNewerLocalEditGeneration(requestGeneration: number, currentGeneration: number): boolean {
+  return currentGeneration > requestGeneration;
+}
+
 function stableContentKey(content: WorkspaceDocContent | null | undefined): string {
   return JSON.stringify(content ?? null);
 }
@@ -46,11 +50,12 @@ export function hasStaleCollaborativeSave(
 export function hasUnexpectedCollaborativeSaveResult(
   savedDoc: CollaborativeDocState | null | undefined,
   request: CollaborativeSaveRequest,
+  options: { ignoreMarkdown?: boolean; ignoreTitle?: boolean } = {},
 ): boolean {
   if (!savedDoc) return true;
   return (
-    savedDoc.title !== request.nextTitle ||
-    savedDoc.markdown !== request.nextMarkdown ||
+    (!options.ignoreTitle && savedDoc.title !== request.nextTitle) ||
+    (!options.ignoreMarkdown && savedDoc.markdown !== request.nextMarkdown) ||
     (
       request.content !== undefined &&
       stableContentKey(savedDoc.content) !== stableContentKey(request.content)

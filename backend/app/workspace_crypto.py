@@ -1,6 +1,9 @@
 import base64
 import json
 import os
+import hashlib
+from collections import OrderedDict
+from threading import Lock
 from dataclasses import dataclass
 
 from cryptography.exceptions import InvalidTag
@@ -11,6 +14,11 @@ from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
 CHECK_TEXT = "justwork"
 KDF_ITERATIONS = 120_000
+COLLABORATION_KDF_ITERATIONS = 310_000
+COLLABORATION_MAGIC = b"JWC1"
+_COLLABORATION_KEY_CACHE_MAX = 256
+_collaboration_key_cache: OrderedDict[str, bytes] = OrderedDict()
+_collaboration_key_cache_lock = Lock()
 
 
 class InvalidWorkspacePassword(Exception):
@@ -77,3 +85,60 @@ def decrypt_workspace_payload(encrypted_payload: str, password: str) -> dict:
     except (InvalidTag, KeyError, ValueError, InvalidWorkspacePassword) as exc:
         raise InvalidWorkspacePassword("invalid workspace password") from exc
     return json.loads(plaintext)
+
+
+def derive_workspace_collaboration_key(workspace_id: str, password: str) -> bytes:
+    """Derive a stable, workspace-scoped key without persisting the password.
+
+    The workspace id is a public, unique salt. A separate KDF domain keeps this
+    key independent from the rotating salt used by the encrypted JSON payload.
+    """
+    salt = hashlib.sha256(f"justwork:collaboration:{workspace_id}".encode("utf-8")).digest()[:16]
+    kdf = PBKDF2HMAC(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=salt,
+        iterations=COLLABORATION_KDF_ITERATIONS,
+    )
+    return kdf.derive(password.encode("utf-8"))
+
+
+def cached_workspace_collaboration_key(workspace_id: str, password: str) -> bytes:
+    """Cache only the derived key after the caller verified the workspace password."""
+    with _collaboration_key_cache_lock:
+        existing = _collaboration_key_cache.get(workspace_id)
+        if existing is not None:
+            _collaboration_key_cache.move_to_end(workspace_id)
+            return existing
+    derived = derive_workspace_collaboration_key(workspace_id, password)
+    with _collaboration_key_cache_lock:
+        _collaboration_key_cache[workspace_id] = derived
+        _collaboration_key_cache.move_to_end(workspace_id)
+        while len(_collaboration_key_cache) > _COLLABORATION_KEY_CACHE_MAX:
+            _collaboration_key_cache.popitem(last=False)
+    return derived
+
+
+def encrypt_collaboration_bytes(key: bytes, plaintext: bytes, *, aad: str) -> bytes:
+    nonce = os.urandom(12)
+    ciphertext = AESGCM(key).encrypt(nonce, plaintext, aad.encode("utf-8"))
+    return COLLABORATION_MAGIC + nonce + ciphertext
+
+
+def decrypt_collaboration_bytes(key: bytes, payload: bytes, *, aad: str) -> tuple[bytes, bool]:
+    """Return plaintext and whether the input used the encrypted JWC1 format.
+
+    Pre-0.0.7 rooms contained raw Yjs updates. Treating only values without the
+    magic header as legacy lets a correct-password access migrate them safely.
+    """
+    if not payload.startswith(COLLABORATION_MAGIC):
+        return payload, False
+    if len(payload) < len(COLLABORATION_MAGIC) + 12 + 16:
+        raise InvalidWorkspacePassword("invalid collaborative payload")
+    nonce_start = len(COLLABORATION_MAGIC)
+    nonce = payload[nonce_start:nonce_start + 12]
+    ciphertext = payload[nonce_start + 12:]
+    try:
+        return AESGCM(key).decrypt(nonce, ciphertext, aad.encode("utf-8")), True
+    except InvalidTag as exc:
+        raise InvalidWorkspacePassword("invalid collaborative payload") from exc

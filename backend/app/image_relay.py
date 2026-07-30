@@ -1,10 +1,15 @@
 import asyncio
+import base64
+import hashlib
+import json
+import os
 import secrets
 import time
 from dataclasses import dataclass
 from typing import Any
 
 from fastapi import WebSocket
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 
 @dataclass
@@ -79,28 +84,40 @@ class ImageRelayHub:
         self._members: dict[str, dict[str, RelayMember]] = {}
         self._websocket_index: dict[WebSocket, tuple[str, str]] = {}
         self._lock = asyncio.Lock()
+        configured_secret = (
+            os.getenv("JUSTWORK_COLLAB_TICKET_SECRET", "").strip()
+            or os.getenv("JUSTWORK_BACKEND_TOKEN", "").strip()
+        )
+        self._ticket_key_bytes = hashlib.sha256(
+            (configured_secret or secrets.token_urlsafe(48)).encode("utf-8")
+        ).digest()
 
     async def issue_ticket(self, workspace_id: str) -> tuple[str, str]:
-        ticket = secrets.token_urlsafe(32)
         expires_at = time.time() + self._ticket_ttl_seconds
-        async with self._lock:
-            self._tickets[self._ticket_key(workspace_id, ticket)] = RelayTicket(
-                workspace_id=workspace_id,
-                expires_at=expires_at,
-            )
+        claims = json.dumps(
+            {"workspaceId": workspace_id, "expiresAt": expires_at},
+            separators=(",", ":"),
+        ).encode("utf-8")
+        nonce = secrets.token_bytes(12)
+        ciphertext = AESGCM(self._ticket_key_bytes).encrypt(
+            nonce, claims, b"justwork-relay-ticket-v1"
+        )
+        ticket = base64.urlsafe_b64encode(nonce + ciphertext).decode("ascii").rstrip("=")
         return ticket, time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(expires_at))
 
     async def validate_ticket(self, workspace_id: str, ticket: str) -> bool:
-        key = self._ticket_key(workspace_id, ticket)
-        async with self._lock:
-            record = self._tickets.get(key)
-            if record is None:
-                return False
-            if record.expires_at < time.time():
-                self._tickets.pop(key, None)
-                return False
-            self._tickets.pop(key, None)
-            return True
+        try:
+            padded = ticket + ("=" * ((4 - len(ticket) % 4) % 4))
+            packed = base64.urlsafe_b64decode(padded.encode("ascii"))
+            claims = json.loads(AESGCM(self._ticket_key_bytes).decrypt(
+                packed[:12], packed[12:], b"justwork-relay-ticket-v1"
+            ))
+            return (
+                claims.get("workspaceId") == workspace_id
+                and float(claims.get("expiresAt", 0)) >= time.time()
+            )
+        except Exception:  # noqa: BLE001 - invalid tickets are authentication failures
+            return False
 
     async def register(self, workspace_id: str, websocket: WebSocket) -> None:
         async with self._lock:
@@ -169,7 +186,7 @@ class ImageRelayHub:
             for member in sorted(room, key=lambda member: member.joined_at)
         ]
 
-    async def broadcast(self, workspace_id: str, sender: WebSocket, payload: dict[str, Any]) -> None:
+    async def broadcast(self, workspace_id: str, sender: WebSocket | None, payload: dict[str, Any]) -> None:
         async with self._lock:
             recipients = [ws for ws in self._rooms.get(workspace_id, set()) if ws is not sender]
         dead: list[WebSocket] = []

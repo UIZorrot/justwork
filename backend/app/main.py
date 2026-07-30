@@ -1,4 +1,5 @@
 import os
+import asyncio
 import json
 import time
 import base64
@@ -34,7 +35,11 @@ from .collab_relay import (
     get_collaborative_relay_hub as get_collab_relay_hub,
     reset_collaborative_relay_for_tests as reset_collaborative_relay_hub_for_tests,
 )
-from .collab_store import get_collaborative_update_store, reset_collab_store_for_tests
+from .collab_store import (
+    configure_collaborative_gateway_provider,
+    get_collaborative_update_store,
+    reset_collab_store_for_tests,
+)
 from .models import (
     ErrorBody,
     ErrorResponse,
@@ -54,6 +59,7 @@ from .models import (
     ProfileUpdateRequest,
     WorkspaceCollabJoinRequest,
     WorkspaceCollabJoinResponse,
+    WorkspaceCollabStateResponse,
     WorkspaceRelayJoinRequest,
     WorkspaceRelayJoinResponse,
     WorkspaceRevisionHistoryResponse,
@@ -86,7 +92,12 @@ from .models import (
 from .image_assets import get_image_asset_archive, reset_image_asset_archive_for_tests as reset_image_asset_archive_hub_for_tests
 from .image_relay import get_image_relay_hub, parse_relay_payload, reset_image_relay_for_tests as reset_image_relay_hub_for_tests
 from .write_signing import verify_signed_write_body
-from .workspace_crypto import InvalidWorkspacePassword, decrypt_workspace_payload, encrypt_workspace_payload
+from .workspace_crypto import (
+    InvalidWorkspacePassword,
+    cached_workspace_collaboration_key,
+    decrypt_workspace_payload,
+    encrypt_workspace_payload,
+)
 from .revision_history import append_workspace_revision, list_workspace_revisions
 from .workspace_runtime import (
     create_doc,
@@ -328,6 +339,9 @@ def get_gateway() -> DatabaseGateway:
     return _gateway
 
 
+configure_collaborative_gateway_provider(get_gateway)
+
+
 def get_billing_service() -> StripeBillingService:
     global _billing_service
     if _billing_service is None:
@@ -395,6 +409,23 @@ def _broadcast_collaborative_update_from_http(workspace_id: str, item_id: str, u
         # Endpoint handlers normally run in an AnyIO worker thread. Keeping this
         # fallback makes direct function calls in tests/tools non-fatal after the
         # durable workspace and room snapshots have already committed.
+        pass
+
+
+def _broadcast_workspace_invalidation(workspace_id: str, updated_at: str) -> None:
+    """Wake connected workbenches after any committed workspace mutation."""
+    try:
+        from_thread.run(
+            get_image_relay_hub().broadcast,
+            workspace_id,
+            None,
+            {
+                "type": "workspace.invalidated",
+                "workspaceId": workspace_id,
+                "updatedAt": updated_at,
+            },
+        )
+    except RuntimeError:
         pass
 
 
@@ -622,8 +653,11 @@ def require_collaborative_item(
     doc = find_doc(state_payload, item_id)
     if doc is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="item not found")
-    if doc.get("kind") != "page":
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="real-time collaboration requires markdown text")
+    if doc.get("kind") not in {"page", "table", "board"}:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="real-time collaboration requires a page, table, or board",
+        )
     return record, state_payload, doc
 
 
@@ -669,6 +703,18 @@ def save_state(
     saved = gateway.compare_and_swap_workspace(next_record, record.encrypted_payload)
     if saved is None:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="workspace write conflict")
+    gateway.publish_workspace_event(
+        record.workspace_id,
+        "workspace.invalidated",
+        {
+            "type": "workspace.invalidated",
+            "workspaceId": record.workspace_id,
+            "updatedAt": saved.updated_at,
+        },
+    )
+    notify = lambda: _broadcast_workspace_invalidation(record.workspace_id, saved.updated_at)
+    if not gateway.defer_until_after_commit(notify, record.workspace_id):
+        notify()
     return saved
 
 
@@ -1030,7 +1076,38 @@ async def workspace_image_relay(
         await websocket.close(code=4401)
         return
     await websocket.accept()
+    collab_send_lock = asyncio.Lock()
     await hub.register(workspace_id, websocket)
+    relay_gateway = get_gateway()
+    workspace_event_cursor = (
+        relay_gateway.workspace_event_cursor(workspace_id)
+        if relay_gateway.supports_collaborative_storage(workspace_id)
+        else 0
+    )
+    workspace_event_task: asyncio.Task | None = None
+    if relay_gateway.supports_collaborative_storage(workspace_id):
+        async def poll_workspace_events() -> None:
+            nonlocal workspace_event_cursor
+            while True:
+                try:
+                    events = await asyncio.to_thread(
+                        relay_gateway.workspace_events_since,
+                        workspace_id,
+                        workspace_event_cursor,
+                    )
+                    for next_cursor, event_type, event_payload in events:
+                        workspace_event_cursor = max(workspace_event_cursor, next_cursor)
+                        if event_type != "workspace.invalidated":
+                            continue
+                        async with collab_send_lock:
+                            await websocket.send_json(event_payload)
+                except DatabaseUnavailableError:
+                    # The cursor remains unchanged; the durable stream catches up
+                    # after a transient database outage.
+                    pass
+                await asyncio.sleep(0.2)
+
+        workspace_event_task = asyncio.create_task(poll_workspace_events())
     try:
         while True:
             payload = await websocket.receive_json()
@@ -1078,13 +1155,14 @@ async def workspace_image_relay(
                 await hub.broadcast(workspace_id, websocket, parsed)
                 continue
             if message_type == "workspace.presence.sync":
-                await websocket.send_json(
-                    {
-                        "type": "workspace.presence.snapshot",
-                        "workspaceId": workspace_id,
-                        "members": await hub.list_members(workspace_id),
-                    }
-                )
+                async with collab_send_lock:
+                    await websocket.send_json(
+                        {
+                            "type": "workspace.presence.snapshot",
+                            "workspaceId": workspace_id,
+                            "members": await hub.list_members(workspace_id),
+                        }
+                    )
                 continue
             if message_type == "relay.join":
                 member_session_id = str(parsed.get("sessionId", "")).strip() or secrets.token_urlsafe(8)
@@ -1133,6 +1211,12 @@ async def workspace_image_relay(
     except WebSocketDisconnect:
         pass
     finally:
+        if workspace_event_task is not None:
+            workspace_event_task.cancel()
+            try:
+                await workspace_event_task
+            except asyncio.CancelledError:
+                pass
         member = await hub.unregister_member(websocket)
         if member is not None:
             await hub.broadcast(
@@ -1156,9 +1240,24 @@ async def join_workspace_collab(
     gateway: DatabaseGateway = Depends(get_gateway),
 ) -> WorkspaceCollabJoinResponse:
     require_collaborative_item(gateway, workspace_id, item_id, body.password)
+    collaboration_key = cached_workspace_collaboration_key(workspace_id, body.password)
     hub = get_collab_relay_hub()
-    ticket, expires_at = await hub.issue_ticket(workspace_id, item_id)
-    bootstrap_owner = get_collaborative_update_store().claim_bootstrap(workspace_id, item_id)
+    store = get_collaborative_update_store()
+    if body.protocol_version >= 2:
+        room_epoch, snapshot, bootstrap_owner = store.join_state(
+            workspace_id, item_id, encryption_key=collaboration_key
+        )
+    else:
+        room_epoch, snapshot = store.get_state(workspace_id, item_id, collaboration_key)
+        bootstrap_owner = False
+    ticket, expires_at = await hub.issue_ticket(
+        workspace_id,
+        item_id,
+        room_epoch,
+        writable=body.protocol_version >= 2,
+        encryption_key=collaboration_key,
+        protocol_version=body.protocol_version,
+    )
     return WorkspaceCollabJoinResponse(
         ok=True,
         workspace_id=workspace_id,
@@ -1166,20 +1265,34 @@ async def join_workspace_collab(
         ticket=ticket,
         expires_at=expires_at,
         bootstrap_owner=bootstrap_owner,
+        room_epoch=room_epoch,
+        snapshot_base64=base64.b64encode(snapshot).decode("ascii") if snapshot else None,
     )
 
 
-@app.post("/v1/workspaces/{workspace_id}/items/{item_id}/collab/state")
+@app.post("/v1/workspaces/{workspace_id}/items/{item_id}/collab/state", response_model=None)
 def get_workspace_collab_state(
     workspace_id: str,
     item_id: str,
     body: WorkspacePasswordRequest,
+    protocol_version: int = 1,
     _: None = Depends(require_backend_token),
     gateway: DatabaseGateway = Depends(get_gateway),
-) -> Response:
+) -> WorkspaceCollabStateResponse | Response:
     require_collaborative_item(gateway, workspace_id, item_id, body.password)
-    snapshot = get_collaborative_update_store().get_snapshot(workspace_id, item_id) or b""
-    return Response(content=snapshot, media_type="application/octet-stream")
+    collaboration_key = cached_workspace_collaboration_key(workspace_id, body.password)
+    room_epoch, snapshot = get_collaborative_update_store().get_state(
+        workspace_id, item_id, collaboration_key
+    )
+    if protocol_version < 2:
+        return Response(content=snapshot or b"", media_type="application/octet-stream")
+    return WorkspaceCollabStateResponse(
+        ok=True,
+        workspace_id=workspace_id,
+        item_id=item_id,
+        room_epoch=room_epoch,
+        snapshot_base64=base64.b64encode(snapshot).decode("ascii") if snapshot else None,
+    )
 
 
 @app.websocket("/v1/workspaces/{workspace_id}/items/{item_id}/collab")
@@ -1191,13 +1304,47 @@ async def workspace_collab_relay(
 ) -> None:
     hub = get_collab_relay_hub()
     store = get_collaborative_update_store()
-    if not await hub.validate_ticket(workspace_id, item_id, ticket):
+    ticket_state = await hub.validate_ticket(workspace_id, item_id, ticket)
+    if ticket_state is None:
         await websocket.close(code=4401)
         return
+    room_epoch, writable, collaboration_key, protocol_version = ticket_state
+    if not store.epoch_matches(workspace_id, item_id, room_epoch, collaboration_key):
+        await websocket.close(code=4409)
+        return
     await websocket.accept()
-    for update in store.load_updates(workspace_id, item_id):
+    event_cursor = store.event_cursor(workspace_id, item_id) if protocol_version >= 3 else 0
+    for update in store.load_updates(workspace_id, item_id, collaboration_key):
         await websocket.send_bytes(update)
-    await hub.register(workspace_id, item_id, websocket)
+    if protocol_version < 3:
+        await hub.register(workspace_id, item_id, websocket)
+    poll_task: asyncio.Task | None = None
+    if protocol_version >= 3 and store.supports_cross_instance_events(workspace_id):
+        async def poll_cross_instance_updates() -> None:
+            nonlocal event_cursor
+            while True:
+                try:
+                    events = await asyncio.to_thread(
+                        store.events_since,
+                        workspace_id,
+                        item_id,
+                        room_epoch,
+                        event_cursor,
+                        collaboration_key,
+                    )
+                    for next_cursor, remote_update_id, remote_payload in events:
+                        event_cursor = max(event_cursor, next_cursor)
+                        async with collab_send_lock:
+                            await websocket.send_json({
+                                "type": "collab.update",
+                                "updateId": remote_update_id,
+                                "payloadBase64": base64.b64encode(remote_payload).decode("ascii"),
+                            })
+                except DatabaseUnavailableError:
+                    pass
+                await asyncio.sleep(0.15)
+
+        poll_task = asyncio.create_task(poll_cross_instance_updates())
     try:
         while True:
             message = await websocket.receive()
@@ -1205,15 +1352,73 @@ async def workspace_collab_relay(
             if msg_type == "websocket.disconnect":
                 break
             payload = message.get("bytes")
-            if not isinstance(payload, (bytes, bytearray)):
+            update_id: str | None = None
+            if protocol_version >= 3:
+                raw_text = message.get("text")
+                if not isinstance(raw_text, str):
+                    async with collab_send_lock:
+                        await websocket.send_json({"type": "collab.error", "code": "binary_not_supported"})
+                    continue
+                try:
+                    envelope = json.loads(raw_text)
+                    update_id = str(envelope.get("updateId", ""))
+                    encoded = str(envelope.get("payloadBase64", ""))
+                    if envelope.get("type") != "collab.update" or not (8 <= len(update_id) <= 128):
+                        raise ValueError("invalid collaborative envelope")
+                    next_payload = base64.b64decode(encoded, validate=True)
+                    if not next_payload or len(next_payload) > 8 * 1024 * 1024:
+                        raise ValueError("invalid collaborative payload")
+                except (ValueError, TypeError, json.JSONDecodeError):
+                    async with collab_send_lock:
+                        await websocket.send_json({"type": "collab.error", "code": "invalid_update"})
+                    continue
+            else:
+                if not isinstance(payload, (bytes, bytearray)):
+                    continue
+                next_payload = bytes(payload)
+            if not writable:
+                # v1 clients may read the canonical room but must persist edits via
+                # the revision-guarded REST markdown delta path.
                 continue
-            next_payload = bytes(payload)
-            store.append_update(workspace_id, item_id, next_payload)
-            await hub.broadcast(workspace_id, item_id, websocket, next_payload)
+            inserted = store.append_update(
+                workspace_id,
+                item_id,
+                next_payload,
+                expected_epoch=room_epoch,
+                encryption_key=collaboration_key,
+                update_id=update_id,
+            )
+            if protocol_version >= 3 and update_id is not None:
+                async with collab_send_lock:
+                    await websocket.send_json({
+                        "type": "collab.ack",
+                        "updateId": update_id,
+                        "roomEpoch": room_epoch,
+                    })
+                if inserted and not store.supports_cross_instance_events(workspace_id):
+                    await hub.broadcast(
+                        workspace_id,
+                        item_id,
+                        websocket,
+                        json.dumps({
+                            "type": "collab.update",
+                            "updateId": update_id,
+                            "payloadBase64": base64.b64encode(next_payload).decode("ascii"),
+                        }, separators=(",", ":")),
+                    )
+            elif inserted:
+                await hub.broadcast(workspace_id, item_id, websocket, next_payload)
     except WebSocketDisconnect:
         pass
     finally:
-        await hub.unregister(workspace_id, item_id, websocket)
+        if poll_task is not None:
+            poll_task.cancel()
+            try:
+                await poll_task
+            except asyncio.CancelledError:
+                pass
+        if protocol_version < 3:
+            await hub.unregister(workspace_id, item_id, websocket)
 
 
 @app.put("/v1/workspaces/{workspace_id}/profile", response_model=ProfileResponse)
@@ -1530,6 +1735,11 @@ def update_workspace_item(
         if body.collaborative_update is not None:
             if cur.get("kind") != "page" or body.markdown is None:
                 raise ValueError("collaborative_update requires page markdown")
+            if not body.collaborative_epoch:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="client update required: collaborative room epoch is missing",
+                )
             try:
                 collaborative_update = base64.b64decode(body.collaborative_update, validate=True)
             except Exception as exc:  # noqa: BLE001
@@ -1543,6 +1753,20 @@ def update_workspace_item(
     def commit_doc(merged_markdown: str | None = None) -> dict:
         if merged_markdown is not None:
             doc["markdown"] = merged_markdown
+        unchanged = (
+            doc.get("title", "") == before_doc.get("title", "")
+            and doc.get("markdown", "") == before_doc.get("markdown", "")
+            and doc.get("content") == before_doc.get("content")
+        )
+        if unchanged:
+            # A retry, duplicate editor callback, or idempotent CRDT state must not
+            # consume quota by creating a revision containing two full snapshots.
+            doc.clear()
+            doc.update(before_doc)
+            return item_view(doc)
+        if int(doc.get("revision", 0)) == int(before_doc.get("revision", 0)):
+            doc["revision"] = int(before_doc.get("revision", 0)) + 1
+            doc["updatedAt"] = now_iso()
         item = item_view(doc)
         record_mutation_item(state_payload, mutation_id, operation="update", target_id=item_id, item=item)
         append_workspace_revision(
@@ -1566,9 +1790,15 @@ def update_workspace_item(
                 item_id,
                 collaborative_update,
                 commit_doc,
+                expected_epoch=body.collaborative_epoch,
+                encryption_key=cached_workspace_collaboration_key(workspace_id, body.password),
             )
         except HTTPException:
             raise
+        except ValueError as exc:
+            if "epoch conflict" in str(exc):
+                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="invalid collaborative update") from exc
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="invalid collaborative update") from exc
     elif doc.get("kind") == "page" and body.markdown is not None:
@@ -1579,6 +1809,7 @@ def update_workspace_item(
                 str(before_doc.get("markdown", "")),
                 doc.get("markdown", ""),
                 commit_doc,
+                encryption_key=cached_workspace_collaboration_key(workspace_id, body.password),
             )
         except HTTPException:
             raise
@@ -1639,7 +1870,9 @@ def move_workspace_item(
         return WorkspaceItemResponse(ok=True, workspace_id=workspace_id, item=recorded_item)
     try:
         before_doc = dict(require_expected_revision(state_payload, item_id, body.expected_revision))
-        doc = move_doc(state_payload, item_id, body.parent_id, body.order_key)
+        doc = move_doc(
+            state_payload, item_id, body.parent_id, body.order_key, body.order_rank
+        )
     except KeyError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="item not found") from exc
     except ValueError as exc:
@@ -1853,6 +2086,7 @@ def patch_workspace_item(
                     str(before_doc.get("markdown", "")),
                     doc.get("markdown", ""),
                     commit_patch,
+                    encryption_key=cached_workspace_collaboration_key(workspace_id, body.password),
                 )
             except HTTPException:
                 raise

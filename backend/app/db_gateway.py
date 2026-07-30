@@ -10,13 +10,52 @@ from __future__ import annotations
 
 import os
 import json
+from contextvars import ContextVar
+from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
-from typing import Optional
+from typing import Any, Callable, Optional, TypeVar
 from contextlib import contextmanager
 
 from .database_routing import decrypt_database_url
 from .models import PaidCheckoutRecord, WorkspaceRecord, WorkspaceRouteRecord
+
+
+T = TypeVar("T")
+
+
+@dataclass(frozen=True)
+class CollaborativeRoomRecord:
+    workspace_id: str
+    item_id: str
+    room_epoch: str
+    snapshot: bytes | None
+    version: int
+    bootstrap_lease_until: float
+    snapshot_version: int = 0
+    updates: tuple[tuple[int, bytes], ...] = ()
+
+
+@dataclass(frozen=True)
+class CollaborativeRoomMutation:
+    room_epoch: str | None
+    snapshot: bytes | None
+    bootstrap_lease_until: float
+    result: Any
+    persist: bool = True
+    update_payload: bytes | None = None
+    compact: bool = True
+    update_id: str | None = None
+    event_payload: bytes | None = None
+
+
+@dataclass(frozen=True)
+class CollaborativeEventRecord:
+    event_id: int
+    room_epoch: str
+    room_version: int
+    update_id: str
+    payload: bytes
 
 
 class DatabaseUnavailableError(RuntimeError):
@@ -38,6 +77,12 @@ class DatabaseGateway:
         self._route_gateways: dict[str, DatabaseGateway] = {}
         self._lock = Lock()
         self._pool = None
+        self._transaction_connection: ContextVar[Any | None] = ContextVar(
+            f"justwork_transaction_connection_{id(self)}", default=None
+        )
+        self._after_commit_hooks: ContextVar[list[Callable[[], None]] | None] = ContextVar(
+            f"justwork_after_commit_hooks_{id(self)}", default=None
+        )
         if self._database_url:
             self._pool = self._create_pool()
             self._init_schema()
@@ -112,6 +157,87 @@ class DatabaseGateway:
                 cur.execute("ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS billing_status TEXT NOT NULL DEFAULT 'free'")
                 cur.execute("ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS stripe_customer_id TEXT")
                 cur.execute("ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS stripe_subscription_id TEXT")
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS collaborative_rooms (
+                      workspace_id TEXT NOT NULL,
+                      item_id TEXT NOT NULL,
+                      room_epoch TEXT NOT NULL,
+                      snapshot BYTEA,
+                      version BIGINT NOT NULL DEFAULT 0,
+                      snapshot_version BIGINT NOT NULL DEFAULT 0,
+                      bootstrap_lease_until DOUBLE PRECISION NOT NULL DEFAULT 0,
+                      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                      PRIMARY KEY (workspace_id, item_id)
+                    )
+                    """
+                )
+                cur.execute(
+                    "ALTER TABLE collaborative_rooms ADD COLUMN IF NOT EXISTS snapshot_version BIGINT NOT NULL DEFAULT 0"
+                )
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS collaborative_updates (
+                      workspace_id TEXT NOT NULL,
+                      item_id TEXT NOT NULL,
+                      room_epoch TEXT NOT NULL,
+                      room_version BIGINT NOT NULL,
+                      payload BYTEA NOT NULL,
+                      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                      PRIMARY KEY (workspace_id, item_id, room_version)
+                    )
+                    """
+                )
+                cur.execute(
+                    "CREATE INDEX IF NOT EXISTS collaborative_updates_room_idx "
+                    "ON collaborative_updates (workspace_id, item_id, room_version)"
+                )
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS collaborative_update_receipts (
+                      workspace_id TEXT NOT NULL,
+                      item_id TEXT NOT NULL,
+                      update_id TEXT NOT NULL,
+                      room_epoch TEXT NOT NULL,
+                      room_version BIGINT NOT NULL,
+                      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                      PRIMARY KEY (workspace_id, item_id, update_id)
+                    )
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS collaborative_events (
+                      event_id BIGSERIAL PRIMARY KEY,
+                      workspace_id TEXT NOT NULL,
+                      item_id TEXT NOT NULL,
+                      room_epoch TEXT NOT NULL,
+                      room_version BIGINT NOT NULL,
+                      update_id TEXT NOT NULL,
+                      payload BYTEA NOT NULL,
+                      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    )
+                    """
+                )
+                cur.execute(
+                    "CREATE INDEX IF NOT EXISTS collaborative_events_room_idx "
+                    "ON collaborative_events (workspace_id, item_id, event_id)"
+                )
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS workspace_events (
+                      event_id BIGSERIAL PRIMARY KEY,
+                      workspace_id TEXT NOT NULL,
+                      event_type TEXT NOT NULL,
+                      payload JSONB NOT NULL,
+                      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    )
+                    """
+                )
+                cur.execute(
+                    "CREATE INDEX IF NOT EXISTS workspace_events_workspace_idx "
+                    "ON workspace_events (workspace_id, event_id)"
+                )
                 if self._routing_enabled:
                     cur.execute(
                         """
@@ -374,9 +500,29 @@ class DatabaseGateway:
             return routed.compare_and_swap_workspace(record, expected_encrypted_payload)
         if not self._database_url:
             return self._file_compare_and_swap_workspace(record, expected_encrypted_payload)
+        active_conn = self._transaction_connection.get()
+        if active_conn is not None:
+            return self._compare_and_swap_workspace_on_connection(
+                active_conn, record, expected_encrypted_payload
+            )
         with self._connect() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
+            saved = self._compare_and_swap_workspace_on_connection(
+                conn, record, expected_encrypted_payload
+            )
+            if saved is None:
+                conn.rollback()
+                return None
+            conn.commit()
+        return saved
+
+    def _compare_and_swap_workspace_on_connection(
+        self,
+        conn: Any,
+        record: WorkspaceRecord,
+        expected_encrypted_payload: str,
+    ) -> WorkspaceRecord | None:
+        with conn.cursor() as cur:
+            cur.execute(
                     """
                     UPDATE workspaces
                     SET owner_user_id = %s,
@@ -403,11 +549,368 @@ class DatabaseGateway:
                         expected_encrypted_payload,
                     ),
                 )
-                if cur.rowcount != 1:
-                    conn.rollback()
-                    return None
-            conn.commit()
+            if cur.rowcount != 1:
+                return None
         return record
+
+    def defer_until_after_commit(
+        self, callback: Callable[[], None], workspace_id: str | None = None
+    ) -> bool:
+        if workspace_id:
+            routed = self._routed_gateway(self._workspace_route(workspace_id))
+            if routed is not None:
+                return routed.defer_until_after_commit(callback)
+        routed_hooks = self._after_commit_hooks.get()
+        if routed_hooks is None:
+            return False
+        routed_hooks.append(callback)
+        return True
+
+    def supports_collaborative_storage(self, workspace_id: str) -> bool:
+        """Return whether this workspace is routed to PostgreSQL-backed storage."""
+        routed = self._routed_gateway(self._workspace_route(workspace_id))
+        if routed is not None:
+            return True
+        return bool(self._database_url)
+
+    def mutate_collaborative_room(
+        self,
+        workspace_id: str,
+        item_id: str,
+        mutate: Callable[[CollaborativeRoomRecord | None], CollaborativeRoomMutation],
+    ) -> T:
+        """Serialize a room mutation in PostgreSQL and return the callback result.
+
+        The advisory transaction lock also covers a room that has no row yet, so
+        two backend processes cannot both become bootstrap owner. The callback is
+        intentionally executed while that lock is held because it performs the
+        Yjs merge against the exact state selected below.
+        """
+        routed = self._routed_gateway(self._workspace_route(workspace_id))
+        if routed is not None:
+            return routed.mutate_collaborative_room(
+                workspace_id,
+                item_id,
+                mutate,
+            )
+        if not self._database_url:
+            raise RuntimeError("collaborative PostgreSQL storage is unavailable")
+        after_commit: list[Callable[[], None]] = []
+        with self._connect() as conn:
+            connection_token = self._transaction_connection.set(conn)
+            hooks_token = self._after_commit_hooks.set(after_commit)
+            try:
+                result = self._mutate_collaborative_room_on_connection(
+                    conn, workspace_id, item_id, mutate
+                )
+                conn.commit()
+            finally:
+                self._after_commit_hooks.reset(hooks_token)
+                self._transaction_connection.reset(connection_token)
+        for callback in after_commit:
+            callback()
+        return result
+
+    def _mutate_collaborative_room_on_connection(
+        self,
+        conn: Any,
+        workspace_id: str,
+        item_id: str,
+        mutate: Callable[[CollaborativeRoomRecord | None], CollaborativeRoomMutation],
+    ) -> T:
+        with conn.cursor() as cur:
+            cur.execute(
+                    "SELECT pg_advisory_xact_lock(hashtext(%s), hashtext(%s))",
+                    (workspace_id, item_id),
+                )
+            cur.execute(
+                    """
+                    SELECT room_epoch, snapshot, version, snapshot_version, bootstrap_lease_until
+                    FROM collaborative_rooms
+                    WHERE workspace_id = %s AND item_id = %s
+                    FOR UPDATE
+                    """,
+                    (workspace_id, item_id),
+                )
+            row = cur.fetchone()
+            updates: tuple[tuple[int, bytes], ...] = ()
+            if row:
+                cur.execute(
+                        """
+                        SELECT room_version, payload
+                        FROM collaborative_updates
+                        WHERE workspace_id = %s AND item_id = %s AND room_version > %s
+                        ORDER BY room_version ASC
+                        """,
+                        (workspace_id, item_id, int(row[3])),
+                    )
+                updates = tuple((int(entry[0]), bytes(entry[1])) for entry in cur.fetchall())
+            current = CollaborativeRoomRecord(
+                    workspace_id=workspace_id,
+                    item_id=item_id,
+                    room_epoch=row[0],
+                    snapshot=bytes(row[1]) if row[1] is not None else None,
+                    version=int(row[2]),
+                    snapshot_version=int(row[3]),
+                    updates=updates,
+                    bootstrap_lease_until=float(row[4] or 0),
+            ) if row else None
+            mutation = mutate(current)
+            if not mutation.persist:
+                return mutation.result
+            if mutation.update_id is not None:
+                cur.execute(
+                    """
+                    SELECT 1 FROM collaborative_update_receipts
+                    WHERE workspace_id = %s AND item_id = %s AND update_id = %s
+                    """,
+                    (workspace_id, item_id, mutation.update_id),
+                )
+                if cur.fetchone() is not None:
+                    return False
+            if mutation.room_epoch is None:
+                cur.execute(
+                        "DELETE FROM collaborative_updates WHERE workspace_id = %s AND item_id = %s",
+                        (workspace_id, item_id),
+                    )
+                cur.execute(
+                    "DELETE FROM collaborative_rooms WHERE workspace_id = %s AND item_id = %s",
+                    (workspace_id, item_id),
+                )
+                cur.execute(
+                    "DELETE FROM collaborative_update_receipts WHERE workspace_id = %s AND item_id = %s",
+                    (workspace_id, item_id),
+                )
+                cur.execute(
+                    "DELETE FROM collaborative_events WHERE workspace_id = %s AND item_id = %s",
+                    (workspace_id, item_id),
+                )
+            else:
+                next_version = (current.version if current else 0) + 1
+                snapshot = mutation.snapshot if mutation.compact else current.snapshot if current else mutation.snapshot
+                snapshot_version = next_version if mutation.compact else current.snapshot_version if current else 0
+                cur.execute(
+                        """
+                        INSERT INTO collaborative_rooms (
+                          workspace_id, item_id, room_epoch, snapshot, version, snapshot_version,
+                          bootstrap_lease_until, updated_at
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, NOW())
+                        ON CONFLICT (workspace_id, item_id) DO UPDATE
+                        SET room_epoch = EXCLUDED.room_epoch,
+                            snapshot = EXCLUDED.snapshot,
+                            version = EXCLUDED.version,
+                            snapshot_version = EXCLUDED.snapshot_version,
+                            bootstrap_lease_until = EXCLUDED.bootstrap_lease_until,
+                            updated_at = NOW()
+                        """,
+                        (
+                            workspace_id,
+                            item_id,
+                            mutation.room_epoch,
+                            snapshot,
+                            next_version,
+                            snapshot_version,
+                            mutation.bootstrap_lease_until,
+                        ),
+                    )
+                if mutation.update_payload is not None:
+                    cur.execute(
+                            """
+                            INSERT INTO collaborative_updates (
+                              workspace_id, item_id, room_epoch, room_version, payload
+                            ) VALUES (%s, %s, %s, %s, %s)
+                            """,
+                            (workspace_id, item_id, mutation.room_epoch, next_version, mutation.update_payload),
+                        )
+                if mutation.compact:
+                    cur.execute(
+                            """
+                            DELETE FROM collaborative_updates
+                            WHERE workspace_id = %s AND item_id = %s
+                              AND room_version <= %s
+                            """,
+                            (workspace_id, item_id, next_version),
+                        )
+                if mutation.update_id is not None:
+                    cur.execute(
+                        """
+                        INSERT INTO collaborative_update_receipts (
+                          workspace_id, item_id, update_id, room_epoch, room_version
+                        ) VALUES (%s, %s, %s, %s, %s)
+                        """,
+                        (workspace_id, item_id, mutation.update_id, mutation.room_epoch, next_version),
+                    )
+                if mutation.event_payload is not None and mutation.update_id is not None:
+                    cur.execute(
+                        """
+                        INSERT INTO collaborative_events (
+                          workspace_id, item_id, room_epoch, room_version, update_id, payload
+                        ) VALUES (%s, %s, %s, %s, %s, %s)
+                        """,
+                        (
+                            workspace_id,
+                            item_id,
+                            mutation.room_epoch,
+                            next_version,
+                            mutation.update_id,
+                            mutation.event_payload,
+                        ),
+                    )
+                if next_version % 256 == 0:
+                    cur.execute(
+                        """
+                        DELETE FROM collaborative_events
+                        WHERE workspace_id = %s AND item_id = %s AND event_id IN (
+                          SELECT event_id FROM collaborative_events
+                          WHERE workspace_id = %s AND item_id = %s
+                          ORDER BY event_id DESC OFFSET 4096
+                        )
+                        """,
+                        (workspace_id, item_id, workspace_id, item_id),
+                    )
+                    cur.execute(
+                        """
+                        DELETE FROM collaborative_update_receipts
+                        WHERE workspace_id = %s AND item_id = %s AND update_id IN (
+                          SELECT update_id FROM collaborative_update_receipts
+                          WHERE workspace_id = %s AND item_id = %s
+                          ORDER BY created_at DESC OFFSET 8192
+                        )
+                        """,
+                        (workspace_id, item_id, workspace_id, item_id),
+                    )
+        return mutation.result
+
+    def collaborative_event_cursor(self, workspace_id: str, item_id: str) -> int:
+        routed = self._routed_gateway(self._workspace_route(workspace_id))
+        if routed is not None:
+            return routed.collaborative_event_cursor(workspace_id, item_id)
+        if not self._database_url:
+            return 0
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT COALESCE(MAX(event_id), 0) FROM collaborative_events WHERE workspace_id = %s AND item_id = %s",
+                    (workspace_id, item_id),
+                )
+                row = cur.fetchone()
+                return int(row[0]) if row else 0
+
+    def collaborative_events_since(
+        self, workspace_id: str, item_id: str, after_event_id: int, limit: int = 256
+    ) -> list[CollaborativeEventRecord]:
+        routed = self._routed_gateway(self._workspace_route(workspace_id))
+        if routed is not None:
+            return routed.collaborative_events_since(
+                workspace_id, item_id, after_event_id, limit
+            )
+        if not self._database_url:
+            return []
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT event_id, room_epoch, room_version, update_id, payload
+                    FROM collaborative_events
+                    WHERE workspace_id = %s AND item_id = %s AND event_id > %s
+                    ORDER BY event_id ASC LIMIT %s
+                    """,
+                    (workspace_id, item_id, after_event_id, max(1, min(limit, 1000))),
+                )
+                return [
+                    CollaborativeEventRecord(
+                        event_id=int(row[0]),
+                        room_epoch=str(row[1]),
+                        room_version=int(row[2]),
+                        update_id=str(row[3]),
+                        payload=bytes(row[4]),
+                    )
+                    for row in cur.fetchall()
+                ]
+
+    def publish_workspace_event(
+        self, workspace_id: str, event_type: str, payload: dict[str, Any]
+    ) -> None:
+        routed = self._routed_gateway(self._workspace_route(workspace_id))
+        if routed is not None:
+            routed.publish_workspace_event(workspace_id, event_type, payload)
+            return
+        if not self._database_url:
+            return
+        active_conn = self._transaction_connection.get()
+        if active_conn is not None:
+            with active_conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO workspace_events (workspace_id, event_type, payload) VALUES (%s, %s, %s::jsonb)",
+                    (workspace_id, event_type, json.dumps(payload, separators=(",", ":"))),
+                )
+                cur.execute(
+                    """
+                    DELETE FROM workspace_events
+                    WHERE workspace_id = %s AND event_id IN (
+                      SELECT event_id FROM workspace_events
+                      WHERE workspace_id = %s ORDER BY event_id DESC OFFSET 4096
+                    )
+                    """,
+                    (workspace_id, workspace_id),
+                )
+            return
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO workspace_events (workspace_id, event_type, payload) VALUES (%s, %s, %s::jsonb)",
+                    (workspace_id, event_type, json.dumps(payload, separators=(",", ":"))),
+                )
+                cur.execute(
+                    """
+                    DELETE FROM workspace_events
+                    WHERE workspace_id = %s AND event_id IN (
+                      SELECT event_id FROM workspace_events
+                      WHERE workspace_id = %s ORDER BY event_id DESC OFFSET 4096
+                    )
+                    """,
+                    (workspace_id, workspace_id),
+                )
+            conn.commit()
+
+    def workspace_event_cursor(self, workspace_id: str) -> int:
+        routed = self._routed_gateway(self._workspace_route(workspace_id))
+        if routed is not None:
+            return routed.workspace_event_cursor(workspace_id)
+        if not self._database_url:
+            return 0
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT COALESCE(MAX(event_id), 0) FROM workspace_events WHERE workspace_id = %s",
+                    (workspace_id,),
+                )
+                row = cur.fetchone()
+                return int(row[0]) if row else 0
+
+    def workspace_events_since(
+        self, workspace_id: str, after_event_id: int, limit: int = 256
+    ) -> list[tuple[int, str, dict[str, Any]]]:
+        routed = self._routed_gateway(self._workspace_route(workspace_id))
+        if routed is not None:
+            return routed.workspace_events_since(workspace_id, after_event_id, limit)
+        if not self._database_url:
+            return []
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT event_id, event_type, payload
+                    FROM workspace_events
+                    WHERE workspace_id = %s AND event_id > %s
+                    ORDER BY event_id ASC LIMIT %s
+                    """,
+                    (workspace_id, after_event_id, max(1, min(limit, 1000))),
+                )
+                return [
+                    (int(row[0]), str(row[1]), dict(row[2]))
+                    for row in cur.fetchall()
+                ]
 
     def save_paid_checkout(self, checkout: PaidCheckoutRecord) -> None:
         if not self._routing_enabled:

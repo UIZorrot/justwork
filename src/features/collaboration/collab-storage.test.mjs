@@ -9,14 +9,18 @@ test("collab storage keeps a synchronous local snapshot boundary", async () => {
   assert.match(storageSource, /loadCollaborativeSnapshot/);
   assert.match(storageSource, /removeCollaborativeSnapshot/);
   assert.match(storageSource, /COLLABORATIVE_MARKDOWN_SNAPSHOT_PREFIX/);
+  assert.match(storageSource, /saveCollaborativeSnapshotEpoch/);
+  assert.match(storageSource, /loadCollaborativeSnapshotEpoch/);
+  assert.match(storageSource, /catch\s*\{/);
 
   const runtimeSource = await readFile("src/features/workspace/local-runtime.ts", "utf8");
   assert.match(runtimeSource, /globalThis\.localStorage/);
 });
 
-test("workbench restores collaborative markdown before backend paint", async () => {
+test("workbench validates the cached collaborative markdown before binding", async () => {
   const workbenchSource = await readFile("src/pages/workbench/backend-workbench.ts", "utf8");
   assert.match(workbenchSource, /createMarkdownCollaborator/);
   assert.match(workbenchSource, /bindCollaborator/);
+  assert.match(workbenchSource, /cachedCollaborationEpochByDoc/);
   assert.doesNotMatch(workbenchSource, /hydrateDocWithCollaborativeSnapshot\(/);
 });

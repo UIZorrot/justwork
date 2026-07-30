@@ -18,6 +18,7 @@ type RelayHandlers = {
   onPresenceSnapshot?: (message: Extract<RelayMessage, { type: "workspace.presence.snapshot" }>) => void;
   onPresenceJoin?: (message: Extract<RelayMessage, { type: "workspace.presence.join" }>) => void;
   onPresenceLeave?: (message: Extract<RelayMessage, { type: "workspace.presence.leave" }>) => void;
+  onWorkspaceInvalidated?: (message: Extract<RelayMessage, { type: "workspace.invalidated" }>) => void;
   onAssetComplete?: (meta: WorkspaceImageAssetMeta, bytes: ArrayBuffer) => Promise<void> | void;
   onReady?: () => void;
 };
@@ -136,6 +137,9 @@ export function createWorkspaceImageRelayClient(opts: WorkspaceImageRelayOptions
             break;
           case "workspace.presence.leave":
             opts.onPresenceLeave?.(parsed);
+            break;
+          case "workspace.invalidated":
+            opts.onWorkspaceInvalidated?.(parsed);
             break;
           case "asset.chunk": {
             const current = partialChunks.get(parsed.assetId) ?? { total: parsed.total, chunks: [] };

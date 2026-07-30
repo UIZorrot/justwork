@@ -9,6 +9,7 @@ This backend is the primary API surface for third-party Agents.
 - Real database credentials stay server-side only.
 - Workspace passwords are not persisted. The backend may decrypt during a request lifecycle, then re-encrypt before saving.
 - Optional API auth: set `JUSTWORK_BACKEND_TOKEN` and require `Authorization: Bearer <token>`.
+- Multi-instance WebSockets: set the same `JUSTWORK_COLLAB_TICKET_SECRET` on every backend instance (it falls back to `JUSTWORK_BACKEND_TOKEN`).
 
 ## Environment file
 
@@ -172,11 +173,33 @@ member's `revision`. A stale revision returns `409`; a missing revision returns
 page text through the collaborative state. The backend does not expose history
 rewriting or rebase operations. Hard-delete only accepts items already in trash.
 
-Real-time relay rooms and CRDT snapshots currently support one backend process/replica.
-Do not enable multiple uvicorn workers or horizontally scale this service until the
-relay is moved to shared pub/sub and shared snapshot storage. Workspace writes in
-PostgreSQL remain CAS-protected, but process-local WebSocket fan-out is not a
-multi-replica transport.
+PostgreSQL-backed real-time rooms support multiple Uvicorn workers and backend
+replicas. Collaboration updates and workspace invalidations are written to bounded,
+durable database event streams and consumed by every connected replica. WebSocket
+tickets are encrypted self-contained claims; every replica must use the same
+`JUSTWORK_COLLAB_TICKET_SECRET` (or the same `JUSTWORK_BACKEND_TOKEN` fallback).
+The JSON/file fallback is intentionally single-instance.
+
+PostgreSQL deployments store room snapshots, incremental updates, bootstrap leases,
+epochs, durable update receipts, and cross-instance events in the collaboration
+tables. Snapshot and update payloads use AES-GCM with a workspace-password-derived
+application key; `BYTEA` is only the SQL representation, not the security boundary.
+Pre-encryption room data is migrated after the workspace password is verified.
+Snapshots compact after a bounded update count/byte threshold instead of being
+rewritten for every keystroke. A paid workspace's
+custom PostgreSQL route carries its collaborative state with the workspace. The
+`JUSTWORK_BACKEND_COLLAB_DIR` setting is only the local JSON-backend fallback; if
+that fallback is used in production, its directory must be durable and backed up.
+The configured PostgreSQL role must be allowed to create/alter the JustWork tables
+and indexes during startup. Keep the legacy collab volume mounted for the first
+PostgreSQL-backed start so existing room files can be imported once; imported room
+files are removed only after the database write succeeds.
+
+Protocol v3 assigns every update an ID. The frontend retains unacknowledged updates,
+retries them after a timeout, and applies count/byte/socket-buffer backpressure. The
+server returns ACK only after the transaction commits and deduplicates retries using
+durable receipts. REST content saves reuse the room transaction, so the encrypted
+workspace payload and its Yjs delta commit or roll back together.
 
 ## Local Test
 
