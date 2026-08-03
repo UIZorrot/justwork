@@ -712,6 +712,26 @@ class CollaborativeUpdateStore:
         )
         return merged, merged_markdown
 
+    @staticmethod
+    def _apply_minimal_markdown_diff(text, transaction, current: str, next_value: str) -> None:
+        """Mutate only changed Y.Text spans, preserving CRDT identity elsewhere."""
+        if current == next_value:
+            return
+        differ = diff_match_patch()
+        diffs = differ.diff_main(current, next_value)
+        differ.diff_cleanupEfficiency(diffs)
+        cursor = 0
+        for operation, value in diffs:
+            if not value:
+                continue
+            if operation == differ.DIFF_EQUAL:
+                cursor += len(value)
+            elif operation == differ.DIFF_DELETE:
+                text.delete_range(transaction, cursor, len(value))
+            elif operation == differ.DIFF_INSERT:
+                text.insert(transaction, cursor, value)
+                cursor += len(value)
+
     def commit_markdown_change(
         self,
         workspace_id: str,
@@ -723,6 +743,20 @@ class CollaborativeUpdateStore:
     ) -> tuple[bytes, str, T]:
         """Apply a REST text delta only if its workspace CAS also succeeds."""
         key = self._key(workspace_id, encryption_key)
+        if base_markdown == next_markdown:
+            # A duplicate/no-op REST callback must never initialize or rotate an
+            # empty room while a WebSocket frame is in flight on another
+            # connection. Give that frame a short opportunity to become visible;
+            # if it has not, commit only the non-text workspace fields and leave
+            # the room lineage untouched so the frame remains valid when it lands.
+            observed_snapshot: bytes | None = None
+            for _ in range(25):
+                observed_snapshot = self.get_snapshot(workspace_id, item_id, encryption_key)
+                if observed_snapshot is not None:
+                    break
+                time.sleep(0.01)
+            if observed_snapshot is None:
+                return b"", next_markdown, commit(next_markdown)
         gateway = self._database_gateway(workspace_id)
         if gateway is not None:
             legacy = self._legacy_file_state(workspace_id, item_id)
@@ -764,10 +798,9 @@ class CollaborativeUpdateStore:
                             raise ValueError("collaborative markdown conflict")
                     if merged_markdown != current_markdown:
                         with document.begin_transaction() as transaction:
-                            if len(text) > 0:
-                                text.delete_range(transaction, 0, len(text))
-                            if merged_markdown:
-                                text.insert(transaction, 0, merged_markdown)
+                            self._apply_minimal_markdown_diff(
+                                text, transaction, current_markdown, merged_markdown
+                            )
                     merged = encode_state_as_update(document)
                     result = commit(merged_markdown)
                 except BaseException as exc:  # noqa: BLE001
@@ -830,10 +863,9 @@ class CollaborativeUpdateStore:
                     raise ValueError("collaborative markdown conflict")
             if merged_markdown != current_markdown:
                 with document.begin_transaction() as transaction:
-                    if len(text) > 0:
-                        text.delete_range(transaction, 0, len(text))
-                    if merged_markdown:
-                        text.insert(transaction, 0, merged_markdown)
+                    self._apply_minimal_markdown_diff(
+                        text, transaction, current_markdown, merged_markdown
+                    )
             merged = encode_state_as_update(document)
             epoch = self._ensure_epoch_locked(path)
             encrypted = encrypt_collaboration_bytes(

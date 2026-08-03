@@ -10,7 +10,7 @@ const i18n = fs.readFileSync("src/shared/i18n.ts", "utf8");
 test("home workspace creation exposes free and paid plans with optional database routing", () => {
   assert.match(html, /id="workspace-plan-free"/);
   assert.match(html, /id="workspace-plan-paid"/);
-  assert.match(html, /4× JustWork storage/);
+  assert.match(html, /4× storage/);
   assert.match(html, /1000 history records/);
   assert.match(html, /id="paid-workspace-database-url"/);
 });

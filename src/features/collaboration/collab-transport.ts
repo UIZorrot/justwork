@@ -1,3 +1,5 @@
+import { mergeUpdates } from "yjs";
+
 export type CollaborativeUpdateHandler = (update: Uint8Array) => void;
 export type CollaborativeStatusHandler = (readyState: number) => void;
 
@@ -21,6 +23,7 @@ const MAX_PENDING_BYTES = 8 * 1024 * 1024;
 const MAX_SOCKET_BUFFERED_BYTES = 1024 * 1024;
 const RETRY_AFTER_MS = 1_500;
 const SEND_WINDOW = 32;
+const UPDATE_BATCH_MS = 250;
 const durablePendingByRoom = new Map<string, Map<string, PendingUpdate>>();
 
 function roomKey(url: string): string {
@@ -57,6 +60,18 @@ export function createCollaborativeTransport(
   const key = roomKey(url);
   const pendingUpdates = durablePendingByRoom.get(key) ?? new Map<string, PendingUpdate>();
   durablePendingByRoom.set(key, pendingUpdates);
+  let stagedUpdates: Uint8Array[] = [];
+  let stagedBytes = 0;
+  let batchTimer: number | undefined;
+
+  const stagePendingUpdate = (): void => {
+    if (stagedUpdates.length === 0) return;
+    const update = stagedUpdates.length === 1 ? stagedUpdates[0]! : mergeUpdates(stagedUpdates);
+    stagedUpdates = [];
+    stagedBytes = 0;
+    const id = updateId();
+    pendingUpdates.set(id, { id, update, lastSentAt: 0, attempts: 0 });
+  };
 
   const flushPendingUpdates = (): void => {
     if (socket.readyState !== WebSocket.OPEN) return;
@@ -77,6 +92,15 @@ export function createCollaborativeTransport(
   };
 
   const retryTimer = window.setInterval(flushPendingUpdates, 500);
+
+  const schedulePendingUpdate = (): void => {
+    if (batchTimer !== undefined) return;
+    batchTimer = window.setTimeout(() => {
+      batchTimer = undefined;
+      stagePendingUpdate();
+      flushPendingUpdates();
+    }, UPDATE_BATCH_MS);
+  };
 
   socket.binaryType = "arraybuffer";
   const notifyStatus = (): void => {
@@ -99,7 +123,7 @@ export function createCollaborativeTransport(
         };
         if (message.type === "collab.ack" && message.updateId) {
           pendingUpdates.delete(message.updateId);
-          if (pendingUpdates.size === 0) durablePendingByRoom.delete(key);
+          if (pendingUpdates.size === 0 && stagedUpdates.length === 0) durablePendingByRoom.delete(key);
           flushPendingUpdates();
           return;
         }
@@ -138,14 +162,16 @@ export function createCollaborativeTransport(
         0,
       );
       if (
-        pendingUpdates.size >= MAX_PENDING_UPDATES ||
-        pendingBytes + update.byteLength > MAX_PENDING_BYTES
+        pendingUpdates.size + (stagedUpdates.length > 0 ? 1 : 0) >= MAX_PENDING_UPDATES ||
+        pendingBytes + stagedBytes + update.byteLength > MAX_PENDING_BYTES
       ) {
         throw new Error("Collaborative transport backpressure limit reached");
       }
-      const id = updateId();
-      pendingUpdates.set(id, { id, update: update.slice(), lastSentAt: 0, attempts: 0 });
-      flushPendingUpdates();
+      const staged = update.slice();
+      stagedUpdates.push(staged);
+      stagedBytes += staged.byteLength;
+      durablePendingByRoom.set(key, pendingUpdates);
+      schedulePendingUpdate();
     },
     onUpdate: (handler) => {
       handlers.add(handler);
@@ -160,6 +186,10 @@ export function createCollaborativeTransport(
       };
     },
     close: () => {
+      if (batchTimer !== undefined) window.clearTimeout(batchTimer);
+      batchTimer = undefined;
+      stagePendingUpdate();
+      flushPendingUpdates();
       window.clearInterval(retryTimer);
       socket.close();
       handlers.clear();

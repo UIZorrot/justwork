@@ -20,6 +20,10 @@ test("page collaboration waits for a canonical CRDT lineage before binding the e
   assert.match(source, /resetMarkdownCollaborator\(doc\)/);
   assert.doesNotMatch(source, /Promise\.all\(\[[\s\S]*joinCollaborativeMarkdown/);
   assert.match(source, /transport\.sendUpdate\(update\)/);
+  assert.doesNotMatch(source, /markdownHost\.inert\s*=\s*pending/);
+  assert.doesNotMatch(source, /structuredHost\.inert\s*=\s*pending/);
+  assert.match(source, /markdownHost\.inert\s*=\s*false/);
+  assert.match(source, /structuredHost\.inert\s*=\s*false/);
 });
 
 test("structured documents share the canonical realtime lineage without whole-array replacement", async () => {

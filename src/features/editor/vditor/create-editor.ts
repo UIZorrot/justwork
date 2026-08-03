@@ -117,6 +117,10 @@ export function createWysiwygEditor(options: CreateEditorOptions): DocEditor {
     }, 250);
   };
   let compositionBaseMarkdown: string | null = null;
+  let lastNativeInputAt = 0;
+  let trustedNativeInputVersion = 0;
+  let programmaticRenderInputVersion: number | undefined;
+  const NATIVE_INPUT_SETTLE_MS = 750;
   const compositionGate = createCompositionGate();
   const clearMentionQuery = (): void => onMentionQueryChange?.(null);
 
@@ -177,12 +181,20 @@ export function createWysiwygEditor(options: CreateEditorOptions): DocEditor {
   const applyMarkdown = (markdown: string, clearHistory: boolean): void => {
     lastKnownMarkdown = markdown;
     lastInputMarkdown = markdown;
+    lastEmittedMarkdown = markdown;
+    // Vditor can invoke its `input` callback asynchronously after setValue and
+    // may normalize the supplied Markdown in the process. Remember the trusted
+    // browser-input version so those programmatic callbacks cannot be mistaken
+    // for a user edit and written back into Yjs.
+    programmaticRenderInputVersion = trustedNativeInputVersion;
     vditor?.setValue(imageSync?.toEditorMarkdown(markdown) ?? markdown, clearHistory);
   };
   const setMarkdown = (markdown: string, clearHistory?: boolean): void => {
     const nextClearHistory = clearHistory ?? false;
     if (!editorReady || !vditor) {
       lastKnownMarkdown = markdown;
+      lastInputMarkdown = markdown;
+      lastEmittedMarkdown = markdown;
       pendingMarkdown = { markdown, clearHistory: nextClearHistory };
       return;
     }
@@ -230,6 +242,8 @@ export function createWysiwygEditor(options: CreateEditorOptions): DocEditor {
     getMarkdown,
     setMarkdown,
     isComposing: compositionGate.isComposing,
+    isFocused: () => container.contains(document.activeElement),
+    hasRecentNativeInput: () => performance.now() - lastNativeInputAt < NATIVE_INPUT_SETTLE_MS,
     getCompositionBaseMarkdown: () => compositionBaseMarkdown,
     onMarkdownInput: (listener: (markdown: string) => void): (() => void) => {
       markdownInputListeners.add(listener);
@@ -268,7 +282,7 @@ export function createWysiwygEditor(options: CreateEditorOptions): DocEditor {
     stopCollaboratorObserver = binding.collaborator.onUpdate((_update, origin) => {
       scheduleCollaborativeSnapshot();
       if (origin === "local") {
-        onChange?.(binding.collaborator.getMarkdown());
+        emitMarkdown(binding.collaborator.getMarkdown());
       }
     });
     collaboratorBinding = createVditorMarkdownBinding(editorSurface, binding.collaborator);
@@ -285,6 +299,11 @@ export function createWysiwygEditor(options: CreateEditorOptions): DocEditor {
   container.addEventListener("compositionstart", startComposingMarkdown, true);
   container.addEventListener("compositionend", flushComposedMarkdown, true);
   container.addEventListener("compositioncancel", cancelComposedMarkdown, true);
+  container.addEventListener("beforeinput", (event) => {
+    if (!event.isTrusted) return;
+    trustedNativeInputVersion += 1;
+    lastNativeInputAt = performance.now();
+  }, true);
   container.addEventListener("keyup", notifyMentionQueryChange, true);
   container.addEventListener("mouseup", notifyMentionQueryChange, true);
   container.addEventListener("blur", clearMentionQuery, true);
@@ -324,6 +343,23 @@ export function createWysiwygEditor(options: CreateEditorOptions): DocEditor {
     input: (value) => {
       const markdown = imageSync?.fromEditorMarkdown(value) ?? value;
       lastKnownMarkdown = markdown;
+      if (!editorReady) {
+        // Vditor may normalize its initial value and fire `input` before `after`.
+        // This is editor bootstrap, not a user edit, so only advance the dedupe
+        // baselines and never enqueue a workspace revision.
+        lastInputMarkdown = markdown;
+        lastEmittedMarkdown = markdown;
+        return;
+      }
+      if (programmaticRenderInputVersion === trustedNativeInputVersion) {
+        // No trusted browser input occurred after the latest setValue. This is
+        // Vditor reporting its programmatic render (possibly normalized), not a
+        // user edit, so it must never create a CRDT operation or history entry.
+        lastInputMarkdown = markdown;
+        lastEmittedMarkdown = markdown;
+        return;
+      }
+      programmaticRenderInputVersion = undefined;
       const gatedMarkdown = compositionGate.onInput(markdown);
       if (gatedMarkdown === null) {
         queueMicrotask(notifyMentionQueryChange);

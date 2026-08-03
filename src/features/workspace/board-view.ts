@@ -54,6 +54,7 @@ export type BoardViewOptions = {
   document: DocumentLike;
   content: BoardDocumentContent;
   onChange?: (content: BoardDocumentContent) => void;
+  showTemplateModule?: boolean;
   initialTemplateCollapsed?: boolean;
   onTemplateCollapsedChange?: (collapsed: boolean) => void;
   labels?: Partial<Labels>;
@@ -687,7 +688,9 @@ export function createBoardView(options: BoardViewOptions): BoardViewHandle {
   const renderBoard = (): HTMLElement => {
     const board = options.document.createElement("div") as HTMLElement;
     board.className = "structured-board-columns";
-    board.append(renderTemplateLane());
+    if (options.showTemplateModule) {
+      board.append(renderTemplateLane());
+    }
     current.columns.forEach((column) => {
       board.append(renderColumn(column.id));
     });

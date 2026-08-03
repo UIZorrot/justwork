@@ -11,6 +11,8 @@ test("collaboration transport retains updates until durable ACK with retry and b
   assert.match(transport, /message\.type === "collab\.ack"/);
   assert.match(transport, /RETRY_AFTER_MS/);
   assert.match(transport, /MAX_PENDING_BYTES/);
+  assert.match(transport, /mergeUpdates/);
+  assert.match(transport, /UPDATE_BATCH_MS/);
   assert.match(transport, /socket\.bufferedAmount/);
   assert.match(backend, /store\.append_update\([\s\S]*?update_id=update_id/);
   assert.match(backend, /"type": "collab\.ack"/);

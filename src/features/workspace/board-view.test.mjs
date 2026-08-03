@@ -202,6 +202,27 @@ test("board view uses a single default card and exposes add-column only as the t
   );
 });
 
+test("board view hides the template module by default without removing template data", async () => {
+  const documents = await loadTranspiledModule("src/features/workspace/structured-document.ts");
+  const mod = await loadTranspiledModule("src/features/workspace/board-view.ts");
+
+  const document = new FakeDocument();
+  const initial = documents.createDefaultBoardContent();
+  const view = mod.createBoardView({
+    document,
+    content: initial,
+  });
+
+  assert.equal(
+    view.element
+      .querySelectorAll("section")
+      .some((element) => element.className.includes("structured-board-column--template")),
+    false,
+  );
+  assert.equal(initial.template.cardIds.length, 1);
+  assert.equal(initial.template.fields.length, 2);
+});
+
 test("board view keeps the drawer outside the stage shell and shows no empty placeholder", async () => {
   const documents = await loadTranspiledModule("src/features/workspace/structured-document.ts");
   const mod = await loadTranspiledModule("src/features/workspace/board-view.ts");
@@ -238,7 +259,8 @@ test("board view uses visual color swatches and reserves selects for card status
   });
 
   const selects = view.element.querySelectorAll("select");
-  assert.equal(selects.length >= initial.cards.length, true);
+  const visibleCardCount = initial.cards.length - initial.template.cardIds.length;
+  assert.equal(selects.length >= visibleCardCount, true);
   assert.equal(
     selects.every((select) => select.className === "structured-board-card-status"),
     true,
@@ -265,6 +287,7 @@ test("board view template behaves like a column template preview and edits from 
   const view = mod.createBoardView({
     document,
     content: initial,
+    showTemplateModule: true,
     onChange: (next) => changes.push(next),
   });
 
@@ -379,6 +402,7 @@ test("board view persists template collapse state through callback and closes te
   const view = mod.createBoardView({
     document,
     content: initial,
+    showTemplateModule: true,
     onTemplateCollapsedChange: (collapsed) => collapseStates.push(collapsed),
   });
 
@@ -426,6 +450,7 @@ test("board view preserves focus when editing a template field name", async () =
   const view = mod.createBoardView({
     document,
     content: initial,
+    showTemplateModule: true,
     onChange: (next) => changes.push(next),
   });
 

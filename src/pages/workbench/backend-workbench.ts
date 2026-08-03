@@ -121,11 +121,16 @@ import {
   saveCollaborativeSnapshotEpoch,
 } from "@/features/collaboration/collab-storage";
 import { overlayDirtyCollaborativeDocs } from "@/features/collaboration/dirty-docs";
-import { planPageEditPersistence } from "@/features/collaboration/page-edit-persistence";
+import {
+  isMeaningfulPageEdit,
+  planPageEditPersistence,
+  shouldPersistCollaborativeMarkdown,
+} from "@/features/collaboration/page-edit-persistence";
 import { shouldResetCollaborativeLineage } from "@/features/collaboration/room-epoch";
 import { isTransportUsable, safeSendCollaborativeUpdate } from "@/features/collaboration/transport-resilience";
 import { createMarkdownCollaborator } from "@/features/collaboration/yjs-markdown";
 import { createStructuredCollaborator } from "@/features/collaboration/yjs-structured";
+import { replayMarkdownEdit } from "@/features/collaboration/yjs-vditor-binding";
 import {
   hasNewerLocalEditGeneration,
   hasUnexpectedCollaborativeSaveResult,
@@ -160,7 +165,10 @@ import { formatBackendOrUnknownError } from "@/shared/user-facing-error";
 
 const DRAG_TYPE = "application/x-justwork-doc-id";
 const OPTIMISTIC_DOC_ID_PREFIX = "optimistic_";
-const REMOTE_WORKSPACE_POLL_MS = 5_000;
+// Realtime relay invalidations are the primary refresh path. This interval is
+// only a recovery net for a missed relay message, so avoid full tree/quota/member
+// reads every five seconds for every visible client.
+const REMOTE_WORKSPACE_POLL_MS = 60_000;
 
 const MAX_BACKEND_WORKSPACE_RECENTS = 12;
 
@@ -1417,9 +1425,29 @@ export async function startBackendWorkbench(): Promise<void> {
 
     const persistNickname = async (nickname: string): Promise<void> => {
       const next = nickname.trim();
-      const savedProfile = await session.updateProfile(next, participantRevision);
+      let savedRevision: number | undefined;
+      let lastError: unknown;
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        try {
+          const savedProfile = await session.updateProfile(next, participantRevision);
+          savedRevision = savedProfile.revision;
+          break;
+        } catch (error) {
+          lastError = error;
+          if (!(error instanceof BackendApiError) || error.code !== "conflict") throw error;
+          const members = await session.listMembers();
+          const currentMember = members.find((member) => member.user_id === identity.userId);
+          if (!currentMember) throw error;
+          participantRevision = currentMember.revision;
+          if (currentMember.nickname.trim() === next) {
+            savedRevision = currentMember.revision;
+            break;
+          }
+        }
+      }
+      if (savedRevision === undefined) throw lastError ?? new Error("nickname update conflict");
       participantNickname = next;
-      participantRevision = savedProfile.revision;
+      participantRevision = savedRevision;
       await setWorkspaceNickname(workspaceId, identity.userId, next);
       await upsertWorkspaceJoinedMembers(localStorageArea, workspaceId, [{
         displayName: next,
@@ -1485,15 +1513,27 @@ export async function startBackendWorkbench(): Promise<void> {
     topbarQuotaText.textContent = t("status.loading");
     topbarQuota.dataset.level = "ok";
 
-    const pullQuota = async (): Promise<void> => {
+    let quotaLastPulledAt = 0;
+    let quotaPullInFlight: Promise<void> | undefined;
+    const pullQuota = async (force = false): Promise<void> => {
+      if (!force && Date.now() - quotaLastPulledAt < 30_000) return;
+      if (quotaPullInFlight) return quotaPullInFlight;
+      quotaPullInFlight = (async () => {
+        try {
+          const q = await backendClient.getQuota(workspaceId);
+          renderQuotaBar(q.quota.used_bytes, q.quota.limit_bytes, q.quota.unlimited === true);
+          quotaLastPulledAt = Date.now();
+        } catch {
+          // Keep previous quota display on transient failure.
+        }
+      })();
       try {
-        const q = await backendClient.getQuota(workspaceId);
-        renderQuotaBar(q.quota.used_bytes, q.quota.limit_bytes, q.quota.unlimited === true);
-      } catch {
-        // Keep previous quota display on transient failure.
+        await quotaPullInFlight;
+      } finally {
+        quotaPullInFlight = undefined;
       }
     };
-    refreshQuotaBar = pullQuota;
+    refreshQuotaBar = () => pullQuota(true);
 
     let treeData = initialTreeData ?? (await session.loadTree());
     let workspaceRevision = treeData.workspace_revision;
@@ -1781,7 +1821,24 @@ export async function startBackendWorkbench(): Promise<void> {
     const collaborationReadyDocIds = new Set<string>();
     const collaborationEpochByDoc = new Map<string, string>();
     const pendingCollaborativeUpdatesByDoc = new Map<string, Uint8Array[]>();
+    const pendingHydrationMarkdownSaves = new Map<string, {
+      expectedRevision: number;
+      title: string;
+      previousMarkdown: string;
+      nextMarkdown: string;
+    }>();
     const cachedCollaborationEpochByDoc = new Map<string, string>();
+    const collectLocalCollaborativeUpdates = (
+      docId: string,
+      collaborator: ReturnType<typeof createMarkdownCollaborator> | ReturnType<typeof createStructuredCollaborator>,
+    ): void => {
+      collaborator.onUpdate((update, origin) => {
+        if (origin !== "local") return;
+        const pending = pendingCollaborativeUpdatesByDoc.get(docId) ?? [];
+        pending.push(update.slice());
+        pendingCollaborativeUpdatesByDoc.set(docId, pending);
+      });
+    };
     const getCollaboratorForDoc = (doc: WorkspaceDoc): ReturnType<typeof createMarkdownCollaborator> => {
       const existing = collaborativeMarkdownDocs.get(doc.id);
       if (existing) return existing;
@@ -1800,13 +1857,20 @@ export async function startBackendWorkbench(): Promise<void> {
         // A snapshot without an epoch cannot be proven to descend from the room.
         removeCollaborativeSnapshot(storageKey);
       }
+      collectLocalCollaborativeUpdates(doc.id, collaborator);
       collaborativeMarkdownDocs.set(doc.id, collaborator);
       return collaborator;
     };
     const resetMarkdownCollaborator = (doc: WorkspaceDoc): ReturnType<typeof createMarkdownCollaborator> => {
       const existing = collaborativeMarkdownDocs.get(doc.id);
       existing?.destroy();
+      // Updates are only meaningful within the Y.Doc/room lineage that
+      // produced them. Never merge pending bytes from the destroyed document
+      // into the replacement epoch; bootstrap will replay the visible local
+      // edit and produce a fresh update for the new lineage.
+      pendingCollaborativeUpdatesByDoc.delete(doc.id);
       const collaborator = createMarkdownCollaborator();
+      collectLocalCollaborativeUpdates(doc.id, collaborator);
       collaborativeMarkdownDocs.set(doc.id, collaborator);
       collaborationReadyDocIds.delete(doc.id);
       collaborationEpochByDoc.delete(doc.id);
@@ -1835,6 +1899,7 @@ export async function startBackendWorkbench(): Promise<void> {
       } else if (snapshot) {
         removeCollaborativeSnapshot(collaborativeMarkdownSnapshotKey(workspaceId, doc.id));
       }
+      collectLocalCollaborativeUpdates(doc.id, collaborator);
       collaborativeStructuredDocs.set(doc.id, collaborator);
       return collaborator;
     };
@@ -1842,9 +1907,11 @@ export async function startBackendWorkbench(): Promise<void> {
       doc: WorkspaceDoc,
     ): ReturnType<typeof createStructuredCollaborator> => {
       collaborativeStructuredDocs.get(doc.id)?.destroy();
+      pendingCollaborativeUpdatesByDoc.delete(doc.id);
       const collaborator = createStructuredCollaborator({
         kind: doc.kind === "table" ? "table" : "board",
       });
+      collectLocalCollaborativeUpdates(doc.id, collaborator);
       collaborativeStructuredDocs.set(doc.id, collaborator);
       collaborationReadyDocIds.delete(doc.id);
       collaborationEpochByDoc.delete(doc.id);
@@ -1862,16 +1929,20 @@ export async function startBackendWorkbench(): Promise<void> {
       return url.toString();
     };
     let activeCollaborativeItemId: string | null = null;
+    let activeCollaborativeJoinItemId: string | null = null;
     let activeCollaborativeTransport: ReturnType<typeof createCollaborativeTransport> | undefined;
     let activeCollaborativeUnsubscribe: (() => void) | undefined;
     let collaborativeTransportGeneration = 0;
     const setCollaborationSurfacePending = (doc: WorkspaceDoc, pending: boolean): void => {
       if (active.id !== doc.id) return;
       if (doc.kind === "page") {
-        markdownHost.inert = pending;
+        // Realtime bootstrap is an enhancement, not an edit permission gate.
+        // Keep the editor interactive while WebSocket/CRDT state reconnects;
+        // ordinary revision-guarded REST saves continue to protect the text.
+        markdownHost.inert = false;
         markdownHost.setAttribute("aria-busy", String(pending));
       } else {
-        structuredHost.inert = pending;
+        structuredHost.inert = false;
         structuredHost.setAttribute("aria-busy", String(pending));
       }
     };
@@ -1882,6 +1953,19 @@ export async function startBackendWorkbench(): Promise<void> {
         saveCollaborativeSnapshotEpoch(collaborativeMarkdownSnapshotKey(workspaceId, doc.id), epoch);
       }
       setCollaborationSurfacePending(doc, false);
+      const pendingHydrationSave = pendingHydrationMarkdownSaves.get(doc.id);
+      if (pendingHydrationSave) {
+        pendingHydrationMarkdownSaves.delete(doc.id);
+        scheduleDocSave(
+          doc.id,
+          pendingHydrationSave.expectedRevision,
+          { markdown: pendingHydrationSave.nextMarkdown },
+          pendingHydrationSave.title,
+          pendingHydrationSave.previousMarkdown,
+          pendingHydrationSave.nextMarkdown,
+          0,
+        );
+      }
       if (active.id !== doc.id || doc.kind !== "page" || !editor) return;
       const collaborator = getCollaboratorForDoc(doc);
       editor.bindCollaborator({
@@ -1896,6 +1980,7 @@ export async function startBackendWorkbench(): Promise<void> {
       activeCollaborativeTransport?.close();
       activeCollaborativeTransport = undefined;
       activeCollaborativeItemId = null;
+      activeCollaborativeJoinItemId = null;
     };
     const startCollaborativeTransport = async (doc: WorkspaceDoc): Promise<void> => {
       if (!(["page", "table", "board"] as const).includes(doc.kind as "page" | "table" | "board") || doc.id === WELCOME_DOC_ID) {
@@ -1910,23 +1995,28 @@ export async function startBackendWorkbench(): Promise<void> {
         setCollaborationSurfacePending(doc, !collaborationReadyDocIds.has(doc.id));
         return;
       }
+      if (activeCollaborativeJoinItemId === doc.id) {
+        setCollaborationSurfacePending(doc, true);
+        return;
+      }
       stopActiveCollaborativeTransport();
-      // Even with a trusted local snapshot, keep input inert until the new
-      // transport's collaborator listener is attached. Otherwise very fast
-      // typing during a document switch can miss the realtime send window.
+      const bootstrapBaseMarkdown = doc.kind === "page" ? doc.markdown : null;
       setCollaborationSurfacePending(doc, true);
       const generation = collaborativeTransportGeneration;
+      activeCollaborativeJoinItemId = doc.id;
       let join: Awaited<ReturnType<typeof session.joinCollaborativeMarkdown>>;
       try {
         join = await session.joinCollaborativeMarkdown(doc.id);
       } catch {
         if (generation !== collaborativeTransportGeneration || active.id !== doc.id) return;
+        activeCollaborativeJoinItemId = null;
         window.setTimeout(() => {
           if (active.id === doc.id) void startCollaborativeTransport(doc);
         }, 1_000);
         return;
       }
       if (generation !== collaborativeTransportGeneration || active.id !== doc.id) return;
+      activeCollaborativeJoinItemId = null;
       if (typeof join.room_epoch !== "string" || !join.room_epoch) {
         const error = new Error("Backend update required: collaborative room epoch is unavailable");
         saveStatus(saveStatusEl, error.message);
@@ -1952,6 +2042,25 @@ export async function startBackendWorkbench(): Promise<void> {
         }
       }
       collaborationEpochByDoc.set(doc.id, join.room_epoch);
+      const latestLocalDoc = localCollaborativeDocCache.get(doc.id)
+        ?? workspace.docs.find((candidate) => candidate.id === doc.id)
+        ?? doc;
+      const pendingHydrationSave = pendingHydrationMarkdownSaves.get(doc.id);
+      const bootstrapEditBaseMarkdown = pendingHydrationSave?.previousMarkdown ?? bootstrapBaseMarkdown;
+      const bootstrapLocalMarkdown = doc.kind === "page"
+        ? active.id === doc.id && editor
+          ? editor.getMarkdown()
+          : latestLocalDoc.markdown
+        : null;
+      const hasUnboundBootstrapEdit = Boolean(
+        markdownCollaborator
+        && bootstrapEditBaseMarkdown !== null
+        && bootstrapLocalMarkdown !== null
+        && bootstrapLocalMarkdown !== bootstrapEditBaseMarkdown
+        && !collaborationReadyDocIds.has(doc.id),
+      );
+      let replayedBootstrapEdit = false;
+      let bootstrapReplayBase = bootstrapEditBaseMarkdown ?? "";
       const applyRemoteState = (update: Uint8Array): void => {
         if (markdownCollaborator) {
           const previousMarkdown = markdownCollaborator.getMarkdown();
@@ -1990,10 +2099,34 @@ export async function startBackendWorkbench(): Promise<void> {
       };
       if (remoteState.length > 0) {
         applyRemoteState(remoteState);
+        if (markdownCollaborator && hasUnboundBootstrapEdit && bootstrapLocalMarkdown !== null) {
+          bootstrapReplayBase = markdownCollaborator.getMarkdown();
+          const replayed = replayMarkdownEdit(
+            bootstrapEditBaseMarkdown ?? "",
+            bootstrapLocalMarkdown,
+            bootstrapReplayBase,
+          );
+          // Never repaint an older canonical body over an edit that happened
+          // while the room was joining. If fuzzy replay fails, retain the exact
+          // local buffer and let the revision/history layer expose the conflict.
+          const mergedMarkdown = replayed.clean ? replayed.markdown : bootstrapLocalMarkdown;
+          markdownCollaborator.applyLocalMarkdown(mergedMarkdown);
+          updateDocById(doc.id, (candidate) => ({
+            ...candidate,
+            markdown: mergedMarkdown,
+            updatedAt: new Date().toISOString(),
+          }));
+          replayedBootstrapEdit = true;
+        }
         markCollaborationReady(doc);
       } else if (join.bootstrap_owner) {
         if (markdownCollaborator) {
-          markdownCollaborator.applyLocalMarkdown(stripAutoTitleHeading(doc.markdown, doc.title));
+          const seedMarkdown = stripAutoTitleHeading(
+            bootstrapLocalMarkdown ?? bootstrapBaseMarkdown ?? doc.markdown,
+            doc.title,
+          );
+          markdownCollaborator.applyLocalMarkdown(seedMarkdown);
+          replayedBootstrapEdit = seedMarkdown !== bootstrapBaseMarkdown;
         } else if (structuredCollaborator && (doc.kind === "table" || doc.kind === "board")) {
           structuredCollaborator.applyLocalContent(
             normalizeStructuredDocumentContent(doc.kind, doc.content ?? {}),
@@ -2016,9 +2149,6 @@ export async function startBackendWorkbench(): Promise<void> {
       if (!activeCollaborator) return;
       const stopCollaboratorUpdates = activeCollaborator.onUpdate((update, origin) => {
           if (origin !== "local" || !collaborationReadyDocIds.has(doc.id)) return;
-          const pending = pendingCollaborativeUpdatesByDoc.get(doc.id) ?? [];
-          pending.push(update.slice());
-          pendingCollaborativeUpdatesByDoc.set(doc.id, pending);
           safeSendCollaborativeUpdate(
             transport.readyState,
             () => {
@@ -2044,6 +2174,19 @@ export async function startBackendWorkbench(): Promise<void> {
           },
           requestTransportRejoin,
         );
+        if (markdownCollaborator && replayedBootstrapEdit) {
+          const mergedMarkdown = markdownCollaborator.getMarkdown();
+          const currentDoc = workspace.docs.find((candidate) => candidate.id === doc.id) ?? doc;
+          scheduleDocSave(
+            doc.id,
+            currentDoc.revision,
+            { markdown: mergedMarkdown },
+            currentDoc.title,
+            bootstrapReplayBase,
+            mergedMarkdown,
+            0,
+          );
+        }
       } else {
         window.setTimeout(() => {
           if (active.id !== doc.id || collaborationReadyDocIds.has(doc.id)) return;
@@ -2873,13 +3016,28 @@ export async function startBackendWorkbench(): Promise<void> {
       let nextPatch = patch;
       let lastConflict: BackendApiError | undefined;
       for (let attempt = 0; attempt < 8; attempt += 1) {
+        const pendingCollaborativeUpdates = pendingCollaborativeUpdatesByDoc.get(itemId) ?? [];
+        const pendingUpdateCount = pendingCollaborativeUpdates.length;
+        if (
+          nextPatch.markdown !== undefined
+          && !shouldPersistCollaborativeMarkdown(
+            Boolean(markdownCollaborator),
+            collaborationReadyDocIds.has(itemId),
+            pendingUpdateCount,
+          )
+        ) {
+          const metadataOnlyPatch = { ...nextPatch };
+          delete metadataOnlyPatch.markdown;
+          if (Object.keys(metadataOnlyPatch).length === 0) {
+            return { status: "saved", doc: await session.loadItem(itemId) };
+          }
+          nextPatch = metadataOnlyPatch;
+        }
         const activeCollaborator = nextPatch.markdown !== undefined
           ? markdownCollaborator
           : nextPatch.content !== undefined
             ? structuredCollaborator
             : undefined;
-        const pendingCollaborativeUpdates = pendingCollaborativeUpdatesByDoc.get(itemId) ?? [];
-        const pendingUpdateCount = pendingCollaborativeUpdates.length;
         const collaborativeUpdate = activeCollaborator
           && collaborationReadyDocIds.has(itemId)
           && pendingUpdateCount > 0
@@ -3240,7 +3398,6 @@ export async function startBackendWorkbench(): Promise<void> {
       }
       syncEditorWithActive();
       void pullQuota();
-      void refreshJoinedMembers().then(() => renderInboxPanel()).catch(() => undefined);
     };
 
     let treeRefreshInFlight: Promise<void> | undefined;
@@ -3322,25 +3479,11 @@ export async function startBackendWorkbench(): Promise<void> {
         currentMarkdown !== active.markdown,
       );
       if (shouldPreserveFocusedEditorDrift) {
-        const collaborator = collaborativeMarkdownDocs.get(active.id);
-        if (collaborator && collaborationReadyDocIds.has(active.id) && collaborator.getMarkdown() !== currentMarkdown) {
-          collaborator.applyLocalMarkdown(currentMarkdown);
-          saveCollaborativeSnapshot(
-            collaborativeMarkdownSnapshotKey(workspaceId, active.id),
-            collaborator.encodeUpdate(),
-          );
-        } else if (currentMarkdown !== active.markdown) {
-          commitLocalEdit(active.id, { markdown: currentMarkdown });
-          scheduleDocSave(
-            active.id,
-            active.revision,
-            { markdown: currentMarkdown },
-            active.title,
-            active.markdown,
-            currentMarkdown,
-            240,
-          );
-        }
+        // The editor input binding is the sole writer for focused Markdown.
+        // Background tree/member/quota renders may observe the DOM before a
+        // deferred collaborative repaint. Re-applying that whole DOM snapshot
+        // here creates a second write path that duplicates local text and can
+        // delete remote text which the editor has not rendered yet.
         return;
       }
       const shouldResync = !isActivePageComposing && editor && shouldResyncEditorMarkdown(currentMarkdown, active.markdown);
@@ -4008,6 +4151,31 @@ export async function startBackendWorkbench(): Promise<void> {
         const collaborator = getCollaboratorForDoc(doc);
         const hydratedMarkdown = hydrated.markdown;
         const isActiveDocComposing = active.id === doc.id && editor?.isComposing() === true;
+        const editorMarkdownDuringHydration = active.id === doc.id && editor
+          ? editor.getMarkdown()
+          : null;
+        const hasUntrackedHydrationEdit = Boolean(
+          editorMarkdownDuringHydration !== null
+          && isMeaningfulPageEdit(initialMarkdown, editorMarkdownDuringHydration)
+          && !dirtyDocIds.has(doc.id),
+        );
+        if (hasUntrackedHydrationEdit && editorMarkdownDuringHydration !== null) {
+          // A tree row can be selected before its body request finishes. The
+          // editor remains intentionally interactive, so capture any text typed
+          // in that window before the hydration result can repaint the surface.
+          // This is the only safe fallback for the short pre-binding window;
+          // once joined, normal editor input -> Yjs binding is the sole writer.
+          collaborator.applyLocalMarkdown(editorMarkdownDuringHydration);
+          commitLocalEdit(doc.id, { markdown: editorMarkdownDuringHydration });
+          pendingHydrationMarkdownSaves.set(doc.id, {
+            expectedRevision: hydrated.revision,
+            title: hydrated.title,
+            previousMarkdown: hydratedMarkdown,
+            nextMarkdown: editorMarkdownDuringHydration,
+          });
+          syncEditorWithActive();
+          renderAll();
+        }
         if (!dirtyDocIds.has(doc.id) && !isActiveDocComposing) {
           const nextMarkdown = collaborationReadyDocIds.has(doc.id)
             ? collaborator.getMarkdown()
@@ -4597,10 +4765,15 @@ export async function startBackendWorkbench(): Promise<void> {
       onChange: (markdown) => {
         if (active.kind !== "page" || active.id === WELCOME_DOC_ID) return;
         const itemId = active.id;
-        const persistencePlan = planPageEditPersistence(collaborativeMarkdownDocs.has(itemId));
+        const hasCollaborator = collaborativeMarkdownDocs.has(itemId);
+        const persistencePlan = planPageEditPersistence(
+          hasCollaborator,
+          !hasCollaborator || collaborationReadyDocIds.has(itemId),
+        );
         const previousMarkdown = localCollaborativeDocCache.get(itemId)?.markdown
           ?? workspace.docs.find((doc) => doc.id === itemId)?.markdown
           ?? "";
+        if (!isMeaningfulPageEdit(previousMarkdown, markdown)) return;
         syncMentionInboxFromMarkdown({
           previousMarkdown,
           nextMarkdown: markdown,

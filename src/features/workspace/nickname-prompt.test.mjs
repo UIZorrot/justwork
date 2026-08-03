@@ -24,3 +24,12 @@ test("workspace nickname prompt is scoped to current user in current workspace",
     "nickname lookup must not be scoped only by workspace id",
   );
 });
+
+test("duplicate initial nickname submissions converge on the latest member revision", async () => {
+  const workbench = await readFile(path.resolve("src/pages/workbench/backend-workbench.ts"), "utf8");
+
+  assert.match(workbench, /error instanceof BackendApiError[\s\S]*error\.code !== "conflict"/);
+  assert.match(workbench, /const members = await session\.listMembers\(\)/);
+  assert.match(workbench, /participantRevision = currentMember\.revision/);
+  assert.match(workbench, /currentMember\.nickname\.trim\(\) === next/);
+});

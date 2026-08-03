@@ -6,9 +6,11 @@ import base64
 import hmac
 import hashlib
 import secrets
+from collections.abc import Callable
+from functools import partial
 from pathlib import Path
 from threading import Lock
-from anyio import from_thread
+from anyio import from_thread, to_thread as anyio_to_thread
 
 try:
     from dotenv import load_dotenv
@@ -148,6 +150,17 @@ MAX_WORKSPACES_PER_OWNER = 5
 AGENT_SKILL_PATH = Path(__file__).resolve().parent.parent / "agent" / "SKILL.md"
 SYNC_MUTATION_LOG_KEY = "__syncMutations"
 MAX_SYNC_MUTATION_LOG_ENTRIES = 1000
+WORKSPACE_EVENT_POLL_MIN_SECONDS = 0.2
+WORKSPACE_EVENT_POLL_MAX_SECONDS = 3.0
+COLLAB_EVENT_POLL_MIN_SECONDS = 0.15
+COLLAB_EVENT_POLL_MAX_SECONDS = 2.0
+
+
+def _next_event_poll_delay(current: float, had_events: bool, minimum: float, maximum: float) -> float:
+    """Poll quickly under activity and exponentially back off while idle."""
+    if had_events:
+        return minimum
+    return min(maximum, max(minimum, current * 2))
 
 
 def _int_env(name: str, default: int) -> int:
@@ -669,6 +682,7 @@ def save_state(
     *,
     owner_nickname: str | None = None,
     actor_user_id: str | None = None,
+    deferred_notifications: list[Callable[[], None]] | None = None,
 ) -> WorkspaceRecord:
     next_owner_nickname = record.owner_nickname if owner_nickname is None else owner_nickname
     ensure_workspace_members(state_payload, record.owner_user_id, next_owner_nickname)
@@ -714,7 +728,10 @@ def save_state(
     )
     notify = lambda: _broadcast_workspace_invalidation(record.workspace_id, saved.updated_at)
     if not gateway.defer_until_after_commit(notify, record.workspace_id):
-        notify()
+        if deferred_notifications is not None:
+            deferred_notifications.append(notify)
+        else:
+            notify()
     return saved
 
 
@@ -1056,8 +1073,14 @@ async def join_workspace_relay(
     _: None = Depends(require_backend_token),
     gateway: DatabaseGateway = Depends(get_gateway),
 ) -> WorkspaceRelayJoinResponse:
-    record = require_workspace(gateway, workspace_id)
-    load_decrypted_state(record, body.password)
+    def validate_workspace() -> None:
+        record = require_workspace(gateway, workspace_id)
+        load_decrypted_state(record, body.password)
+
+    # File and database gateways are synchronous. Never hold the event loop on
+    # their locks: a concurrent worker may be waiting for this loop to publish a
+    # committed invalidation.
+    await asyncio.to_thread(validate_workspace)
     hub = get_image_relay_hub()
     ticket, expires_at = await hub.issue_ticket(workspace_id)
     return WorkspaceRelayJoinResponse(ok=True, workspace_id=workspace_id, ticket=ticket, expires_at=expires_at)
@@ -1079,22 +1102,29 @@ async def workspace_image_relay(
     collab_send_lock = asyncio.Lock()
     await hub.register(workspace_id, websocket)
     relay_gateway = get_gateway()
+    uses_workspace_events = await asyncio.to_thread(
+        relay_gateway.supports_collaborative_storage,
+        workspace_id,
+    )
     workspace_event_cursor = (
-        relay_gateway.workspace_event_cursor(workspace_id)
-        if relay_gateway.supports_collaborative_storage(workspace_id)
+        await asyncio.to_thread(relay_gateway.workspace_event_cursor, workspace_id)
+        if uses_workspace_events
         else 0
     )
     workspace_event_task: asyncio.Task | None = None
-    if relay_gateway.supports_collaborative_storage(workspace_id):
+    if uses_workspace_events:
         async def poll_workspace_events() -> None:
             nonlocal workspace_event_cursor
+            poll_delay = WORKSPACE_EVENT_POLL_MIN_SECONDS
             while True:
+                had_events = False
                 try:
                     events = await asyncio.to_thread(
                         relay_gateway.workspace_events_since,
                         workspace_id,
                         workspace_event_cursor,
                     )
+                    had_events = bool(events)
                     for next_cursor, event_type, event_payload in events:
                         workspace_event_cursor = max(workspace_event_cursor, next_cursor)
                         if event_type != "workspace.invalidated":
@@ -1105,7 +1135,13 @@ async def workspace_image_relay(
                     # The cursor remains unchanged; the durable stream catches up
                     # after a transient database outage.
                     pass
-                await asyncio.sleep(0.2)
+                poll_delay = _next_event_poll_delay(
+                    poll_delay,
+                    had_events,
+                    WORKSPACE_EVENT_POLL_MIN_SECONDS,
+                    WORKSPACE_EVENT_POLL_MAX_SECONDS,
+                )
+                await asyncio.sleep(poll_delay)
 
         workspace_event_task = asyncio.create_task(poll_workspace_events())
     try:
@@ -1239,17 +1275,24 @@ async def join_workspace_collab(
     _: None = Depends(require_backend_token),
     gateway: DatabaseGateway = Depends(get_gateway),
 ) -> WorkspaceCollabJoinResponse:
-    require_collaborative_item(gateway, workspace_id, item_id, body.password)
-    collaboration_key = cached_workspace_collaboration_key(workspace_id, body.password)
+    def prepare_join() -> tuple[bytes, str, bytes | None, bool]:
+        require_collaborative_item(gateway, workspace_id, item_id, body.password)
+        collaboration_key = cached_workspace_collaboration_key(workspace_id, body.password)
+        store = get_collaborative_update_store()
+        if body.protocol_version >= 2:
+            room_epoch, snapshot, bootstrap_owner = store.join_state(
+                workspace_id, item_id, encryption_key=collaboration_key
+            )
+        else:
+            room_epoch, snapshot = store.get_state(workspace_id, item_id, collaboration_key)
+            bootstrap_owner = False
+        return collaboration_key, room_epoch, snapshot, bootstrap_owner
+
+    # join_state uses the same room lock as revision-guarded HTTP saves. A save
+    # commits in a worker and then publishes through the event loop, so waiting
+    # for that lock on the loop itself creates an AB/BA deadlock.
+    collaboration_key, room_epoch, snapshot, bootstrap_owner = await asyncio.to_thread(prepare_join)
     hub = get_collab_relay_hub()
-    store = get_collaborative_update_store()
-    if body.protocol_version >= 2:
-        room_epoch, snapshot, bootstrap_owner = store.join_state(
-            workspace_id, item_id, encryption_key=collaboration_key
-        )
-    else:
-        room_epoch, snapshot = store.get_state(workspace_id, item_id, collaboration_key)
-        bootstrap_owner = False
     ticket, expires_at = await hub.issue_ticket(
         workspace_id,
         item_id,
@@ -1309,20 +1352,44 @@ async def workspace_collab_relay(
         await websocket.close(code=4401)
         return
     room_epoch, writable, collaboration_key, protocol_version = ticket_state
-    if not store.epoch_matches(workspace_id, item_id, room_epoch, collaboration_key):
+    if not await asyncio.to_thread(
+        store.epoch_matches,
+        workspace_id,
+        item_id,
+        room_epoch,
+        collaboration_key,
+    ):
         await websocket.close(code=4409)
         return
-    await websocket.accept()
-    event_cursor = store.event_cursor(workspace_id, item_id) if protocol_version >= 3 else 0
-    for update in store.load_updates(workspace_id, item_id, collaboration_key):
-        await websocket.send_bytes(update)
-    if protocol_version < 3:
+    # Protocol v3 may send ACKs from the receive loop while the cross-instance
+    # poller emits updates. Starlette does not permit concurrent websocket sends.
+    collab_send_lock = asyncio.Lock()
+    uses_cross_instance_events = protocol_version >= 3 and await asyncio.to_thread(
+        store.supports_cross_instance_events,
+        workspace_id,
+    )
+    event_cursor = await asyncio.to_thread(store.event_cursor, workspace_id, item_id) if uses_cross_instance_events else 0
+    initial_updates = await asyncio.to_thread(store.load_updates, workspace_id, item_id, collaboration_key)
+    if not uses_cross_instance_events:
         await hub.register(workspace_id, item_id, websocket)
+    # Complete room setup before accepting. TestClient and fast real clients may
+    # send and close immediately after the handshake; yielding to storage setup
+    # after accept can otherwise let the final frame race socket teardown.
+    try:
+        await websocket.accept()
+        for update in initial_updates:
+            await websocket.send_bytes(update)
+    except Exception:  # client disappeared during the handshake
+        if not uses_cross_instance_events:
+            await hub.unregister(workspace_id, item_id, websocket)
+        return
     poll_task: asyncio.Task | None = None
-    if protocol_version >= 3 and store.supports_cross_instance_events(workspace_id):
+    if uses_cross_instance_events:
         async def poll_cross_instance_updates() -> None:
             nonlocal event_cursor
+            poll_delay = COLLAB_EVENT_POLL_MIN_SECONDS
             while True:
+                had_events = False
                 try:
                     events = await asyncio.to_thread(
                         store.events_since,
@@ -1332,6 +1399,7 @@ async def workspace_collab_relay(
                         event_cursor,
                         collaboration_key,
                     )
+                    had_events = bool(events)
                     for next_cursor, remote_update_id, remote_payload in events:
                         event_cursor = max(event_cursor, next_cursor)
                         async with collab_send_lock:
@@ -1342,7 +1410,13 @@ async def workspace_collab_relay(
                             })
                 except DatabaseUnavailableError:
                     pass
-                await asyncio.sleep(0.15)
+                poll_delay = _next_event_poll_delay(
+                    poll_delay,
+                    had_events,
+                    COLLAB_EVENT_POLL_MIN_SECONDS,
+                    COLLAB_EVENT_POLL_MAX_SECONDS,
+                )
+                await asyncio.sleep(poll_delay)
 
         poll_task = asyncio.create_task(poll_cross_instance_updates())
     try:
@@ -1380,14 +1454,29 @@ async def workspace_collab_relay(
                 # v1 clients may read the canonical room but must persist edits via
                 # the revision-guarded REST markdown delta path.
                 continue
-            inserted = store.append_update(
-                workspace_id,
-                item_id,
-                next_payload,
-                expected_epoch=room_epoch,
-                encryption_key=collaboration_key,
-                update_id=update_id,
-            )
+            if protocol_version >= 3:
+                inserted = await anyio_to_thread.run_sync(partial(
+                    store.append_update,
+                    workspace_id,
+                    item_id,
+                    next_payload,
+                    expected_epoch=room_epoch,
+                    encryption_key=collaboration_key,
+                    update_id=update_id,
+                ))
+            else:
+                # Legacy test/extension clients can close immediately after their
+                # final binary frame. Finish that frame inline so teardown cannot
+                # cancel persistence; HTTP commits no longer call back into the
+                # event loop while holding this room lock.
+                inserted = store.append_update(
+                    workspace_id,
+                    item_id,
+                    next_payload,
+                    expected_epoch=room_epoch,
+                    encryption_key=collaboration_key,
+                    update_id=update_id,
+                )
             if protocol_version >= 3 and update_id is not None:
                 async with collab_send_lock:
                     await websocket.send_json({
@@ -1395,7 +1484,7 @@ async def workspace_collab_relay(
                         "updateId": update_id,
                         "roomEpoch": room_epoch,
                     })
-                if inserted and not store.supports_cross_instance_events(workspace_id):
+                if inserted and not uses_cross_instance_events:
                     await hub.broadcast(
                         workspace_id,
                         item_id,
@@ -1417,7 +1506,7 @@ async def workspace_collab_relay(
                 await poll_task
             except asyncio.CancelledError:
                 pass
-        if protocol_version < 3:
+        if not uses_cross_instance_events:
             await hub.unregister(workspace_id, item_id, websocket)
 
 
@@ -1750,6 +1839,8 @@ def update_workspace_item(
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
+    deferred_notifications: list[Callable[[], None]] = []
+
     def commit_doc(merged_markdown: str | None = None) -> dict:
         if merged_markdown is not None:
             doc["markdown"] = merged_markdown
@@ -1779,7 +1870,14 @@ def update_workspace_item(
             actor_user_id=au,
             mutation_id=mutation_id,
         )
-        save_state(gateway, record, state_payload, body.password, actor_user_id=au)
+        save_state(
+            gateway,
+            record,
+            state_payload,
+            body.password,
+            actor_user_id=au,
+            deferred_notifications=deferred_notifications,
+        )
         return item
 
     committed_update: bytes | None = None
@@ -1817,6 +1915,8 @@ def update_workspace_item(
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     else:
         item = commit_doc()
+    for notify in deferred_notifications:
+        notify()
     if committed_update is not None:
         _broadcast_collaborative_update_from_http(workspace_id, item_id, committed_update)
     return WorkspaceItemResponse(ok=True, workspace_id=workspace_id, item=item)
@@ -2051,6 +2151,8 @@ def patch_workspace_item(
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     if not body.dry_run and changed:
+        deferred_notifications: list[Callable[[], None]] = []
+
         def commit_patch(merged_markdown: str | None = None) -> dict:
             nonlocal preview
             if merged_markdown is not None:
@@ -2075,7 +2177,14 @@ def patch_workspace_item(
                 actor_user_id=au,
                 mutation_id=mutation_id,
             )
-            save_state(gateway, record, state_payload, body.password, actor_user_id=au)
+            save_state(
+                gateway,
+                record,
+                state_payload,
+                body.password,
+                actor_user_id=au,
+                deferred_notifications=deferred_notifications,
+            )
             return item
 
         if doc.get("kind") == "page":
@@ -2095,6 +2204,8 @@ def patch_workspace_item(
             _broadcast_collaborative_update_from_http(workspace_id, item_id, committed_update)
         else:
             item = commit_patch()
+        for notify in deferred_notifications:
+            notify()
     else:
         item = item_view(doc)
     return WorkspacePatchResponse(
