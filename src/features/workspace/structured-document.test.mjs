@@ -211,6 +211,63 @@ test("table workbook normalization preserves additional named worksheets", async
   assert.equal(roundTrip.sheets.sheet_2.cellData["0"]["0"].v, "Child sheet");
 });
 
+test("canonical workbook snapshots preserve cleared cells instead of rebuilding compatibility rows", async () => {
+  const mod = await loadTranspiledModule("src/features/workspace/structured-document.ts");
+
+  const original = mod.createDefaultTableContent();
+  const clearedWorkbook = structuredClone(original.workbookData);
+  clearedWorkbook.sheets.sheet_1.cellData = {};
+
+  const normalized = mod.normalizeStructuredDocumentContent("table", {
+    workbookData: clearedWorkbook,
+  });
+  const roundTrip = mod.tableContentToWorkbookData(normalized);
+
+  assert.deepEqual(roundTrip.sheets.sheet_1.cellData, {});
+  assert.equal(roundTrip.sheets.sheet_1.cellData?.["0"]?.["0"], undefined);
+  assert.equal(roundTrip.sheets.sheet_1.cellData?.["0"]?.["1"], undefined);
+});
+
+test("legacy compatibility rows recover from an empty workbook shell", async () => {
+  const mod = await loadTranspiledModule("src/features/workspace/structured-document.ts");
+
+  const normalized = mod.normalizeStructuredDocumentContent("table", {
+    frozenHeader: false,
+    columns: [{ id: "col_legacy", title: "Legacy", type: "text", width: 180 }],
+    rows: [{ id: "row_legacy", cells: { col_legacy: "must remain visible" } }],
+    workbookData: { id: "incomplete", sheets: {}, sheetOrder: [] },
+  });
+
+  assert.equal(normalized.columns[0].title, "Legacy");
+  assert.equal(normalized.rows[0].cells.col_legacy, "must remain visible");
+  assert.equal(normalized.workbookData.sheets.sheet_1.cellData["1"]["0"].v, "must remain visible");
+});
+
+test("table workbooks default every worksheet to left and middle alignment", async () => {
+  const mod = await loadTranspiledModule("src/features/workspace/structured-document.ts");
+
+  const content = mod.createDefaultTableContent();
+  const workbookData = structuredClone(content.workbookData);
+  workbookData.sheetOrder.push("sheet_2");
+  workbookData.sheets.sheet_2 = {
+    ...structuredClone(workbookData.sheets.sheet_1),
+    id: "sheet_2",
+    name: "Second",
+    defaultStyle: { ht: 3, vt: 1, fs: 12 },
+  };
+
+  const normalized = mod.normalizeStructuredDocumentContent("table", { workbookData });
+  const roundTrip = mod.tableContentToWorkbookData(normalized);
+
+  assert.equal(roundTrip.defaultStyle.ht, 1);
+  assert.equal(roundTrip.defaultStyle.vt, 2);
+  assert.equal(roundTrip.sheets.sheet_1.defaultStyle.ht, 1);
+  assert.equal(roundTrip.sheets.sheet_1.defaultStyle.vt, 2);
+  assert.equal(roundTrip.sheets.sheet_2.defaultStyle.ht, 1);
+  assert.equal(roundTrip.sheets.sheet_2.defaultStyle.vt, 2);
+  assert.equal(roundTrip.sheets.sheet_2.defaultStyle.fs, 12);
+});
+
 test("table workbook naming resolves duplicate child sheet names", async () => {
   const mod = await loadTranspiledModule("src/features/workspace/structured-document.ts");
 

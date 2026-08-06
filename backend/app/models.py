@@ -145,6 +145,19 @@ class WorkspacePasswordRequest(WriteSigningEnvelope):
     expected_revision: int | None = None
 
 
+class WorkspacePasswordChangeRequest(WriteSigningEnvelope):
+    password: str = Field(min_length=1)
+    new_password: str = Field(min_length=1)
+    expected_revision: int
+
+
+class WorkspacePasswordChangeResponse(BaseModel):
+    ok: bool
+    workspace_id: str
+    revision: int
+    removed_member_count: int
+
+
 class WorkspaceRevisionMutationRequest(WriteSigningEnvelope):
     password: str = Field(min_length=1)
     expected_revision: int

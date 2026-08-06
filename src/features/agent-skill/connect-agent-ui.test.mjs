@@ -65,7 +65,7 @@ test("remembered workspace passwords are stored locally and wired into unlock", 
   assert.match(workbench, /removeRememberedWorkspacePassword/);
   assert.match(workbench, /unlockRememberPasswordInput\.checked/);
   assert.match(workbench, /mountWithPassword\(wsId, password, undefined, undefined, unlockRememberPasswordInput\.checked\)/);
-  assert.match(workbench, /buildConnectAgentPrompt\(workspaceId, password, rememberWorkspacePassword\)/);
+  assert.match(workbench, /buildConnectAgentPrompt\(workspaceId, workspacePassword, rememberWorkspacePassword\)/);
 });
 
 test("backend Skill URL link is warmed before opening to avoid first-click connection errors", async () => {

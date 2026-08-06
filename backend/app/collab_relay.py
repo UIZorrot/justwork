@@ -134,6 +134,18 @@ class CollaborativeRelayHub:
         for ws in dead:
             await self.unregister(workspace_id, item_id, ws)
 
+    async def disconnect_workspace(self, workspace_id: str, code: int = 4403) -> None:
+        """Close every in-process document socket after workspace credentials rotate."""
+        prefix = f"{workspace_id}:"
+        async with self._lock:
+            room_keys = [key for key in self._rooms if key.startswith(prefix)]
+            sockets = {ws for key in room_keys for ws in self._rooms.pop(key, set())}
+        for websocket in sockets:
+            try:
+                await websocket.close(code=code)
+            except Exception:
+                pass
+
     def snapshot(self, workspace_id: str, item_id: str, encryption_key: bytes) -> bytes | None:
         return self._store.get_snapshot(workspace_id, item_id, encryption_key)
 

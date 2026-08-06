@@ -8,7 +8,10 @@ import {
 export type StructuredCollaborator = {
   readonly doc: Y.Doc;
   getContent: () => StructuredDocumentContent;
-  applyLocalContent: (content: StructuredDocumentContent) => void;
+  applyLocalContent: (
+    content: StructuredDocumentContent,
+    baseContent?: StructuredDocumentContent,
+  ) => void;
   applyRemoteUpdate: (update: Uint8Array) => void;
   encodeUpdate: () => Uint8Array;
   onUpdate: (handler: (update: Uint8Array, origin: "local" | "remote") => void) => () => void;
@@ -164,6 +167,114 @@ function syncYArray(target: Y.Array<unknown>, next: unknown[]): void {
   target.insert(0, next.map((entry) => toYValue(entry)));
 }
 
+function valuesEqual(left: unknown, right: unknown): boolean {
+  if (Object.is(left, right)) return true;
+  if (Array.isArray(left) && Array.isArray(right)) {
+    return left.length === right.length && left.every((entry, index) => valuesEqual(entry, right[index]));
+  }
+  if (
+    left && right &&
+    typeof left === "object" && typeof right === "object" &&
+    !Array.isArray(left) && !Array.isArray(right)
+  ) {
+    const leftRecord = left as Record<string, unknown>;
+    const rightRecord = right as Record<string, unknown>;
+    const leftKeys = Object.keys(leftRecord).sort();
+    const rightKeys = Object.keys(rightRecord).sort();
+    return valuesEqual(leftKeys, rightKeys)
+      && leftKeys.every((key) => valuesEqual(leftRecord[key], rightRecord[key]));
+  }
+  return false;
+}
+
+function syncKeyedArrayDelta(container: Y.Map<unknown>, base: unknown[], next: unknown[]): void {
+  const items = container.get("items") as Y.Map<unknown> | undefined;
+  const ranks = container.get("ranks") as Y.Map<number> | undefined;
+  if (!(items instanceof Y.Map) || !(ranks instanceof Y.Map)) return;
+  const baseKeys = base.map(stableArrayEntryKey);
+  const nextKeys = next.map(stableArrayEntryKey);
+  if (baseKeys.some((key) => key === null) || nextKeys.some((key) => key === null)) return;
+  const baseByKey = new Map(base.map((entry, index) => [baseKeys[index]!, entry]));
+  const nextByKey = new Map(next.map((entry, index) => [nextKeys[index]!, entry]));
+
+  for (const key of baseKeys as string[]) {
+    if (!nextByKey.has(key)) {
+      items.delete(key);
+      ranks.delete(key);
+    }
+  }
+  for (const [key, nextEntry] of nextByKey) {
+    const hasBase = baseByKey.has(key);
+    const baseEntry = baseByKey.get(key);
+    const existing = items.get(key);
+    if (!hasBase) {
+      items.set(key, toYValue(nextEntry));
+      continue;
+    }
+    if (valuesEqual(baseEntry, nextEntry)) continue;
+    if (
+      existing instanceof Y.Map && !isKeyedArray(existing)
+      && baseEntry && nextEntry
+      && typeof baseEntry === "object" && typeof nextEntry === "object"
+      && !Array.isArray(baseEntry) && !Array.isArray(nextEntry)
+    ) {
+      syncYMapDelta(
+        existing,
+        baseEntry as Record<string, unknown>,
+        nextEntry as Record<string, unknown>,
+      );
+    } else {
+      items.set(key, toYValue(nextEntry));
+    }
+  }
+
+  if (!valuesEqual(baseKeys, nextKeys)) {
+    (nextKeys as string[]).forEach((key, index) => ranks.set(key, index * 1024));
+  }
+}
+
+function syncYMapDelta(
+  target: Y.Map<unknown>,
+  base: Record<string, unknown>,
+  next: Record<string, unknown>,
+): void {
+  const keys = new Set([...Object.keys(base), ...Object.keys(next)]);
+  for (const key of keys) {
+    const hasBase = Object.hasOwn(base, key);
+    const hasNext = Object.hasOwn(next, key);
+    if (hasBase && hasNext && valuesEqual(base[key], next[key])) continue;
+    if (!hasNext) {
+      target.delete(key);
+      continue;
+    }
+    const nextValue = next[key];
+    const baseValue = base[key];
+    const existing = target.get(key);
+    if (
+      isKeyedArray(existing)
+      && Array.isArray(baseValue) && Array.isArray(nextValue)
+      && canUseKeyedArray(baseValue) && canUseKeyedArray(nextValue)
+    ) {
+      syncKeyedArrayDelta(existing as Y.Map<unknown>, baseValue, nextValue);
+      continue;
+    }
+    if (
+      existing instanceof Y.Map && !isKeyedArray(existing)
+      && baseValue && nextValue
+      && typeof baseValue === "object" && typeof nextValue === "object"
+      && !Array.isArray(baseValue) && !Array.isArray(nextValue)
+    ) {
+      syncYMapDelta(
+        existing,
+        baseValue as Record<string, unknown>,
+        nextValue as Record<string, unknown>,
+      );
+      continue;
+    }
+    target.set(key, toYValue(nextValue));
+  }
+}
+
 export function createStructuredCollaborator(
   options: StructuredCollaboratorOptions,
 ): StructuredCollaborator {
@@ -204,8 +315,20 @@ export function createStructuredCollaborator(
       const raw = fromYValue(root) as Record<string, unknown>;
       return normalizeStructuredDocumentContent(options.kind, raw);
     },
-    applyLocalContent: (content) => {
-      applyContent(content, localOrigin);
+    applyLocalContent: (content, baseContent) => {
+      if (baseContent === undefined) {
+        applyContent(content, localOrigin);
+        return;
+      }
+      const normalizedBase = normalizeStructuredDocumentContent(options.kind, baseContent);
+      const normalizedNext = normalizeStructuredDocumentContent(options.kind, content);
+      doc.transact(() => {
+        syncYMapDelta(
+          root,
+          normalizedBase as unknown as Record<string, unknown>,
+          normalizedNext as unknown as Record<string, unknown>,
+        );
+      }, localOrigin);
     },
     applyRemoteUpdate: (update) => {
       Y.applyUpdate(doc, update, remoteOrigin);

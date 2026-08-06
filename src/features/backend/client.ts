@@ -203,6 +203,19 @@ export type UpdateWorkspaceSettingsBody = {
   expected_revision: number;
 };
 
+export type ChangeWorkspacePasswordBody = {
+  password: string;
+  new_password: string;
+  expected_revision: number;
+};
+
+export type ChangeWorkspacePasswordResponse = {
+  ok: boolean;
+  workspace_id: string;
+  revision: number;
+  removed_member_count: number;
+};
+
 export type MoveItemBody = {
   password: string;
   parent_id: string | null;
@@ -444,6 +457,13 @@ export function createBackendClient(opts: BackendClientOptions) {
       body: UpdateWorkspaceSettingsBody,
     ): Promise<{ ok: boolean; workspace_id: string; title: string; revision: number }> {
       return request("PUT", `/v1/workspaces/${encodeURIComponent(workspaceId)}/settings`, body);
+    },
+
+    changeWorkspacePassword(
+      workspaceId: string,
+      body: ChangeWorkspacePasswordBody,
+    ): Promise<ChangeWorkspacePasswordResponse> {
+      return request("PUT", `/v1/workspaces/${encodeURIComponent(workspaceId)}/password`, body);
     },
 
     getItem(

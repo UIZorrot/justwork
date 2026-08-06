@@ -60,3 +60,43 @@ test("table view does not disable Univer auto focus", async () => {
     "sheet cells must be allowed to focus into edit mode",
   );
 });
+
+test("table add-sheet control uses a compact plus and portals its popover above Univer", async () => {
+  const source = await readFile(path.resolve("src/features/workspace/table-view.ts"), "utf8");
+  const css = await readFile(path.resolve("src/pages/workbench/workbench.css"), "utf8");
+
+  assert.match(source, /sheetComposerToggle\.textContent = "\+"/);
+  assert.match(source, /sheetComposerToggle\.setAttribute\("aria-label", options\.labels\?\.addSheet/);
+  assert.match(source, /host\.append\(sheetFooter, sheetComposerPopover\)/);
+  assert.match(source, /sheetComposerPopover\.dataset\.open = sheetComposerOpen/);
+  assert.match(source, /positionSheetComposerPopover\(\)/);
+  assert.match(css, /\.structured-sheet-composer-popover \{[\s\S]*?z-index: 50/);
+  assert.match(css, /\.structured-sheet-composer-popover\[data-open="true"\]/);
+});
+
+test("table view defers external workbook replacement while a local cell edit is settling", async () => {
+  const source = await readFile(path.resolve("src/features/workspace/table-view.ts"), "utf8");
+
+  assert.match(source, /const EXTERNAL_UPDATE_IDLE_MS = 700/);
+  assert.match(source, /addEventListener\("beforeinput", markUncommittedEditorInput, true\)/);
+  assert.match(source, /hasUncommittedEditorInput = true/);
+  assert.match(source, /lastLocalCommandAt = Date\.now\(\)/);
+  assert.match(source, /if \(hasUncommittedEditorInput \|\| emitTimer !== null \|\| remainingIdleMs > 0\)/);
+  assert.match(source, /const stableSnapshot = currentWorkbook\.save\(\)/);
+  assert.match(source, /const boundSnapshot = workbook\.save\(\)/);
+  assert.match(source, /deferredExternalContent = normalized/);
+  assert.match(source, /const selectionState = captureWorkbookSelection\(\)/);
+  assert.match(source, /restoreWorkbookSelection\(workbook, selectionState\)/);
+  assert.match(source, /restoreWorkbookSelection\(currentWorkbook, pendingSelectionRestore\)/);
+});
+
+test("table view makes one Ctrl+A select the complete active worksheet", async () => {
+  const source = await readFile(path.resolve("src/features/workspace/table-view.ts"), "utf8");
+
+  assert.match(source, /const selectEntireWorksheet = \(event: KeyboardEvent\)/);
+  assert.match(source, /sheet\.getMaxRows\(\)/);
+  assert.match(source, /sheet\.getMaxColumns\(\)/);
+  assert.match(source, /currentWorkbook\.setActiveRange\(sheet\.getRange\(/);
+  assert.match(source, /event\.stopImmediatePropagation\(\)/);
+  assert.match(source, /removeEventListener\("keydown", selectEntireWorksheet, true\)/);
+});

@@ -87,6 +87,8 @@ const DEFAULT_TABLE_ROW_HEADER_WIDTH = 52;
 const DEFAULT_TABLE_COLUMN_HEADER_HEIGHT = 32;
 const DEFAULT_TABLE_EXTRA_ROWS = 120;
 const DEFAULT_TABLE_EXTRA_COLUMNS = 26;
+const DEFAULT_TABLE_HORIZONTAL_ALIGN_LEFT = 1;
+const DEFAULT_TABLE_VERTICAL_ALIGN_MIDDLE = 2;
 
 function makeId(prefix: string): string {
   return `${prefix}_${Math.random().toString(36).slice(2, 10)}`;
@@ -115,6 +117,33 @@ function normalizeTableColumnType(value: unknown): TableColumnType {
 
 function cloneJson<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
+}
+
+function tableDefaultStyle(value: unknown): Record<string, unknown> {
+  const existing = value && typeof value === "object" && !Array.isArray(value)
+    ? cloneJson(value as Record<string, unknown>)
+    : {};
+  return {
+    ...existing,
+    ht: DEFAULT_TABLE_HORIZONTAL_ALIGN_LEFT,
+    vt: DEFAULT_TABLE_VERTICAL_ALIGN_MIDDLE,
+  };
+}
+
+function applyTableWorkbookDefaults(workbookData: Record<string, unknown>): Record<string, unknown> {
+  const normalized = cloneJson(workbookData);
+  const sheets = asRecord(normalized.sheets);
+  for (const [sheetId, sheetValue] of Object.entries(sheets)) {
+    if (!sheetValue || typeof sheetValue !== "object" || Array.isArray(sheetValue)) continue;
+    const sheet = sheetValue as Record<string, unknown>;
+    sheets[sheetId] = {
+      ...sheet,
+      defaultStyle: tableDefaultStyle(sheet.defaultStyle),
+    };
+  }
+  normalized.sheets = sheets;
+  normalized.defaultStyle = tableDefaultStyle(normalized.defaultStyle);
+  return normalized;
 }
 
 export function createStructuredId(
@@ -283,11 +312,27 @@ function getPrimaryWorksheet(workbookData: Record<string, unknown>): Record<stri
   return fallback ? asRecord(fallback) : null;
 }
 
+function hasUsableTableWorkbookData(value: unknown): value is Record<string, unknown> {
+  return Boolean(
+    value
+    && typeof value === "object"
+    && !Array.isArray(value)
+    && getPrimaryWorksheet(value as Record<string, unknown>),
+  );
+}
+
 export function tableContentToWorkbookData(
   content: TableDocumentContent,
   defaults: Pick<DefaultTableContentLabels, "sheetName" | "locale"> = {},
 ): Record<string, unknown> {
-  const existing = content.workbookData ? cloneJson(content.workbookData) : {};
+  // Once Univer has produced a workbook snapshot it is the canonical Sheet
+  // state. `columns` and `rows` are compatibility projections only. Rebuilding
+  // the primary worksheet from those projections resurrects cleared cells and
+  // causes a destructive workbook rebind after every edit.
+  if (hasUsableTableWorkbookData(content.workbookData)) {
+    return applyTableWorkbookDefaults(content.workbookData);
+  }
+  const existing: Record<string, unknown> = {};
   const existingSheets = asRecord(existing.sheets);
   const existingSheetOrder = Array.isArray(existing.sheetOrder)
     ? existing.sheetOrder.filter((sheetId): sheetId is string => typeof sheetId === "string" && sheetId.trim().length > 0)
@@ -338,7 +383,7 @@ export function tableContentToWorkbookData(
     preservedSheetIds.map((existingId) => [existingId, cloneJson(existingSheets[existingId] as Record<string, unknown>)]),
   );
 
-  return {
+  return applyTableWorkbookDefaults({
     id: workbookId,
     name: asTrimmedString(existing.name, defaultSheetName),
     appVersion: typeof existing.appVersion === "string" ? existing.appVersion : DEFAULT_TABLE_APP_VERSION,
@@ -392,14 +437,14 @@ export function tableContentToWorkbookData(
         showGridlines: typeof existingSheet?.showGridlines === "number" ? existingSheet.showGridlines : 1,
         gridlinesColor: typeof existingSheet?.gridlinesColor === "string" ? existingSheet.gridlinesColor : "#d7dbe0",
         rightToLeft: typeof existingSheet?.rightToLeft === "number" ? existingSheet.rightToLeft : 0,
-        defaultStyle: existingSheet?.defaultStyle,
+        defaultStyle: tableDefaultStyle(existingSheet?.defaultStyle),
         custom: existingSheet?.custom,
       },
     },
-    defaultStyle: existing.defaultStyle,
+    defaultStyle: tableDefaultStyle(existing.defaultStyle),
     resources: existing.resources,
     custom: existing.custom,
-  };
+  });
 }
 
 function extractTableFromWorkbookData(workbookData: Record<string, unknown>): {
@@ -680,7 +725,7 @@ export function normalizeStructuredDocumentContent(
     };
   }
 
-  if (record.workbookData && typeof record.workbookData === "object") {
+  if (hasUsableTableWorkbookData(record.workbookData)) {
     const normalizedWorkbookData = cloneJson(record.workbookData as Record<string, unknown>);
     const extracted = extractTableFromWorkbookData(normalizedWorkbookData);
     return {

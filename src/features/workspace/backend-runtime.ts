@@ -86,24 +86,25 @@ export function createBackendWorkspaceSession(opts: BackendWorkspaceSessionOptio
     getToken: opts.getToken,
     signingIdentity: opts.signingIdentity,
   });
-  const pwd = () => ({ password: opts.password });
+  let currentPassword = opts.password;
+  const pwd = () => ({ password: currentPassword });
 
   return {
     client,
     workspaceId: opts.workspaceId,
     async joinRelay() {
-      return client.joinRelay(opts.workspaceId, { password: opts.password });
+      return client.joinRelay(opts.workspaceId, { password: currentPassword });
     },
 
     async joinCollaborativeMarkdown(itemId: string) {
       return client.joinCollaborativeMarkdown(opts.workspaceId, itemId, {
-        password: opts.password,
+        password: currentPassword,
         protocol_version: 3,
       });
     },
 
     async loadCollaborativeMarkdownState(itemId: string) {
-      return client.getCollaborativeMarkdownState(opts.workspaceId, itemId, { password: opts.password });
+      return client.getCollaborativeMarkdownState(opts.workspaceId, itemId, { password: currentPassword });
     },
 
     async loadTree() {
@@ -123,11 +124,21 @@ export function createBackendWorkspaceSession(opts: BackendWorkspaceSessionOptio
 
     async updateWorkspaceTitle(title: string, expectedRevision: number) {
       const r = await client.updateWorkspaceSettings(opts.workspaceId, {
-        password: opts.password,
+        password: currentPassword,
         title,
         expected_revision: expectedRevision,
       });
       return { title: r.title, revision: r.revision };
+    },
+
+    async changePassword(newPassword: string, expectedRevision: number) {
+      const r = await client.changeWorkspacePassword(opts.workspaceId, {
+        password: currentPassword,
+        new_password: newPassword,
+        expected_revision: expectedRevision,
+      });
+      currentPassword = newPassword;
+      return { revision: r.revision, removedMemberCount: r.removed_member_count };
     },
 
     async listMembers() {
@@ -138,7 +149,7 @@ export function createBackendWorkspaceSession(opts: BackendWorkspaceSessionOptio
     async updateProfile(nickname: string, expectedRevision: number) {
       const r = await client.updateProfile(opts.workspaceId, {
         nickname,
-        password: opts.password,
+        password: currentPassword,
         expected_revision: expectedRevision,
       });
       return r.profile;
@@ -162,7 +173,7 @@ export function createBackendWorkspaceSession(opts: BackendWorkspaceSessionOptio
       },
     ) {
       const r = await client.updateItem(opts.workspaceId, itemId, {
-        password: opts.password,
+        password: currentPassword,
         title: patch.title ?? null,
         markdown: patch.markdown ?? null,
         content: patch.content ?? null,
@@ -182,7 +193,7 @@ export function createBackendWorkspaceSession(opts: BackendWorkspaceSessionOptio
       clientMutationId?: string | null,
     ) {
       const r = await client.createItem(opts.workspaceId, {
-        password: opts.password,
+        password: currentPassword,
         kind,
         title,
         parent_id: parentId,
@@ -194,7 +205,7 @@ export function createBackendWorkspaceSession(opts: BackendWorkspaceSessionOptio
 
     async setPinned(itemId: string, pinned: boolean, expectedRevision: number, clientMutationId?: string | null) {
       const r = await client.pinItem(opts.workspaceId, itemId, {
-        password: opts.password,
+        password: currentPassword,
         pinned,
         expected_revision: expectedRevision,
         client_mutation_id: clientMutationId ?? null,
@@ -210,7 +221,7 @@ export function createBackendWorkspaceSession(opts: BackendWorkspaceSessionOptio
       clientMutationId?: string | null,
     ) {
       const r = await client.moveItem(opts.workspaceId, itemId, {
-        password: opts.password,
+        password: currentPassword,
         parent_id: parentId,
         order_key: typeof order === "number" ? order : null,
         order_rank: typeof order === "string" ? order : null,
@@ -222,7 +233,7 @@ export function createBackendWorkspaceSession(opts: BackendWorkspaceSessionOptio
 
     async trashItem(itemId: string, expectedRevision: number, clientMutationId?: string | null) {
       const r = await client.trashItem(opts.workspaceId, itemId, {
-        password: opts.password,
+        password: currentPassword,
         expected_revision: expectedRevision,
         client_mutation_id: clientMutationId ?? null,
       });
@@ -231,7 +242,7 @@ export function createBackendWorkspaceSession(opts: BackendWorkspaceSessionOptio
 
     async restoreItem(itemId: string, expectedRevision: number, clientMutationId?: string | null) {
       const r = await client.restoreItem(opts.workspaceId, itemId, {
-        password: opts.password,
+        password: currentPassword,
         expected_revision: expectedRevision,
         client_mutation_id: clientMutationId ?? null,
       });
@@ -240,7 +251,7 @@ export function createBackendWorkspaceSession(opts: BackendWorkspaceSessionOptio
 
     async hardDeleteItem(itemId: string, expectedRevision: number, clientMutationId?: string | null) {
       const r = await client.hardDeleteItem(opts.workspaceId, itemId, {
-        password: opts.password,
+        password: currentPassword,
         expected_revision: expectedRevision,
         client_mutation_id: clientMutationId ?? null,
       });
@@ -249,7 +260,7 @@ export function createBackendWorkspaceSession(opts: BackendWorkspaceSessionOptio
 
     async search(query: string) {
       const r = await client.search(opts.workspaceId, {
-        password: opts.password,
+        password: currentPassword,
         query,
       });
       return r.results;

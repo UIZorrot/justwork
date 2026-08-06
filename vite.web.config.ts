@@ -8,6 +8,7 @@ const workbenchDir = path.resolve(rootDir, "src/pages/workbench");
 
 export default defineConfig({
   root: workbenchDir,
+  envDir: rootDir,
   publicDir: path.resolve(rootDir, "public"),
   resolve: {
     alias: {

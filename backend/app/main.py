@@ -79,6 +79,8 @@ from .models import (
     WorkspaceOutlineResponse,
     WorkspacePatchRequest,
     WorkspacePatchResponse,
+    WorkspacePasswordChangeRequest,
+    WorkspacePasswordChangeResponse,
     WorkspacePasswordRequest,
     WorkspaceRevisionMutationRequest,
     WorkspaceRecord,
@@ -99,6 +101,7 @@ from .workspace_crypto import (
     cached_workspace_collaboration_key,
     decrypt_workspace_payload,
     encrypt_workspace_payload,
+    invalidate_cached_workspace_collaboration_key,
 )
 from .revision_history import append_workspace_revision, list_workspace_revisions
 from .workspace_runtime import (
@@ -116,6 +119,7 @@ from .workspace_runtime import (
     ensure_actor_workspace_member,
     move_doc,
     now_iso,
+    normalize_workspace_members,
     normalize_workspace_state,
     outline,
     patch_doc,
@@ -442,6 +446,16 @@ def _broadcast_workspace_invalidation(workspace_id: str, updated_at: str) -> Non
         pass
 
 
+def _disconnect_workspace_realtime_clients(workspace_id: str) -> None:
+    """Invalidate in-process sockets after a password/member boundary change."""
+    try:
+        from_thread.run(get_collab_relay_hub().disconnect_workspace, workspace_id, 4403)
+        from_thread.run(get_image_relay_hub().disconnect_workspace, workspace_id, 4403)
+    except RuntimeError:
+        # Direct unit calls do not always run inside an AnyIO worker thread.
+        pass
+
+
 def require_backend_token(authorization: str | None = Header(default=None)) -> None:
     if not _backend_token:
         return
@@ -459,6 +473,8 @@ async def http_exception_handler(_: Request, exc: HTTPException) -> JSONResponse
         code = "not_found"
     elif exc.status_code == status.HTTP_403_FORBIDDEN and exc.detail == "invalid workspace password":
         code = "invalid_workspace_password"
+    elif exc.status_code == status.HTTP_403_FORBIDDEN and exc.detail == "workspace owner required":
+        code = "workspace_owner_required"
     elif exc.status_code == status.HTTP_409_CONFLICT:
         if exc.detail == "workspace quota exceeded":
             code = "workspace_quota_exceeded"
@@ -683,6 +699,7 @@ def save_state(
     owner_nickname: str | None = None,
     actor_user_id: str | None = None,
     deferred_notifications: list[Callable[[], None]] | None = None,
+    enforce_quotas: bool = True,
 ) -> WorkspaceRecord:
     next_owner_nickname = record.owner_nickname if owner_nickname is None else owner_nickname
     ensure_workspace_members(state_payload, record.owner_user_id, next_owner_nickname)
@@ -701,7 +718,8 @@ def save_state(
             after=actor_after,
             actor_user_id=actor,
         )
-    apply_workspace_quotas_or_raise(state_payload, _quota_plan_for_workspace(record))
+    if enforce_quotas:
+        apply_workspace_quotas_or_raise(state_payload, _quota_plan_for_workspace(record))
     next_record = WorkspaceRecord(
         workspace_id=record.workspace_id,
         owner_user_id=record.owner_user_id,
@@ -1066,6 +1084,121 @@ def list_workspace_members(
     )
 
 
+@app.put("/v1/workspaces/{workspace_id}/password", response_model=WorkspacePasswordChangeResponse)
+def change_workspace_password(
+    workspace_id: str,
+    body: WorkspacePasswordChangeRequest,
+    request: Request,
+    _: None = Depends(require_backend_token),
+    gateway: DatabaseGateway = Depends(get_gateway),
+) -> WorkspacePasswordChangeResponse:
+    actor_user_id, signed, _ = actor_from_body(body, request, workspace_id, "password")
+    record = require_workspace(gateway, workspace_id)
+    if not signed or actor_user_id != record.owner_user_id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="workspace owner required")
+    if hmac.compare_digest(body.password, body.new_password):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="new password must be different")
+
+    state_payload = load_decrypted_state(record, body.password)
+    current_revision = int(state_payload.get("workspaceRevision", 0))
+    if current_revision != body.expected_revision:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="workspace settings revision conflict")
+
+    members = normalize_workspace_members(state_payload.get("members"))
+    owner_member = members.get(record.owner_user_id)
+    if owner_member is None:
+        ensure_workspace_members(state_payload, record.owner_user_id, record.owner_nickname)
+        members = normalize_workspace_members(state_payload.get("members"))
+        owner_member = members[record.owner_user_id]
+    removed_member_count = max(0, len(members) - 1)
+    state_payload["members"] = {record.owner_user_id: owner_member}
+    next_revision = current_revision + 1
+    state_payload["workspaceRevision"] = next_revision
+    workspace_title = get_workspace_title(state_payload, workspace_id)
+    append_workspace_revision(
+        state_payload,
+        operation="workspace-password-change",
+        item_id="workspace",
+        title=workspace_title,
+        before={"title": workspace_title, "revision": current_revision},
+        after={"title": workspace_title, "revision": next_revision},
+        actor_user_id=actor_user_id,
+    )
+
+    # Old collaboration tickets contain the previous derived key. Atomically
+    # drain each room before re-encrypting: this preserves its final acknowledged
+    # CRDT update while rotating the epoch that guards subsequent appends.
+    old_collaboration_key = cached_workspace_collaboration_key(workspace_id, body.password)
+    collaboration_store = get_collaborative_update_store()
+    collaborative_item_ids: list[str] = []
+    drained_collaboration_updates: dict[str, bytes] = {}
+    for doc in state_payload.get("docs", []):
+        if isinstance(doc, dict) and doc.get("kind") in {"page", "table", "board"}:
+            item_id = str(doc.get("id", "")).strip()
+            if item_id:
+                collaborative_item_ids.append(item_id)
+                drained = collaboration_store.drain_content(
+                    workspace_id,
+                    item_id,
+                    old_collaboration_key,
+                )
+                if drained is not None:
+                    drained_update, latest_markdown, latest_content = drained
+                    drained_collaboration_updates[item_id] = drained_update
+                    if doc.get("kind") == "page" and latest_markdown != str(doc.get("markdown", "")):
+                        doc["markdown"] = latest_markdown
+                        doc["revision"] = int(doc.get("revision", 0)) + 1
+                        doc["updatedAt"] = now_iso()
+                    elif doc.get("kind") in {"table", "board"} and latest_content != doc.get("content"):
+                        doc["content"] = latest_content
+                        doc["revision"] = int(doc.get("revision", 0)) + 1
+                        doc["updatedAt"] = now_iso()
+    invalidate_cached_workspace_collaboration_key(workspace_id)
+
+    try:
+        save_state(
+            gateway,
+            record,
+            state_payload,
+            body.new_password,
+            actor_user_id=actor_user_id,
+            enforce_quotas=False,
+        )
+    except Exception:
+        # A workspace CAS can still lose to an unrelated concurrent metadata
+        # write. Restore the drained CRDT state under the old credential before
+        # reporting that conflict so no acknowledged edit disappears.
+        for item_id, update in drained_collaboration_updates.items():
+            collaboration_store.append_update(
+                workspace_id,
+                item_id,
+                update,
+                encryption_key=old_collaboration_key,
+            )
+        raise
+    # Rotate once more after the payload CAS. A ticket issued with the old
+    # password in the pre-commit window must not retain the freshly-created
+    # room epoch on another server instance.
+    for item_id in collaborative_item_ids:
+        collaboration_store.delete_snapshot(workspace_id, item_id)
+    invalidate_cached_workspace_collaboration_key(workspace_id)
+    gateway.publish_workspace_event(
+        workspace_id,
+        "workspace.credentials.rotated",
+        {
+            "type": "workspace.credentials.rotated",
+            "workspaceId": workspace_id,
+        },
+    )
+    _disconnect_workspace_realtime_clients(workspace_id)
+    return WorkspacePasswordChangeResponse(
+        ok=True,
+        workspace_id=workspace_id,
+        revision=next_revision,
+        removed_member_count=removed_member_count,
+    )
+
+
 @app.post("/v1/workspaces/{workspace_id}/relay/join", response_model=WorkspaceRelayJoinResponse)
 async def join_workspace_relay(
     workspace_id: str,
@@ -1127,6 +1260,9 @@ async def workspace_image_relay(
                     had_events = bool(events)
                     for next_cursor, event_type, event_payload in events:
                         workspace_event_cursor = max(workspace_event_cursor, next_cursor)
+                        if event_type == "workspace.credentials.rotated":
+                            await websocket.close(code=4403)
+                            return
                         if event_type != "workspace.invalidated":
                             continue
                         async with collab_send_lock:

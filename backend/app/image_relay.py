@@ -198,6 +198,21 @@ class ImageRelayHub:
         for ws in dead:
             await self.unregister(workspace_id, ws)
 
+    async def disconnect_workspace(self, workspace_id: str, code: int = 4403) -> None:
+        """Close presence/image sockets and discard their member sessions."""
+        async with self._lock:
+            sockets = set(self._rooms.pop(workspace_id, set()))
+            self._members.pop(workspace_id, None)
+            for websocket, ref in list(self._websocket_index.items()):
+                if ref[0] == workspace_id:
+                    sockets.add(websocket)
+                    self._websocket_index.pop(websocket, None)
+        for websocket in sockets:
+            try:
+                await websocket.close(code=code)
+            except Exception:
+                pass
+
     def _ticket_key(self, workspace_id: str, ticket: str) -> str:
         return f"{workspace_id}:{ticket}"
 

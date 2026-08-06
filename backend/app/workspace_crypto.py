@@ -119,6 +119,12 @@ def cached_workspace_collaboration_key(workspace_id: str, password: str) -> byte
     return derived
 
 
+def invalidate_cached_workspace_collaboration_key(workspace_id: str) -> None:
+    """Forget a derived collaboration key when workspace credentials rotate."""
+    with _collaboration_key_cache_lock:
+        _collaboration_key_cache.pop(workspace_id, None)
+
+
 def encrypt_collaboration_bytes(key: bytes, plaintext: bytes, *, aad: str) -> bytes:
     nonce = os.urandom(12)
     ciphertext = AESGCM(key).encrypt(nonce, plaintext, aad.encode("utf-8"))

@@ -18,6 +18,7 @@ export function parseWorkspaceIdFromApiPath(path: string): string | null {
 export function signingTargetIdForPath(path: string): string {
   if (/\/v1\/workspaces\/[^/]+\/profile$/.test(path)) return "profile";
   if (/\/v1\/workspaces\/[^/]+\/settings$/.test(path)) return "settings";
+  if (/\/v1\/workspaces\/[^/]+\/password$/.test(path)) return "password";
   if (/\/v1\/workspaces\/[^/]+\/items$/.test(path)) return "";
   const itemAction = path.match(
     /\/v1\/workspaces\/[^/]+\/items\/([^/]+)\/(?:pin|move|trash|restore|patch|hard-delete)$/,
@@ -39,6 +40,7 @@ export function shouldSignWriteRequest(method: string, path: string): boolean {
   if (method === "POST" && /\/v1\/workspaces\/[^/]+\/items\/[^/]+$/.test(path)) return false;
   if (/\/v1\/workspaces\/[^/]+\/profile$/.test(path) && method === "PUT") return true;
   if (/\/v1\/workspaces\/[^/]+\/settings$/.test(path) && method === "PUT") return true;
+  if (/\/v1\/workspaces\/[^/]+\/password$/.test(path) && method === "PUT") return true;
   if (/\/items\/[^/]+\/patch$/.test(path) && method === "POST") return true;
   if (/\/items\/[^/]+\/hard-delete$/.test(path) && method === "POST") return true;
   if (/\/v1\/workspaces\/[^/]+\/items$/.test(path) && method === "POST") return true;

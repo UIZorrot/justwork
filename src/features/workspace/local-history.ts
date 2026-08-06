@@ -15,6 +15,7 @@ export type LocalHistoryOp =
   | "workspace.settings"
   | "workspace.member.profile"
   | "workspace.member.join"
+  | "workspace.security.password"
   | "doc.patch"
   | "history.revert";
 

@@ -377,6 +377,33 @@
             </button>
             <p id="workspace-info-profile-status" class="workspace-info-status" role="status"></p>
           </section>
+          <section id="workspace-info-password-section" class="workspace-info-section" hidden>
+            <h3 class="workspace-info-heading" data-i18n="drawer.profile.securityHeading">Workspace security</h3>
+            <h4 class="workspace-info-subheading" data-i18n="drawer.profile.passwordHeading">Change password</h4>
+            <p class="workspace-info-warning" data-i18n="drawer.profile.passwordWarning">
+              Changing the password immediately removes every member except the workspace creator. They need the new password to join again.
+            </p>
+            <input
+              id="workspace-info-new-password-input"
+              class="gate-input workspace-info-input"
+              type="password"
+              autocomplete="new-password"
+              data-i18n-placeholder="drawer.profile.newPasswordPlaceholder"
+              placeholder="New workspace password"
+            />
+            <input
+              id="workspace-info-confirm-password-input"
+              class="gate-input workspace-info-input"
+              type="password"
+              autocomplete="new-password"
+              data-i18n-placeholder="drawer.profile.confirmPasswordPlaceholder"
+              placeholder="Confirm new password"
+            />
+            <button id="workspace-info-change-password-btn" type="button" class="ghost-btn workspace-info-save-btn workspace-info-danger-btn" data-i18n="drawer.profile.changePassword">
+              Change password and remove other members
+            </button>
+            <p id="workspace-info-password-status" class="workspace-info-status" role="status"></p>
+          </section>
         </div>
       </aside>
     </div>

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import secrets
 import threading
@@ -501,6 +502,97 @@ class CollaborativeUpdateStore:
             self._epoch_path(path).unlink(missing_ok=True)
             self._receipt_path(path).unlink(missing_ok=True)
             self._bootstrap_leases.pop(self._bootstrap_key(workspace_id, item_id), None)
+
+    @staticmethod
+    def _decode_structured_value(value):
+        if isinstance(value, list):
+            return [CollaborativeUpdateStore._decode_structured_value(entry) for entry in value]
+        if not isinstance(value, dict):
+            return value
+        if value.get("__type") == "justwork-keyed-array-v1":
+            items = value.get("items") if isinstance(value.get("items"), dict) else {}
+            ranks = value.get("ranks") if isinstance(value.get("ranks"), dict) else {}
+            ordered_keys = sorted(
+                items,
+                key=lambda key: (float(ranks.get(key, 0) or 0), str(key)),
+            )
+            return [CollaborativeUpdateStore._decode_structured_value(items[key]) for key in ordered_keys]
+        return {
+            str(key): CollaborativeUpdateStore._decode_structured_value(entry)
+            for key, entry in value.items()
+        }
+
+    @classmethod
+    def _content_from_document(cls, document: YDoc) -> tuple[bytes, str, dict]:
+        markdown = str(document.get_text("markdown"))
+        raw_content = json.loads(document.get_map("content").to_json())
+        content = cls._decode_structured_value(raw_content)
+        return (
+            encode_state_as_update(document),
+            markdown,
+            content if isinstance(content, dict) else {},
+        )
+
+    def drain_content(
+        self,
+        workspace_id: str,
+        item_id: str,
+        encryption_key: bytes | None = None,
+    ) -> tuple[bytes, str, dict] | None:
+        """Atomically read the canonical Yjs state and rotate the room to empty.
+
+        Password rotation uses this to preserve the final acknowledged update
+        while making every ticket for the previous room epoch unusable.
+        """
+        key = self._key(workspace_id, encryption_key)
+        gateway = self._database_gateway(workspace_id)
+        if gateway is not None:
+            legacy = self._legacy_file_state(workspace_id, item_id)
+
+            def drain(current):
+                if current is None and legacy is None:
+                    return CollaborativeRoomMutation(None, None, 0, None)
+                try:
+                    document, _ = self._decrypt_room_document(
+                        workspace_id,
+                        item_id,
+                        current,
+                        key,
+                        legacy_snapshot=legacy[1] if current is None and legacy else None,
+                        legacy_epoch=legacy[0] if current is None and legacy else None,
+                    )
+                    result = self._content_from_document(document)
+                except BaseException as exc:  # noqa: BLE001
+                    result = exc
+                return CollaborativeRoomMutation(None, None, 0, result)
+
+            stored = gateway.mutate_collaborative_room(workspace_id, item_id, drain)
+            result = self._unwrap_database_result(stored)
+            self._remove_legacy_file_state(workspace_id, item_id)
+            return result
+
+        path = self._file_path(workspace_id, item_id)
+        with self._lock:
+            stored = self._read_snapshot_locked(path)
+            if stored is None:
+                self._epoch_path(path).unlink(missing_ok=True)
+                self._receipt_path(path).unlink(missing_ok=True)
+                self._bootstrap_leases.pop(self._bootstrap_key(workspace_id, item_id), None)
+                return None
+            epoch = self._ensure_epoch_locked(path)
+            snapshot, _ = decrypt_collaboration_bytes(
+                key,
+                stored,
+                aad=self._aad(workspace_id, item_id, epoch, "file", 0),
+            )
+            document = YDoc()
+            apply_update(document, snapshot)
+            result = self._content_from_document(document)
+            path.unlink(missing_ok=True)
+            self._epoch_path(path).unlink(missing_ok=True)
+            self._receipt_path(path).unlink(missing_ok=True)
+            self._bootstrap_leases.pop(self._bootstrap_key(workspace_id, item_id), None)
+            return result
 
     def append_update(
         self,

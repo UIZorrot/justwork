@@ -12,7 +12,10 @@ test("structured collaboration stores stable-id rows, cells, and cards as nested
   assert.match(source, /\["items", new Y\.Map/);
   assert.match(source, /syncYMap\(existing/);
   assert.match(workbench, /getStructuredCollaboratorForDoc\(doc\)/);
-  assert.match(workbench, /collaborator\.applyLocalContent\(nextContent\)/);
+  assert.equal(
+    workbench.match(/collaborator\.applyLocalContent\(nextContent, viewBaseContent\)/g)?.length,
+    2,
+  );
   assert.match(workbench, /structuredCollaborator\.applyRemoteUpdate\(update\)/);
 });
 
@@ -49,4 +52,41 @@ test("concurrent edits to different cells converge without replacing either row"
   seed.destroy();
   left.destroy();
   right.destroy();
+});
+
+test("a stale sheet view writes only its local cell delta after a remote cell update", async () => {
+  const structured = await loadTranspiledModule("src/features/collaboration/yjs-structured.ts");
+  const documents = await loadTranspiledModule("src/features/workspace/structured-document.ts");
+  const seed = structured.createStructuredCollaborator({
+    kind: "table",
+    initialContent: documents.createDefaultTableContent(),
+  });
+  const editor = structured.createStructuredCollaborator({ kind: "table" });
+  const peer = structured.createStructuredCollaborator({ kind: "table" });
+  editor.applyRemoteUpdate(seed.encodeUpdate());
+  peer.applyRemoteUpdate(seed.encodeUpdate());
+  const editorUpdates = [];
+  const peerUpdates = [];
+  editor.onUpdate((update, origin) => { if (origin === "local") editorUpdates.push(update); });
+  peer.onUpdate((update, origin) => { if (origin === "local") peerUpdates.push(update); });
+
+  const staleEditorView = structuredClone(editor.getContent());
+  const peerBase = structuredClone(peer.getContent());
+  const peerNext = structuredClone(peerBase);
+  const sheetId = peerNext.workbookData.sheetOrder[0];
+  peerNext.workbookData.sheets[sheetId].cellData[1][0].v = "remote";
+  peer.applyLocalContent(peerNext, peerBase);
+  for (const update of peerUpdates.splice(0)) editor.applyRemoteUpdate(update);
+
+  const editorNext = structuredClone(staleEditorView);
+  editorNext.workbookData.sheets[sheetId].cellData[1][1].v = "local";
+  editor.applyLocalContent(editorNext, staleEditorView);
+  for (const update of editorUpdates.splice(0)) peer.applyRemoteUpdate(update);
+
+  assert.deepEqual(editor.getContent(), peer.getContent());
+  assert.equal(editor.getContent().rows[0].cells.col_name, "remote");
+  assert.equal(editor.getContent().rows[0].cells.col_notes, "local");
+  seed.destroy();
+  editor.destroy();
+  peer.destroy();
 });

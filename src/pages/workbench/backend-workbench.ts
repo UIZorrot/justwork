@@ -67,6 +67,7 @@ import {
   loadWorkspaceJoinedMembers,
   loadWorkspaceJoinedMembersFromApi,
   mergeWorkspacePeople,
+  replaceWorkspaceJoinedMembers,
   upsertWorkspaceJoinedMembers,
   type WorkspaceJoinedMember,
   type WorkspacePeopleEntry,
@@ -697,6 +698,8 @@ function historyEventTitle(op: string, translate: Translator["t"]): string {
       return "Member profile";
     case "workspace.member.join":
       return "Member joined";
+    case "workspace.security.password":
+      return translate("history.passwordChange");
     case "doc.patch":
       return translate("history.patch");
     case "history.revert":
@@ -820,6 +823,11 @@ export async function startBackendWorkbench(): Promise<void> {
   const workspaceInfoWorkspaceNameInput = document.getElementById("workspace-info-workspace-name-input") as HTMLInputElement | null;
   const workspaceInfoSaveWorkspaceNameBtn = document.getElementById("workspace-info-save-workspace-name-btn") as HTMLButtonElement | null;
   const workspaceInfoWorkspaceNameStatus = document.getElementById("workspace-info-workspace-name-status") as HTMLElement | null;
+  const workspaceInfoPasswordSection = document.getElementById("workspace-info-password-section") as HTMLElement | null;
+  const workspaceInfoNewPasswordInput = document.getElementById("workspace-info-new-password-input") as HTMLInputElement | null;
+  const workspaceInfoConfirmPasswordInput = document.getElementById("workspace-info-confirm-password-input") as HTMLInputElement | null;
+  const workspaceInfoChangePasswordBtn = document.getElementById("workspace-info-change-password-btn") as HTMLButtonElement | null;
+  const workspaceInfoPasswordStatus = document.getElementById("workspace-info-password-status") as HTMLElement | null;
   const gateRecentSection = document.getElementById("gate-recent-section") as HTMLElement | null;
   const gateRecentBody = document.getElementById("gate-recent-body") as HTMLElement | null;
   const gateRecentList = document.getElementById("gate-recent-workspaces-list") as HTMLUListElement | null;
@@ -918,6 +926,11 @@ export async function startBackendWorkbench(): Promise<void> {
     !workspaceInfoWorkspaceNameInput ||
     !workspaceInfoSaveWorkspaceNameBtn ||
     !workspaceInfoWorkspaceNameStatus ||
+    !workspaceInfoPasswordSection ||
+    !workspaceInfoNewPasswordInput ||
+    !workspaceInfoConfirmPasswordInput ||
+    !workspaceInfoChangePasswordBtn ||
+    !workspaceInfoPasswordStatus ||
     !gateRecentSection ||
     !gateRecentBody ||
     !gateRecentList ||
@@ -1095,6 +1108,12 @@ export async function startBackendWorkbench(): Promise<void> {
   let imageSync: WorkspaceImageSync | undefined;
   const markdownHost = document.createElement("div");
   markdownHost.className = "doc-editor-surface doc-editor-surface--markdown";
+  const setMarkdownBodyLoading = (bodyLoading: boolean): void => {
+    markdownHost.classList.toggle("is-body-loading", bodyLoading);
+    markdownHost.inert = bodyLoading;
+    markdownHost.setAttribute("aria-busy", String(bodyLoading));
+    markdownHost.dataset.loadingLabel = t("status.loading");
+  };
   const structuredHost = document.createElement("div");
   structuredHost.className = "doc-editor-surface doc-editor-surface--structured";
   editorRoot.replaceChildren(markdownHost, structuredHost);
@@ -1394,11 +1413,12 @@ export async function startBackendWorkbench(): Promise<void> {
     rememberPassword = false,
   ): Promise<void> => {
     if (mounted) return;
+    let workspacePassword = password;
 
     const session: BackendWorkspaceSession = createBackendWorkspaceSession({
       baseUrl: JUSTWORK_BACKEND_URL,
       workspaceId,
-      password,
+      password: workspacePassword,
       signingIdentity: identity,
     });
     const sessionId = getOrCreateWorkspaceSessionId();
@@ -1540,7 +1560,7 @@ export async function startBackendWorkbench(): Promise<void> {
     await localStorageArea.set({ [STORAGE_KEYS.LAST_BACKEND_WORKSPACE_ID]: workspaceId });
     rememberWorkspacePassword = rememberPassword;
     if (rememberPassword) {
-      await setRememberedWorkspacePassword(workspaceId, password);
+      await setRememberedWorkspacePassword(workspaceId, workspacePassword);
     } else {
       await removeRememberedWorkspacePassword(workspaceId);
     }
@@ -1816,6 +1836,12 @@ export async function startBackendWorkbench(): Promise<void> {
         hydratedDocIds.add(docId);
       }
     };
+    if (active.kind === "page" || active.kind === "table" || active.kind === "board") {
+      // The initial active body was loaded above before the hydration registry
+      // existed. Record that fact so navigation never treats it like a tree
+      // summary and paints an empty body over the editor.
+      markDocHydrated(active.id);
+    }
     const collaborativeMarkdownDocs = new Map<string, ReturnType<typeof createMarkdownCollaborator>>();
     const collaborativeStructuredDocs = new Map<string, ReturnType<typeof createStructuredCollaborator>>();
     const collaborationReadyDocIds = new Set<string>();
@@ -1899,7 +1925,6 @@ export async function startBackendWorkbench(): Promise<void> {
       } else if (snapshot) {
         removeCollaborativeSnapshot(collaborativeMarkdownSnapshotKey(workspaceId, doc.id));
       }
-      collectLocalCollaborativeUpdates(doc.id, collaborator);
       collaborativeStructuredDocs.set(doc.id, collaborator);
       return collaborator;
     };
@@ -1911,7 +1936,6 @@ export async function startBackendWorkbench(): Promise<void> {
       const collaborator = createStructuredCollaborator({
         kind: doc.kind === "table" ? "table" : "board",
       });
-      collectLocalCollaborativeUpdates(doc.id, collaborator);
       collaborativeStructuredDocs.set(doc.id, collaborator);
       collaborationReadyDocIds.delete(doc.id);
       collaborationEpochByDoc.delete(doc.id);
@@ -1966,7 +1990,7 @@ export async function startBackendWorkbench(): Promise<void> {
           0,
         );
       }
-      if (active.id !== doc.id || doc.kind !== "page" || !editor) return;
+      if (active.id !== doc.id || doc.kind !== "page" || !editor || !hydratedDocIds.has(doc.id)) return;
       const collaborator = getCollaboratorForDoc(doc);
       editor.bindCollaborator({
         collaborator,
@@ -2001,6 +2025,9 @@ export async function startBackendWorkbench(): Promise<void> {
       }
       stopActiveCollaborativeTransport();
       const bootstrapBaseMarkdown = doc.kind === "page" ? doc.markdown : null;
+      const bootstrapBaseStructuredContent = doc.kind === "table" || doc.kind === "board"
+        ? normalizeStructuredDocumentContent(doc.kind, doc.content ?? {})
+        : null;
       setCollaborationSurfacePending(doc, true);
       const generation = collaborativeTransportGeneration;
       activeCollaborativeJoinItemId = doc.id;
@@ -2052,6 +2079,9 @@ export async function startBackendWorkbench(): Promise<void> {
           ? editor.getMarkdown()
           : latestLocalDoc.markdown
         : null;
+      const bootstrapLocalStructuredContent = doc.kind === "table" || doc.kind === "board"
+        ? normalizeStructuredDocumentContent(doc.kind, latestLocalDoc.content ?? {})
+        : null;
       const hasUnboundBootstrapEdit = Boolean(
         markdownCollaborator
         && bootstrapEditBaseMarkdown !== null
@@ -2061,7 +2091,14 @@ export async function startBackendWorkbench(): Promise<void> {
       );
       let replayedBootstrapEdit = false;
       let bootstrapReplayBase = bootstrapEditBaseMarkdown ?? "";
-      const applyRemoteState = (update: Uint8Array): void => {
+      const hasUnboundStructuredEdit = Boolean(
+        structuredCollaborator
+        && bootstrapBaseStructuredContent
+        && bootstrapLocalStructuredContent
+        && !syncValuesEqual(bootstrapLocalStructuredContent, bootstrapBaseStructuredContent)
+        && !collaborationReadyDocIds.has(doc.id),
+      );
+      const applyRemoteState = (update: Uint8Array, deferStructuredRender = false): void => {
         if (markdownCollaborator) {
           const previousMarkdown = markdownCollaborator.getMarkdown();
           const changed = markdownCollaborator.applyRemoteUpdate(update);
@@ -2089,7 +2126,7 @@ export async function startBackendWorkbench(): Promise<void> {
               content: nextContent,
               updatedAt: new Date().toISOString(),
             }));
-            if (active.id === doc.id) renderAll();
+            if (active.id === doc.id && !deferStructuredRender) renderAll();
           }
         }
         const snapshot = markdownCollaborator?.encodeUpdate() ?? structuredCollaborator?.encodeUpdate();
@@ -2098,7 +2135,7 @@ export async function startBackendWorkbench(): Promise<void> {
         }
       };
       if (remoteState.length > 0) {
-        applyRemoteState(remoteState);
+        applyRemoteState(remoteState, hasUnboundStructuredEdit);
         if (markdownCollaborator && hasUnboundBootstrapEdit && bootstrapLocalMarkdown !== null) {
           bootstrapReplayBase = markdownCollaborator.getMarkdown();
           const replayed = replayMarkdownEdit(
@@ -2117,6 +2154,30 @@ export async function startBackendWorkbench(): Promise<void> {
             updatedAt: new Date().toISOString(),
           }));
           replayedBootstrapEdit = true;
+        }
+        if (
+          structuredCollaborator
+          && bootstrapBaseStructuredContent
+          && bootstrapLocalStructuredContent
+          && hasUnboundStructuredEdit
+        ) {
+          const canonicalContent = structuredCollaborator.getContent();
+          const replayed = mergeSyncValue(
+            bootstrapBaseStructuredContent,
+            bootstrapLocalStructuredContent,
+            canonicalContent,
+            "content",
+          );
+          const mergedContent = replayed.conflicts.length === 0
+            ? replayed.value
+            : bootstrapLocalStructuredContent;
+          structuredCollaborator.applyLocalContent(mergedContent, canonicalContent);
+          updateDocById(doc.id, (candidate) => ({
+            ...candidate,
+            content: structuredCollaborator!.getContent(),
+            updatedAt: new Date().toISOString(),
+          }));
+          if (active.id === doc.id) renderAll();
         }
         markCollaborationReady(doc);
       } else if (join.bootstrap_owner) {
@@ -2167,6 +2228,13 @@ export async function startBackendWorkbench(): Promise<void> {
       });
       if (collaborationReadyDocIds.has(doc.id)) {
         markCollaborationReady(doc);
+        if (structuredCollaborator && active.id === doc.id) {
+          // The pending view deliberately renders the hydrated REST body. Swap
+          // to the canonical structured snapshot only after the transport and
+          // room lineage are ready, including when a cached snapshot made the
+          // incoming update a byte-for-byte no-op.
+          renderAll();
+        }
         safeSendCollaborativeUpdate(
           transport.readyState,
           () => {
@@ -2318,7 +2386,7 @@ export async function startBackendWorkbench(): Promise<void> {
 
     const refreshJoinedMembers = async (): Promise<void> => {
       try {
-        const apiMembers = await loadWorkspaceJoinedMembersFromApi(session.client, workspaceId, password);
+        const apiMembers = await loadWorkspaceJoinedMembersFromApi(session.client, workspaceId, workspacePassword);
         if (apiMembers && apiMembers.length > 0) {
           joinedMembers = await upsertWorkspaceJoinedMembers(
             localStorageArea,
@@ -2660,11 +2728,15 @@ export async function startBackendWorkbench(): Promise<void> {
     const normalizedContentForDoc = (doc: WorkspaceDoc): WorkspaceDocContent | null => {
       if (doc.kind === "table") {
         const collaborator = collaborativeStructuredDocs.get(doc.id);
-        return collaborator?.getContent() ?? normalizeStructuredDocumentContent("table", doc.content ?? createLocalizedDefaultTableContent());
+        return collaborator && collaborationReadyDocIds.has(doc.id)
+          ? collaborator.getContent()
+          : normalizeStructuredDocumentContent("table", doc.content ?? createLocalizedDefaultTableContent());
       }
       if (doc.kind === "board") {
         const collaborator = collaborativeStructuredDocs.get(doc.id);
-        return collaborator?.getContent() ?? normalizeStructuredDocumentContent("board", doc.content ?? createLocalizedDefaultBoardContent());
+        return collaborator && collaborationReadyDocIds.has(doc.id)
+          ? collaborator.getContent()
+          : normalizeStructuredDocumentContent("board", doc.content ?? createLocalizedDefaultBoardContent());
       }
       return null;
     };
@@ -2739,7 +2811,7 @@ export async function startBackendWorkbench(): Promise<void> {
       if (isCreatePendingDocId(doc.id)) return false;
       if (dirtyDocIds.has(doc.id)) return false;
       if (hydratedDocIds.has(doc.id)) return false;
-      if (collaborativeStructuredDocs.has(doc.id)) return false;
+      if (collaborationReadyDocIds.has(doc.id)) return false;
       return doc.content == null;
     };
 
@@ -2789,17 +2861,27 @@ export async function startBackendWorkbench(): Promise<void> {
             sheetNamePlaceholder: t("structured.table.sheetNamePlaceholder"),
           },
           locale: i18n.locale,
-          onChange: (nextContent) => {
-            if (active.id !== doc.id) return;
+          onChange: (nextContent, viewBaseContent) => {
+            if (active.id !== doc.id) return nextContent;
             if (isCreatePendingDocId(doc.id) || isCreatePendingDocId(active.id)) {
               stageOptimisticCreatePatch(optimisticCreatePatches, doc.id, { content: nextContent });
               commitLocalEdit(doc.id, { content: nextContent });
-              return;
+              return nextContent;
             }
-            const previousContent = normalizedContentForDoc(active) as TableDocumentContent;
+            const previousContent = viewBaseContent;
             const expectedRevision = active.revision;
+            if (!collaborationReadyDocIds.has(doc.id)) {
+              // Until the canonical CRDT lineage arrives, the rendered REST
+              // body is authoritative. Applying a delta to the newly-created
+              // empty Y.Doc would erase every untouched cell.
+              commitLocalEdit(doc.id, { content: nextContent });
+              scheduleDocSave(doc.id, expectedRevision, { content: nextContent }, active.title, "", "", 180, {
+                content: previousContent,
+              });
+              return nextContent;
+            }
             const collaborator = getStructuredCollaboratorForDoc(doc);
-            collaborator.applyLocalContent(nextContent);
+            collaborator.applyLocalContent(nextContent, viewBaseContent);
             const convergedContent = collaborator.getContent();
             saveCollaborativeSnapshot(
               collaborativeMarkdownSnapshotKey(workspaceId, doc.id),
@@ -2809,6 +2891,7 @@ export async function startBackendWorkbench(): Promise<void> {
             scheduleDocSave(doc.id, expectedRevision, { content: convergedContent }, active.title, "", "", 180, {
               content: previousContent,
             });
+            return convergedContent as TableDocumentContent;
           },
         });
         tableView = view;
@@ -2860,17 +2943,26 @@ export async function startBackendWorkbench(): Promise<void> {
               paused: t("structured.board.statusPaused"),
             },
           },
-          onChange: (nextContent) => {
-            if (active.id !== doc.id) return;
+          onChange: (nextContent, viewBaseContent) => {
+            if (active.id !== doc.id) return nextContent;
             if (isCreatePendingDocId(doc.id) || isCreatePendingDocId(active.id)) {
               stageOptimisticCreatePatch(optimisticCreatePatches, doc.id, { content: nextContent });
               commitLocalEdit(doc.id, { content: nextContent });
-              return;
+              return nextContent;
             }
-            const previousContent = normalizedContentForDoc(active) as BoardDocumentContent;
+            const previousContent = viewBaseContent;
             const expectedRevision = active.revision;
+            if (!collaborationReadyDocIds.has(doc.id)) {
+              // Keep the hydrated board as the edit base while realtime state
+              // is joining; an empty collaborator must never replace cards.
+              commitLocalEdit(doc.id, { content: nextContent });
+              scheduleDocSave(doc.id, expectedRevision, { content: nextContent }, active.title, "", "", 180, {
+                content: previousContent,
+              });
+              return nextContent;
+            }
             const collaborator = getStructuredCollaboratorForDoc(doc);
-            collaborator.applyLocalContent(nextContent);
+            collaborator.applyLocalContent(nextContent, viewBaseContent);
             const convergedContent = collaborator.getContent();
             saveCollaborativeSnapshot(
               collaborativeMarkdownSnapshotKey(workspaceId, doc.id),
@@ -2880,6 +2972,7 @@ export async function startBackendWorkbench(): Promise<void> {
             scheduleDocSave(doc.id, expectedRevision, { content: convergedContent }, active.title, "", "", 180, {
               content: previousContent,
             });
+            return convergedContent as BoardDocumentContent;
           },
         });
         boardView = view;
@@ -2918,8 +3011,14 @@ export async function startBackendWorkbench(): Promise<void> {
       }
       if (active.kind === "table" || active.kind === "board") {
         editor.bindCollaborator(undefined);
-        setCollaborationSurfacePending(active, false);
-        stopActiveCollaborativeTransport();
+        if (!hydratedDocIds.has(active.id) && active.content == null) {
+          setCollaborationSurfacePending(active, true);
+          stopActiveCollaborativeTransport();
+          return;
+        }
+        getStructuredCollaboratorForDoc(active);
+        setCollaborationSurfacePending(active, !collaborationReadyDocIds.has(active.id));
+        void startCollaborativeTransport(active).catch(() => undefined);
         return;
       }
       if (active.kind !== "page" || active.id === WELCOME_DOC_ID) {
@@ -2927,10 +3026,11 @@ export async function startBackendWorkbench(): Promise<void> {
         stopActiveCollaborativeTransport();
         return;
       }
-      if (!hydratedDocIds.has(active.id) && !active.markdown) {
-        // Tree entries intentionally omit document bodies. Do not create or publish a
-        // blank CRDT state before the authoritative item body has arrived.
+      if (!hydratedDocIds.has(active.id)) {
+        // Tree entries intentionally omit document bodies. Even a non-empty
+        // summary/local value is not authoritative enough to seed or bind Yjs.
         editor.bindCollaborator(undefined);
+        setMarkdownBodyLoading(true);
         stopActiveCollaborativeTransport();
         return;
       }
@@ -3035,9 +3135,7 @@ export async function startBackendWorkbench(): Promise<void> {
         }
         const activeCollaborator = nextPatch.markdown !== undefined
           ? markdownCollaborator
-          : nextPatch.content !== undefined
-            ? structuredCollaborator
-            : undefined;
+          : undefined;
         const collaborativeUpdate = activeCollaborator
           && collaborationReadyDocIds.has(itemId)
           && pendingUpdateCount > 0
@@ -3441,6 +3539,7 @@ export async function startBackendWorkbench(): Promise<void> {
       pageKindTag.textContent = docKindLabel(active);
       if (active.kind === "welcome") {
         mentionPicker.close();
+        setMarkdownBodyLoading(false);
         markdownHost.hidden = false;
         structuredHost.hidden = true;
         editor?.bindCollaborator(undefined);
@@ -3449,14 +3548,17 @@ export async function startBackendWorkbench(): Promise<void> {
       }
       if (active.kind === "table" || active.kind === "board") {
         mentionPicker.close();
+        setMarkdownBodyLoading(false);
         markdownHost.hidden = true;
         structuredHost.hidden = false;
         editor?.bindCollaborator(undefined);
         renderStructuredSurface(active);
+        bindEditorToActiveDoc();
         return;
       }
       if (active.kind === "folder") {
         mentionPicker.close();
+        setMarkdownBodyLoading(false);
         markdownHost.hidden = true;
         structuredHost.hidden = false;
         editor?.bindCollaborator(undefined);
@@ -3467,11 +3569,19 @@ export async function startBackendWorkbench(): Promise<void> {
       structuredHost.hidden = true;
       if (active.kind !== "page" || active.id === ROOT_FOLDER_ID) {
         mentionPicker.close();
+        setMarkdownBodyLoading(false);
         editor?.bindCollaborator(undefined);
         editor?.setMarkdown("", true);
         return;
       }
       bindEditorToActiveDoc();
+      if (!hydratedDocIds.has(active.id)) {
+        // Keep the previously mounted Vditor invisible until this page's full
+        // body arrives. Rendering its old body (or a tree-summary blank) is the
+        // source of the wrong-content-then-correct-content flash.
+        return;
+      }
+      setMarkdownBodyLoading(false);
       const currentMarkdown = editor?.getMarkdown() ?? "";
       const shouldPreserveFocusedEditorDrift = Boolean(
         !isActivePageComposing &&
@@ -3541,6 +3651,7 @@ export async function startBackendWorkbench(): Promise<void> {
           "workspace-settings": "workspace.settings",
           "member-profile": "workspace.member.profile",
           "member-join": "workspace.member.join",
+          "workspace-password-change": "workspace.security.password",
         };
         const snapshotFromRevision = (snapshot: Record<string, unknown>): LocalHistorySnapshot => ({
           ...(typeof snapshot.title === "string" ? { title: snapshot.title } : {}),
@@ -4072,8 +4183,36 @@ export async function startBackendWorkbench(): Promise<void> {
       saveStatus(saveStatusEl, t("status.synced"));
     };
 
-    const hydrateStructuredDocInPlace = (doc: WorkspaceDoc, cached: WorkspaceDoc): void => {
-      void (async () => {
+    const structuredHydrationInFlight = new Map<string, Promise<void>>();
+    const markdownHydrationInFlight = new Map<string, Promise<WorkspaceDoc>>();
+
+    const hydrateMarkdownDocInPlace = (doc: WorkspaceDoc, cached: WorkspaceDoc): Promise<WorkspaceDoc> => {
+      const existingHydration = markdownHydrationInFlight.get(doc.id);
+      if (existingHydration) return existingHydration;
+      const hydration = (async () => {
+        const full = hydratedDocIds.has(doc.id)
+          ? (localCollaborativeDocCache.get(doc.id) ?? cached)
+          : await session.loadItem(doc.id);
+        const hydrated = normalizeLoadedDoc(await hydrateDocWithLocalDraft(full));
+        markDocHydrated(doc.id);
+        if (!dirtyDocIds.has(doc.id)) {
+          updateDocById(doc.id, () => hydrated);
+        }
+        return hydrated;
+      })().finally(() => {
+        if (markdownHydrationInFlight.get(doc.id) === hydration) {
+          markdownHydrationInFlight.delete(doc.id);
+        }
+      });
+      markdownHydrationInFlight.set(doc.id, hydration);
+      return hydration;
+    };
+
+    const hydrateStructuredDocInPlace = (doc: WorkspaceDoc, cached: WorkspaceDoc): Promise<void> => {
+      const existingHydration = structuredHydrationInFlight.get(doc.id);
+      if (existingHydration) return existingHydration;
+      const hydration = (async () => {
+        const hydrationGeneration = localEditGenerationByDoc.get(doc.id) ?? 0;
         const needsRemoteLoad = !dirtyDocIds.has(doc.id) && (
           !hydratedDocIds.has(doc.id) || (cached.revision ?? 0) < (doc.revision ?? 0) || cached.content == null
         );
@@ -4081,6 +4220,17 @@ export async function startBackendWorkbench(): Promise<void> {
           ? await session.loadItem(doc.id)
           : (localCollaborativeDocCache.get(doc.id) ?? cached);
         markDocHydrated(doc.id);
+        const hasEditDuringHydration = hasNewerLocalEditGeneration(
+          hydrationGeneration,
+          localEditGenerationByDoc.get(doc.id) ?? 0,
+        );
+        if (hasEditDuringHydration || dirtyDocIds.has(doc.id)) {
+          if (active.id === doc.id) {
+            syncEditorWithActive();
+            renderAll();
+          }
+          return;
+        }
         const normalizedContent = normalizedContentForDoc(full);
         updateDocById(doc.id, (current) => ({
           ...current,
@@ -4100,7 +4250,34 @@ export async function startBackendWorkbench(): Promise<void> {
           syncEditorWithActive();
           renderAll();
         }
-      })().catch((error) => notifyError(error));
+      })()
+        .catch((error) => notifyError(error))
+        .finally(() => {
+          if (structuredHydrationInFlight.get(doc.id) === hydration) {
+            structuredHydrationInFlight.delete(doc.id);
+          }
+        });
+      structuredHydrationInFlight.set(doc.id, hydration);
+      return hydration;
+    };
+
+    const prefetchStructuredDoc = (doc: WorkspaceDoc): void => {
+      if (!isStructuredDoc(doc) || doc.inTrash || dirtyDocIds.has(doc.id)) return;
+      const cached = localCollaborativeDocCache.get(doc.id)
+        ?? workspace.docs.find((item) => item.id === doc.id)
+        ?? doc;
+      if (hydratedDocIds.has(doc.id) && cached.content != null && cached.revision >= doc.revision) return;
+      void hydrateStructuredDocInPlace(doc, cached);
+    };
+
+    const prefetchMarkdownDoc = (doc: WorkspaceDoc): void => {
+      if (doc.kind !== "page" || doc.inTrash || dirtyDocIds.has(doc.id) || hydratedDocIds.has(doc.id)) return;
+      const cached = localCollaborativeDocCache.get(doc.id)
+        ?? workspace.docs.find((item) => item.id === doc.id)
+        ?? doc;
+      // Intent prefetch is deliberately silent. A failed hover must not show an
+      // error toast; the click path retries and reports any real navigation error.
+      void hydrateMarkdownDocInPlace(doc, cached).catch(() => undefined);
     };
 
     const switchActiveDoc = (doc: WorkspaceDoc): void => {
@@ -4108,6 +4285,7 @@ export async function startBackendWorkbench(): Promise<void> {
         flushPendingDocSave(active.id);
       }
       if (doc.kind === "welcome") {
+        setMarkdownBodyLoading(false);
         const next = { ...doc, markdown: buildLocalizedWelcomeMarkdown(workspace) };
         replaceDoc(next);
         syncEditorWithActive();
@@ -4116,6 +4294,7 @@ export async function startBackendWorkbench(): Promise<void> {
       }
 
       if (isStructuredDoc(doc) || doc.kind === "folder") {
+        setMarkdownBodyLoading(false);
         const cached = localCollaborativeDocCache.get(doc.id) ?? workspace.docs.find((item) => item.id === doc.id) ?? doc;
         replaceDoc(cached);
         stopActiveCollaborativeTransport();
@@ -4127,31 +4306,27 @@ export async function startBackendWorkbench(): Promise<void> {
       }
 
       const cached = localCollaborativeDocCache.get(doc.id) ?? workspace.docs.find((item) => item.id === doc.id) ?? doc;
-      const collaborator = getCollaboratorForDoc(normalizeLoadedDoc(cached));
-      const initialMarkdown = collaborationReadyDocIds.has(doc.id)
-        ? collaborator.getMarkdown()
+      const needsMarkdownHydration = !hydratedDocIds.has(doc.id);
+      const existingCollaborator = needsMarkdownHydration
+        ? collaborativeMarkdownDocs.get(doc.id)
+        : getCollaboratorForDoc(normalizeLoadedDoc(cached));
+      const initialMarkdown = collaborationReadyDocIds.has(doc.id) && existingCollaborator
+        ? existingCollaborator.getMarkdown()
         : cached.markdown;
       replaceDoc({
         ...cached,
         markdown: initialMarkdown,
       });
-      bindEditorToActiveDoc();
-      if (editor && shouldResyncEditorMarkdown(editor.getMarkdown(), initialMarkdown)) {
-        editor.setMarkdown(initialMarkdown, true);
-      }
+      setMarkdownBodyLoading(needsMarkdownHydration);
       syncEditorWithActive();
       renderAll();
 
       void (async () => {
-        const full = hydratedDocIds.has(doc.id)
-          ? (localCollaborativeDocCache.get(doc.id) ?? cached)
-          : await session.loadItem(doc.id);
-        markDocHydrated(doc.id);
-        const hydrated = normalizeLoadedDoc(await hydrateDocWithLocalDraft(full));
+        const hydrated = await hydrateMarkdownDocInPlace(doc, cached);
         const collaborator = getCollaboratorForDoc(doc);
         const hydratedMarkdown = hydrated.markdown;
         const isActiveDocComposing = active.id === doc.id && editor?.isComposing() === true;
-        const editorMarkdownDuringHydration = active.id === doc.id && editor
+        const editorMarkdownDuringHydration = !needsMarkdownHydration && active.id === doc.id && editor
           ? editor.getMarkdown()
           : null;
         const hasUntrackedHydrationEdit = Boolean(
@@ -4160,11 +4335,9 @@ export async function startBackendWorkbench(): Promise<void> {
           && !dirtyDocIds.has(doc.id),
         );
         if (hasUntrackedHydrationEdit && editorMarkdownDuringHydration !== null) {
-          // A tree row can be selected before its body request finishes. The
-          // editor remains intentionally interactive, so capture any text typed
-          // in that window before the hydration result can repaint the surface.
-          // This is the only safe fallback for the short pre-binding window;
-          // once joined, normal editor input -> Yjs binding is the sole writer.
+          // Preserve edits made while refreshing an already hydrated page.
+          // First-time hydration is inert and hidden, so the mounted editor can
+          // never mistake the previously active page for an edit to this one.
           collaborator.applyLocalMarkdown(editorMarkdownDuringHydration);
           commitLocalEdit(doc.id, { markdown: editorMarkdownDuringHydration });
           pendingHydrationMarkdownSaves.set(doc.id, {
@@ -4203,10 +4376,19 @@ export async function startBackendWorkbench(): Promise<void> {
             editor.setMarkdown(nextMarkdown, true);
           }
           syncEditorWithActive();
+          setMarkdownBodyLoading(false);
           renderAll();
         }
         void imageSync?.warmMarkdowns([collaborator.getMarkdown()]).catch(() => undefined);
-      })();
+      })().catch((error) => {
+        if (active.id === doc.id) {
+          // Never reveal the still-mounted body from the previously active
+          // page after a failed first load. The user can retry by selecting the
+          // page again; the toast explains why it remains unavailable.
+          setMarkdownBodyLoading(true);
+        }
+        notifyError(error);
+      });
     };
 
     const onDropToPosition = (targetParentId: string | null, beforeId: string | null, draggedId: string) => {
@@ -4339,6 +4521,19 @@ export async function startBackendWorkbench(): Promise<void> {
           }
           switchActiveDoc(doc);
         });
+        if (!opts.showTrashActions && isStructuredDoc(doc)) {
+          // Start the body request as soon as the user shows intent. The click
+          // path shares the same in-flight promise, so this never duplicates a
+          // backend read and usually removes the network wait from navigation.
+          btn.addEventListener("pointerenter", () => prefetchStructuredDoc(doc), { once: true });
+          btn.addEventListener("focus", () => prefetchStructuredDoc(doc), { once: true });
+        }
+        if (!opts.showTrashActions && doc.kind === "page") {
+          // Markdown uses the same shared in-flight hydration as navigation, so
+          // ordinary pointer/focus intent usually has the body ready by click.
+          btn.addEventListener("pointerenter", () => prefetchMarkdownDoc(doc), { once: true });
+          btn.addEventListener("focus", () => prefetchMarkdownDoc(doc), { once: true });
+        }
 
         if (!opts.showTrashActions && doc.kind !== "welcome" && doc.id !== ROOT_FOLDER_ID) {
           btn.draggable = true;
@@ -4695,14 +4890,14 @@ export async function startBackendWorkbench(): Promise<void> {
       }, delayMs);
     };
 
-    const flushPendingDocSave = (itemId: string): void => {
+    const flushPendingDocSave = (itemId: string): Promise<void> => {
       const current = pendingDocSaves.get(itemId);
-      if (!current) return;
+      if (!current) return Promise.resolve();
       if (current.timer !== undefined) {
         window.clearTimeout(current.timer);
       }
       pendingDocSaves.delete(itemId);
-      void (async () => {
+      return (async () => {
         const draftPatch = current.patch;
         if (draftPatch.content !== undefined) {
           queueSaveRequest({
@@ -4836,6 +5031,7 @@ export async function startBackendWorkbench(): Promise<void> {
     });
     searchInput.addEventListener("input", () => renderAll());
 
+    let workspaceOtherMemberCount = 0;
     const refreshWorkspaceInfoPanel = async (): Promise<void> => {
       workspaceInfoIdEl.textContent = workspaceId;
       workspaceInfoUserIdEl.textContent = identity.userId;
@@ -4845,10 +5041,14 @@ export async function startBackendWorkbench(): Promise<void> {
       workspaceInfoWorkspaceNameInput.disabled = false;
       workspaceInfoSaveWorkspaceNameBtn.disabled = false;
       workspaceInfoWorkspaceNameInput.value = workspace.workspaceTitle.trim();
+      workspaceInfoPasswordSection.hidden = true;
+      workspaceInfoPasswordStatus.textContent = "";
       try {
         await refreshJoinedMembers();
         const serverMembers = await session.listMembers().catch(() => []);
         const currentMember = serverMembers.find((member) => member.user_id === identity.userId);
+        workspaceOtherMemberCount = Math.max(0, serverMembers.length - 1);
+        workspaceInfoPasswordSection.hidden = currentMember?.is_owner !== true;
         participantRevision = currentMember?.revision ?? participantRevision;
         workspaceInfoNicknameInput.value = participantNickname || currentMember?.nickname || "";
         workspaceInfoProfileStatus.textContent = t("drawer.profile.currentNickname", {
@@ -4895,7 +5095,7 @@ export async function startBackendWorkbench(): Promise<void> {
       closeMessageDrawer();
       const browserSkillUrl = getRuntimeUrl("agent/SKILL.md");
       const backendSkillUrl = new URL("/agent/SKILL.md", JUSTWORK_BACKEND_URL).toString();
-      connectAgentPromptText.value = buildConnectAgentPrompt(workspaceId, password, rememberWorkspacePassword);
+      connectAgentPromptText.value = buildConnectAgentPrompt(workspaceId, workspacePassword, rememberWorkspacePassword);
       connectAgentDownloadSkillLink.href = browserSkillUrl;
       connectAgentBackendSkillLink.href = backendSkillUrl;
       connectAgentDialogRoot.classList.add("is-open");
@@ -4941,6 +5141,90 @@ export async function startBackendWorkbench(): Promise<void> {
 
     workspaceInfoCopyIdBtn.addEventListener("click", () => void copyViaClipboard(workspaceId));
     workspaceInfoCopyUserIdBtn.addEventListener("click", () => void copyViaClipboard(identity.userId));
+
+    workspaceInfoChangePasswordBtn.addEventListener("click", () => {
+      void (async () => {
+        const nextPassword = workspaceInfoNewPasswordInput.value;
+        const confirmedPassword = workspaceInfoConfirmPasswordInput.value;
+        if (!nextPassword) {
+          workspaceInfoPasswordStatus.textContent = t("drawer.profile.passwordRequired");
+          workspaceInfoNewPasswordInput.focus();
+          return;
+        }
+        if (nextPassword !== confirmedPassword) {
+          workspaceInfoPasswordStatus.textContent = t("drawer.profile.passwordMismatch");
+          workspaceInfoConfirmPasswordInput.focus();
+          workspaceInfoConfirmPasswordInput.select();
+          return;
+        }
+        if (nextPassword === workspacePassword) {
+          workspaceInfoPasswordStatus.textContent = t("drawer.profile.passwordUnchanged");
+          workspaceInfoNewPasswordInput.focus();
+          workspaceInfoNewPasswordInput.select();
+          return;
+        }
+        const confirmed = window.confirm(t("drawer.profile.passwordConfirm", {
+          count: workspaceOtherMemberCount,
+        }));
+        if (!confirmed) return;
+
+        workspaceInfoChangePasswordBtn.disabled = true;
+        workspaceInfoNewPasswordInput.disabled = true;
+        workspaceInfoConfirmPasswordInput.disabled = true;
+        workspaceInfoChangePasswordBtn.setAttribute("aria-busy", "true");
+        workspaceInfoPasswordStatus.textContent = t("drawer.profile.passwordChanging");
+        try {
+          const pendingIds = [...pendingDocSaves.keys()];
+          await Promise.all(pendingIds.map((itemId) => flushPendingDocSave(itemId)));
+          await waitForAllDocSaveQueuesToSettle();
+          stopActiveCollaborativeTransport();
+          imageSync?.disconnect();
+
+          const changed = await session.changePassword(nextPassword, workspaceRevision);
+          workspaceRevision = changed.revision;
+          workspacePassword = nextPassword;
+          const now = new Date().toISOString();
+          await Promise.all([
+            rememberWorkspacePassword
+              ? setRememberedWorkspacePassword(workspaceId, workspacePassword)
+              : removeRememberedWorkspacePassword(workspaceId),
+            replaceWorkspaceJoinedMembers(localStorageArea, workspaceId, [{
+              memberKey: `user:${identity.userId}`,
+              displayName: participantNickname || identity.userId,
+              userId: identity.userId,
+              firstSeenAt: now,
+              lastSeenAt: now,
+              source: "profile",
+            }]),
+          ]).catch(() => undefined);
+          workspaceInfoNewPasswordInput.value = "";
+          workspaceInfoConfirmPasswordInput.value = "";
+          const successMessage = t("drawer.profile.passwordChanged", {
+            count: changed.removedMemberCount,
+          });
+          workspaceInfoPasswordStatus.textContent = successMessage;
+          window.alert(successMessage);
+          window.location.reload();
+        } catch (error) {
+          if (error instanceof BackendApiError && error.code === "conflict") {
+            const latestTree = await session.loadTree().catch(() => null);
+            if (latestTree) {
+              treeData = latestTree;
+              workspaceRevision = latestTree.workspace_revision;
+            }
+          }
+          void imageSync?.connect().catch(() => undefined);
+          void startCollaborativeTransport(active).catch(() => undefined);
+          workspaceInfoPasswordStatus.textContent = "";
+          notifyError(error);
+        } finally {
+          workspaceInfoChangePasswordBtn.disabled = false;
+          workspaceInfoNewPasswordInput.disabled = false;
+          workspaceInfoConfirmPasswordInput.disabled = false;
+          workspaceInfoChangePasswordBtn.removeAttribute("aria-busy");
+        }
+      })();
+    });
 
     workspaceInfoSaveNicknameBtn.addEventListener("click", () => {
       void (async () => {
@@ -5375,6 +5659,17 @@ export async function startBackendWorkbench(): Promise<void> {
       const cached = localCollaborativeDocCache.get(active.id) ?? active;
       hydrateStructuredDocInPlace(active, cached);
     }
+    // Tree responses intentionally contain summaries only. Warm the single
+    // most recently visited table immediately after unlock so the common first
+    // table navigation does not wait on a 1-3 second production round trip.
+    // Other structured documents remain event-driven via pointer/focus intent.
+    const recentTable = workspace.docs
+      .filter((doc) => doc.kind === "table" && !doc.inTrash && doc.id !== active.id)
+      .sort((left, right) => (
+        Number(right.pinned) - Number(left.pinned)
+        || Date.parse(right.lastVisitedAt || "") - Date.parse(left.lastVisitedAt || "")
+      ))[0];
+    if (recentTable) prefetchStructuredDoc(recentTable);
     void pullQuota();
     if (workspaceSyncTimer !== undefined) {
       window.clearInterval(workspaceSyncTimer);

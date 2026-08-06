@@ -951,6 +951,16 @@ body {
   color: #777;
   line-height: 1.45;
 }
+.workspace-info-warning {
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border: 1px solid #e8c5c0;
+  border-radius: 8px;
+  background: #fff3f1;
+  color: #8d3027;
+  font-size: 12px;
+  line-height: 1.5;
+}
 .workspace-info-em {
   font-weight: 600;
   color: #444;
@@ -982,6 +992,14 @@ body {
 }
 .workspace-info-save-btn {
   width: auto;
+}
+.workspace-info-danger-btn {
+  border-color: #c95a50;
+  color: #9b3028;
+}
+.workspace-info-danger-btn:hover:not(:disabled) {
+  border-color: #aa4036;
+  background: #fff0ee;
 }
 .workspace-info-status {
   margin: 10px 0 0;
@@ -1613,6 +1631,21 @@ body {
   width: 100%;
   min-height: 100%;
 }
+.doc-editor-surface--markdown {
+  position: relative;
+  min-height: 360px;
+}
+.doc-editor-surface--markdown.is-body-loading > * {
+  visibility: hidden;
+}
+.doc-editor-surface--markdown.is-body-loading::after {
+  content: attr(data-loading-label);
+  position: absolute;
+  inset: 12px auto auto 0;
+  color: #777;
+  font-size: 14px;
+  line-height: 1.5;
+}
 .doc-editor-surface[hidden] {
   display: none !important;
 }
@@ -1815,6 +1848,7 @@ body {
   border: 1px solid #c5ccd7;
   border-radius: 6px;
   overflow: hidden;
+  isolation: isolate;
   background: #fff;
   box-shadow: none;
 }
@@ -1855,8 +1889,9 @@ body {
 }
 .structured-sheet-composer-popover {
   position: absolute;
-  left: 0;
-  bottom: 34px;
+  left: 14px;
+  bottom: 42px;
+  z-index: 50;
   display: none;
   min-width: 230px;
   padding: 10px;
@@ -1865,7 +1900,7 @@ body {
   background: rgba(255, 255, 255, 0.98);
   box-shadow: 0 16px 36px rgba(20, 24, 30, 0.12);
 }
-.structured-sheet-composer[data-open="true"] .structured-sheet-composer-popover {
+.structured-sheet-composer-popover[data-open="true"] {
   display: grid;
   gap: 10px;
 }

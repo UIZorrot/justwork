@@ -123,6 +123,21 @@ export async function upsertWorkspaceJoinedMembers(
   return next;
 }
 
+export async function replaceWorkspaceJoinedMembers(
+  storage: StorageAreaLike,
+  workspaceId: string,
+  members: WorkspaceJoinedMember[],
+): Promise<WorkspaceJoinedMember[]> {
+  const map = await loadMemberDirectoryMap(storage);
+  const next = members
+    .map(normalizeJoinedMember)
+    .filter((member): member is WorkspaceJoinedMember => member !== null)
+    .sort((a, b) => a.displayName.localeCompare(b.displayName));
+  map[workspaceId] = next;
+  await saveMemberDirectoryMap(storage, map);
+  return next;
+}
+
 export async function loadWorkspaceJoinedMembersFromApi(
   client: BackendClient,
   workspaceId: string,

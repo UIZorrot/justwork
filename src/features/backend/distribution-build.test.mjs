@@ -17,6 +17,7 @@ test("web and extension distributions have independent build outputs", async () 
   assert.match(pkg.scripts.build, /build:extension.*build:web/);
   assert.match(releaseEnv, /VITE_JUSTWORK_BACKEND_URL=https:\/\/api\.tool\.justwork\.txzy\.net/);
   assert.match(webConfig, /dist-web/);
+  assert.match(webConfig, /envDir: rootDir/);
   assert.doesNotMatch(webConfig, /crx\(/);
   assert.match(extensionConfig, /crx\(\{ manifest \}\)/);
 });

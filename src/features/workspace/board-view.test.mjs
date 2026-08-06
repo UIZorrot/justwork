@@ -470,12 +470,52 @@ test("board view preserves focus when editing a template field name", async () =
   expandedField.dispatchEvent(new FakeEvent("input"));
 
   assert.equal(changes.at(-1).template.fields[0].name, "Che");
+  assert.equal(
+    document.activeElement,
+    expandedField,
+    "native text inputs must not be replaced while an IME composition may be active",
+  );
   assert.ok(document.activeElement);
   assert.equal(document.activeElement.className, "structured-board-field-name");
   assert.equal(document.activeElement.value, "Che");
   assert.notEqual(document.activeElement.parentNode, null);
   assert.equal(document.activeElement.selectionStart, 3);
   assert.equal(document.activeElement.selectionEnd, 3);
+});
+
+test("board view does not replace a card input during IME composition", async () => {
+  const documents = await loadTranspiledModule("src/features/workspace/structured-document.ts");
+  const mod = await loadTranspiledModule("src/features/workspace/board-view.ts");
+
+  const document = new FakeDocument();
+  const initial = documents.createDefaultBoardContent();
+  const view = mod.createBoardView({ document, content: initial });
+  const card = view.element
+    .querySelectorAll("article")
+    .find((element) => element.className.includes("structured-board-card") && !element.className.includes("--template"));
+  assert.ok(card);
+  card.click();
+
+  const titleInput = view.element
+    .querySelectorAll("input")
+    .find((input) => input.className === "structured-board-drawer-title");
+  assert.ok(titleInput);
+  titleInput.focus();
+  view.element.dispatchEvent(new FakeEvent("compositionstart"));
+
+  const external = structuredClone(initial);
+  const selected = external.cards.find((entry) => entry.id === card.dataset.cardId);
+  assert.ok(selected);
+  selected.title = "Remote title";
+  view.update(external);
+
+  assert.equal(document.activeElement, titleInput);
+  assert.equal(
+    view.element.querySelectorAll("input").includes(titleInput),
+    true,
+    "external refresh must be deferred until composition ends",
+  );
+  view.destroy?.();
 });
 
 test("board view keeps delete card in the drawer and renders delete column at the bottom of each column", async () => {

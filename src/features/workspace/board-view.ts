@@ -53,12 +53,17 @@ type Labels = {
 export type BoardViewOptions = {
   document: DocumentLike;
   content: BoardDocumentContent;
-  onChange?: (content: BoardDocumentContent) => void;
+  onChange?: (
+    content: BoardDocumentContent,
+    previousContent: BoardDocumentContent,
+  ) => BoardDocumentContent | void;
   showTemplateModule?: boolean;
   initialTemplateCollapsed?: boolean;
   onTemplateCollapsedChange?: (collapsed: boolean) => void;
   labels?: Partial<Labels>;
 };
+
+const EXTERNAL_BOARD_UPDATE_IDLE_MS = 500;
 
 export type BoardViewHandle = {
   element: HTMLElement;
@@ -237,6 +242,11 @@ export function createBoardView(options: BoardViewOptions): BoardViewHandle {
   let templateCollapsed = options.initialTemplateCollapsed ?? false;
   let sortables: SortableInstance[] = [];
   let sortableBindToken = 0;
+  let compositionActive = false;
+  let lastLocalInputAt = 0;
+  let deferredExternalContent: BoardDocumentContent | null = null;
+  let externalUpdateTimer: ReturnType<typeof setTimeout> | null = null;
+  let disposed = false;
 
   const labels: Labels = {
     addColumn: options.labels?.addColumn ?? "Add column",
@@ -286,6 +296,22 @@ export function createBoardView(options: BoardViewOptions): BoardViewHandle {
   const root = options.document.createElement("div") as HTMLElement;
   root.className = "structured-surface structured-board-layout";
 
+  root.addEventListener("compositionstart", () => {
+    compositionActive = true;
+    lastLocalInputAt = Date.now();
+  });
+  root.addEventListener("compositionend", () => {
+    compositionActive = false;
+    lastLocalInputAt = Date.now();
+  });
+
+  const clearExternalUpdateTimer = (): void => {
+    if (externalUpdateTimer !== null) {
+      clearTimeout(externalUpdateTimer);
+      externalUpdateTimer = null;
+    }
+  };
+
   const destroySortables = (): void => {
     for (const sortable of sortables) sortable.destroy();
     sortables = [];
@@ -299,13 +325,31 @@ export function createBoardView(options: BoardViewOptions): BoardViewHandle {
     Boolean(cardId && current.template.cardIds.includes(cardId))
   );
 
-  const emit = (next: BoardDocumentContent): void => {
+  const emit = (
+    next: BoardDocumentContent,
+    renderView = true,
+    localTextInput = false,
+  ): void => {
+    const previousContent = current;
     current = normalizeStructuredDocumentContent("board", next) as BoardDocumentContent;
     if (selectedCardId && !current.cards.some((card) => card.id === selectedCardId)) {
       selectedCardId = null;
     }
-    render();
-    options.onChange?.(current);
+    if (localTextInput) lastLocalInputAt = Date.now();
+    const converged = options.onChange?.(current, previousContent);
+    if (converged && typeof converged === "object" && converged.kind === "board") {
+      current = normalizeStructuredDocumentContent("board", converged) as BoardDocumentContent;
+      deferredExternalContent = null;
+      clearExternalUpdateTimer();
+    }
+    if (renderView) render();
+  };
+
+  const emitTextInput = (next: BoardDocumentContent): void => {
+    // Replacing the focused input terminates the browser's IME composition
+    // session. The native input already contains the latest value, so update
+    // state/collaboration without rebuilding the board on every keystroke.
+    emit(next, false, true);
   };
 
   const bindSortables = async (lists: HTMLElement[]): Promise<void> => {
@@ -437,7 +481,7 @@ export function createBoardView(options: BoardViewOptions): BoardViewHandle {
           "structured-board-drawer-title",
           card.title,
           (value) => {
-            emit(updateBoardCardTitle(current, card.id, value));
+            emitTextInput(updateBoardCardTitle(current, card.id, value));
           },
           false,
           `card-title:${card.id}`,
@@ -453,7 +497,7 @@ export function createBoardView(options: BoardViewOptions): BoardViewHandle {
           "structured-board-field-name",
           field.name,
           (value) => {
-            emit(updateBoardTemplateField(current, field.templateFieldId ?? field.id, { name: value }));
+            emitTextInput(updateBoardTemplateField(current, field.templateFieldId ?? field.id, { name: value }));
           },
           false,
           `template-field-name:${field.templateFieldId ?? field.id}`,
@@ -463,7 +507,7 @@ export function createBoardView(options: BoardViewOptions): BoardViewHandle {
           "structured-board-field-value",
           field.value,
           (value) => {
-            emit(updateBoardCardField(current, card.id, field.id, { value }));
+            emitTextInput(updateBoardCardField(current, card.id, field.id, { value }));
           },
           `template-field-value:${card.id}:${field.id}`,
         ));
@@ -510,7 +554,7 @@ export function createBoardView(options: BoardViewOptions): BoardViewHandle {
         "structured-board-drawer-title",
         card.title,
         (value) => {
-          emit(updateBoardCardTitle(current, card.id, value));
+          emitTextInput(updateBoardCardTitle(current, card.id, value));
         },
         false,
         `card-title:${card.id}`,
@@ -528,7 +572,7 @@ export function createBoardView(options: BoardViewOptions): BoardViewHandle {
           field.name,
           (value) => {
             if (field.templateFieldId) return;
-            emit(updateBoardCardField(current, card.id, field.id, { name: value }));
+            emitTextInput(updateBoardCardField(current, card.id, field.id, { name: value }));
           },
           Boolean(field.templateFieldId),
           `card-field-name:${card.id}:${field.id}`,
@@ -538,7 +582,7 @@ export function createBoardView(options: BoardViewOptions): BoardViewHandle {
           "structured-board-field-value",
           field.value,
           (value) => {
-            emit(updateBoardCardField(current, card.id, field.id, { value }));
+            emitTextInput(updateBoardCardField(current, card.id, field.id, { value }));
           },
           `card-field-value:${card.id}:${field.id}`,
         ),
@@ -643,7 +687,7 @@ export function createBoardView(options: BoardViewOptions): BoardViewHandle {
         "structured-board-column-title",
         column.title,
         (value) => {
-          emit(renameBoardColumn(current, column.id, value));
+          emitTextInput(renameBoardColumn(current, column.id, value));
         },
         false,
         `column-title:${column.id}`,
@@ -734,13 +778,33 @@ export function createBoardView(options: BoardViewOptions): BoardViewHandle {
   return {
     element: root,
     update(content: BoardDocumentContent) {
-      current = normalizeStructuredDocumentContent("board", content) as BoardDocumentContent;
+      const normalized = normalizeStructuredDocumentContent("board", content) as BoardDocumentContent;
+      if (JSON.stringify(normalized) === JSON.stringify(current)) return;
+      const remainingIdleMs = EXTERNAL_BOARD_UPDATE_IDLE_MS - (Date.now() - lastLocalInputAt);
+      if (compositionActive || remainingIdleMs > 0) {
+        deferredExternalContent = normalized;
+        clearExternalUpdateTimer();
+        externalUpdateTimer = setTimeout(() => {
+          externalUpdateTimer = null;
+          const deferred = deferredExternalContent;
+          deferredExternalContent = null;
+          if (deferred && !disposed) this.update(deferred);
+        }, compositionActive
+          ? EXTERNAL_BOARD_UPDATE_IDLE_MS
+          : Math.max(50, remainingIdleMs));
+        return;
+      }
+      deferredExternalContent = null;
+      clearExternalUpdateTimer();
+      current = normalized;
       if (selectedCardId && !current.cards.some((card) => card.id === selectedCardId)) {
         selectedCardId = null;
       }
       render();
     },
     destroy() {
+      disposed = true;
+      clearExternalUpdateTimer();
       sortableBindToken += 1;
       destroySortables();
     },
