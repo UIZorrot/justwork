@@ -28,6 +28,15 @@ test("editor initialization callbacks do not create a document save", async () =
   assert.equal(mod.isMeaningfulPageEdit("before", "after"), true);
 });
 
+test("hydration and reconnect never infer a user edit from editor DOM drift", async () => {
+  const mod = await loadTranspiledModule("src/features/collaboration/page-edit-persistence.ts");
+
+  assert.equal(mod.shouldReplayUnboundPageEdit("current", "very old", false, false), false);
+  assert.equal(mod.shouldReplayUnboundPageEdit("current", "very old", true, true), false);
+  assert.equal(mod.shouldReplayUnboundPageEdit("current", "current", false, true), false);
+  assert.equal(mod.shouldReplayUnboundPageEdit("current", "typed locally", false, true), true);
+});
+
 test("collaborative markdown never falls back to a whole-text REST save", async () => {
   const mod = await loadTranspiledModule("src/features/collaboration/page-edit-persistence.ts");
 

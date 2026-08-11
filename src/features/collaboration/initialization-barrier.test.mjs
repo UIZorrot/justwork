@@ -20,6 +20,15 @@ test("page collaboration waits for a canonical CRDT lineage before binding the e
   assert.match(source, /resetMarkdownCollaborator\(doc\)/);
   assert.doesNotMatch(source, /Promise\.all\(\[[\s\S]*joinCollaborativeMarkdown/);
   assert.match(source, /transport\.sendUpdate\(update\)/);
+  const transportBlock = /const startCollaborativeTransport = async \(doc: WorkspaceDoc\): Promise<void> => \{([\s\S]*?)\n    \};/.exec(source)?.[1] ?? "";
+  assert.match(
+    transportBlock,
+    /join\.bootstrap_owner[\s\S]*?hasUnboundBootstrapEdit \? bootstrapLocalMarkdown : bootstrapBaseMarkdown/,
+  );
+  assert.match(
+    transportBlock,
+    /replayedBootstrapEdit = hasUnboundBootstrapEdit && seedMarkdown !== bootstrapBaseMarkdown/,
+  );
   assert.doesNotMatch(source, /markdownHost\.inert\s*=\s*pending/);
   assert.doesNotMatch(source, /structuredHost\.inert\s*=\s*pending/);
   assert.match(source, /markdownHost\.inert\s*=\s*false/);
@@ -43,7 +52,8 @@ test("first-time Markdown navigation hides stale editor content until the full b
     switchBlock,
     /setMarkdownBodyLoading\(needsMarkdownHydration\);[\s\S]{0,240}?editor\.setMarkdown\(initialMarkdown/,
   );
-  assert.match(switchBlock, /editorMarkdownDuringHydration = !needsMarkdownHydration/);
+  assert.doesNotMatch(switchBlock, /editorMarkdownDuringHydration|hasUntrackedHydrationEdit/);
+  assert.doesNotMatch(switchBlock, /commitLocalEdit\(doc\.id, \{ markdown:/);
   assert.match(switchBlock, /editor\.setMarkdown\(nextMarkdown, true\);[\s\S]*?setMarkdownBodyLoading\(false\)/);
   assert.match(switchBlock, /const hydrated = await hydrateMarkdownDocInPlace\(doc, cached\)/);
   assert.match(switchBlock, /\.catch\(\(error\) => \{[\s\S]*?setMarkdownBodyLoading\(true\)/);

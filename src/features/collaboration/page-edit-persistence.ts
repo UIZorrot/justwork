@@ -22,6 +22,23 @@ export function isMeaningfulPageEdit(previousMarkdown: string, nextMarkdown: str
   return previousMarkdown !== nextMarkdown;
 }
 
+export function shouldReplayUnboundPageEdit(
+  baseMarkdown: string,
+  editorMarkdown: string,
+  collaborationReady: boolean,
+  hasPendingLocalEdit: boolean,
+): boolean {
+  // Editor DOM drift is not proof of user intent. Vditor normalization, a
+  // delayed programmatic render, hydration, or a room reconnect can all make
+  // the mounted surface differ from the canonical body while the user is idle.
+  // Only a previously recorded local edit may be replayed into a new lineage.
+  return (
+    !collaborationReady
+    && hasPendingLocalEdit
+    && isMeaningfulPageEdit(baseMarkdown, editorMarkdown)
+  );
+}
+
 export function shouldPersistCollaborativeMarkdown(
   hasCollaborator: boolean,
   collaborationReady: boolean,

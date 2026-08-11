@@ -125,6 +125,7 @@ import { overlayDirtyCollaborativeDocs } from "@/features/collaboration/dirty-do
 import {
   isMeaningfulPageEdit,
   planPageEditPersistence,
+  shouldReplayUnboundPageEdit,
   shouldPersistCollaborativeMarkdown,
 } from "@/features/collaboration/page-edit-persistence";
 import { shouldResetCollaborativeLineage } from "@/features/collaboration/room-epoch";
@@ -1808,6 +1809,7 @@ export async function startBackendWorkbench(): Promise<void> {
     setSidebarSectionCollapsed("pages", false);
     setSidebarSectionCollapsed("trash", false);
 
+    const dirtyDocIds = new Set<string>();
     if (active.kind === "page" || active.kind === "table" || active.kind === "board") {
       const fullActive = await session.loadItem(active.id);
       active = await hydrateDocWithLocalDraft({
@@ -1847,12 +1849,6 @@ export async function startBackendWorkbench(): Promise<void> {
     const collaborationReadyDocIds = new Set<string>();
     const collaborationEpochByDoc = new Map<string, string>();
     const pendingCollaborativeUpdatesByDoc = new Map<string, Uint8Array[]>();
-    const pendingHydrationMarkdownSaves = new Map<string, {
-      expectedRevision: number;
-      title: string;
-      previousMarkdown: string;
-      nextMarkdown: string;
-    }>();
     const cachedCollaborationEpochByDoc = new Map<string, string>();
     const collectLocalCollaborativeUpdates = (
       docId: string,
@@ -1977,19 +1973,6 @@ export async function startBackendWorkbench(): Promise<void> {
         saveCollaborativeSnapshotEpoch(collaborativeMarkdownSnapshotKey(workspaceId, doc.id), epoch);
       }
       setCollaborationSurfacePending(doc, false);
-      const pendingHydrationSave = pendingHydrationMarkdownSaves.get(doc.id);
-      if (pendingHydrationSave) {
-        pendingHydrationMarkdownSaves.delete(doc.id);
-        scheduleDocSave(
-          doc.id,
-          pendingHydrationSave.expectedRevision,
-          { markdown: pendingHydrationSave.nextMarkdown },
-          pendingHydrationSave.title,
-          pendingHydrationSave.previousMarkdown,
-          pendingHydrationSave.nextMarkdown,
-          0,
-        );
-      }
       if (active.id !== doc.id || doc.kind !== "page" || !editor || !hydratedDocIds.has(doc.id)) return;
       const collaborator = getCollaboratorForDoc(doc);
       editor.bindCollaborator({
@@ -2072,8 +2055,7 @@ export async function startBackendWorkbench(): Promise<void> {
       const latestLocalDoc = localCollaborativeDocCache.get(doc.id)
         ?? workspace.docs.find((candidate) => candidate.id === doc.id)
         ?? doc;
-      const pendingHydrationSave = pendingHydrationMarkdownSaves.get(doc.id);
-      const bootstrapEditBaseMarkdown = pendingHydrationSave?.previousMarkdown ?? bootstrapBaseMarkdown;
+      const bootstrapEditBaseMarkdown = bootstrapBaseMarkdown;
       const bootstrapLocalMarkdown = doc.kind === "page"
         ? active.id === doc.id && editor
           ? editor.getMarkdown()
@@ -2086,8 +2068,12 @@ export async function startBackendWorkbench(): Promise<void> {
         markdownCollaborator
         && bootstrapEditBaseMarkdown !== null
         && bootstrapLocalMarkdown !== null
-        && bootstrapLocalMarkdown !== bootstrapEditBaseMarkdown
-        && !collaborationReadyDocIds.has(doc.id),
+        && shouldReplayUnboundPageEdit(
+          bootstrapEditBaseMarkdown,
+          bootstrapLocalMarkdown,
+          collaborationReadyDocIds.has(doc.id),
+          dirtyDocIds.has(doc.id),
+        ),
       );
       let replayedBootstrapEdit = false;
       let bootstrapReplayBase = bootstrapEditBaseMarkdown ?? "";
@@ -2183,11 +2169,11 @@ export async function startBackendWorkbench(): Promise<void> {
       } else if (join.bootstrap_owner) {
         if (markdownCollaborator) {
           const seedMarkdown = stripAutoTitleHeading(
-            bootstrapLocalMarkdown ?? bootstrapBaseMarkdown ?? doc.markdown,
+            (hasUnboundBootstrapEdit ? bootstrapLocalMarkdown : bootstrapBaseMarkdown) ?? doc.markdown,
             doc.title,
           );
           markdownCollaborator.applyLocalMarkdown(seedMarkdown);
-          replayedBootstrapEdit = seedMarkdown !== bootstrapBaseMarkdown;
+          replayedBootstrapEdit = hasUnboundBootstrapEdit && seedMarkdown !== bootstrapBaseMarkdown;
         } else if (structuredCollaborator && (doc.kind === "table" || doc.kind === "board")) {
           structuredCollaborator.applyLocalContent(
             normalizeStructuredDocumentContent(doc.kind, doc.content ?? {}),
@@ -3049,7 +3035,6 @@ export async function startBackendWorkbench(): Promise<void> {
     };
 
     let treeRefreshTimer: number | undefined;
-    const dirtyDocIds = new Set<string>();
     const scheduleTreeRefresh = (delayMs = 4_000): void => {
       if (treeRefreshTimer !== undefined) {
         window.clearTimeout(treeRefreshTimer);
@@ -3384,7 +3369,9 @@ export async function startBackendWorkbench(): Promise<void> {
       if (doc.id === WELCOME_DOC_ID || doc.id === ROOT_FOLDER_ID) return doc;
       const draft = await getBackendDocDraft(workspaceId, doc.id);
       if (!draft) return doc;
-      return applyBackendDocDraft(doc, draft);
+      const drafted = applyBackendDocDraft(doc, draft);
+      if (drafted !== doc) dirtyDocIds.add(doc.id);
+      return drafted;
     }
 
     const refreshWorkspaceFromRemote = async (): Promise<void> => {
@@ -4326,29 +4313,6 @@ export async function startBackendWorkbench(): Promise<void> {
         const collaborator = getCollaboratorForDoc(doc);
         const hydratedMarkdown = hydrated.markdown;
         const isActiveDocComposing = active.id === doc.id && editor?.isComposing() === true;
-        const editorMarkdownDuringHydration = !needsMarkdownHydration && active.id === doc.id && editor
-          ? editor.getMarkdown()
-          : null;
-        const hasUntrackedHydrationEdit = Boolean(
-          editorMarkdownDuringHydration !== null
-          && isMeaningfulPageEdit(initialMarkdown, editorMarkdownDuringHydration)
-          && !dirtyDocIds.has(doc.id),
-        );
-        if (hasUntrackedHydrationEdit && editorMarkdownDuringHydration !== null) {
-          // Preserve edits made while refreshing an already hydrated page.
-          // First-time hydration is inert and hidden, so the mounted editor can
-          // never mistake the previously active page for an edit to this one.
-          collaborator.applyLocalMarkdown(editorMarkdownDuringHydration);
-          commitLocalEdit(doc.id, { markdown: editorMarkdownDuringHydration });
-          pendingHydrationMarkdownSaves.set(doc.id, {
-            expectedRevision: hydrated.revision,
-            title: hydrated.title,
-            previousMarkdown: hydratedMarkdown,
-            nextMarkdown: editorMarkdownDuringHydration,
-          });
-          syncEditorWithActive();
-          renderAll();
-        }
         if (!dirtyDocIds.has(doc.id) && !isActiveDocComposing) {
           const nextMarkdown = collaborationReadyDocIds.has(doc.id)
             ? collaborator.getMarkdown()
