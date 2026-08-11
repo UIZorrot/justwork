@@ -62,6 +62,7 @@ import {
   type LocalHistoryOp,
   type LocalHistorySnapshot,
 } from "@/features/workspace/local-history";
+import { runHistoryRevertWithRetry } from "@/features/workspace/history-revert";
 import { createChromeRuntimeStorage } from "@/features/workspace/local-runtime";
 import {
   loadWorkspaceJoinedMembers,
@@ -3739,37 +3740,64 @@ export async function startBackendWorkbench(): Promise<void> {
                   await waitForDocSaveQueueToSettle(ev.itemId);
                   const current = await session.loadItem(ev.itemId);
                   const revertMutationId = mutationId();
-                  let reverted = ev.op === "workspace.item.create"
-                    ? await session.trashItem(ev.itemId, current.revision, revertMutationId)
-                    : ev.op === "workspace.item.move"
-                      ? await session.moveItem(
-                      ev.itemId,
-                      ev.before.parentId ?? null,
-                      ev.before.orderRank ?? ev.before.orderKey ?? current.orderRank ?? current.orderKey,
-                      current.revision,
-                      revertMutationId,
-                      )
-                      : ev.op === "workspace.item.pin"
-                      ? await session.setPinned(
-                        ev.itemId,
-                        ev.before.pinned ?? false,
-                        current.revision,
-                        revertMutationId,
-                      )
-                      : ev.op === "workspace.item.trash" || ev.op === "workspace.item.restore"
-                        ? ev.before.inTrash
-                          ? await session.trashItem(ev.itemId, current.revision, revertMutationId)
-                          : await session.restoreItem(ev.itemId, current.revision, revertMutationId)
-                        : await session.saveItem(ev.itemId, {
-                          ...buildLocalHistoryRevertPatch(ev),
-                          expectedRevision: current.revision,
-                          mutationId: revertMutationId,
-                        });
+                  let reverted = await runHistoryRevertWithRetry(
+                    () => ev.op === "workspace.item.create"
+                      ? session.trashItem(ev.itemId, current.revision, revertMutationId)
+                      : ev.op === "workspace.item.move"
+                        ? session.moveItem(
+                          ev.itemId,
+                          ev.before.parentId ?? null,
+                          ev.before.orderRank ?? ev.before.orderKey ?? current.orderRank ?? current.orderKey,
+                          current.revision,
+                          revertMutationId,
+                        )
+                        : ev.op === "workspace.item.pin"
+                          ? session.setPinned(
+                            ev.itemId,
+                            ev.before.pinned ?? false,
+                            current.revision,
+                            revertMutationId,
+                          )
+                          : ev.op === "workspace.item.trash" || ev.op === "workspace.item.restore"
+                            ? ev.before.inTrash
+                              ? session.trashItem(ev.itemId, current.revision, revertMutationId)
+                              : session.restoreItem(ev.itemId, current.revision, revertMutationId)
+                            : session.saveItem(ev.itemId, {
+                              ...buildLocalHistoryRevertPatch(ev),
+                              expectedRevision: current.revision,
+                              mutationId: revertMutationId,
+                            }),
+                    {
+                      shouldRetry: shouldQueueAsOfflinePending,
+                    },
+                  );
+                  let restartCollaborativeTransport = false;
                   if (reverted.kind === "page" && ev.before.markdown !== undefined) {
                     // REST history restoration mutates the canonical Yjs room.
                     // Read that state back synchronously so an older in-memory
                     // collaborator cannot repaint the just-restored document.
-                    reverted = await applyAuthoritativeCollaborativeState(reverted);
+                    try {
+                      reverted = await runHistoryRevertWithRetry(
+                        () => applyAuthoritativeCollaborativeState(reverted),
+                        {
+                          maxAttempts: 3,
+                          shouldRetry: shouldQueueAsOfflinePending,
+                        },
+                      );
+                    } catch {
+                      // The inverse write already committed. A transient state
+                      // read must not turn a successful rollback into an error or
+                      // leave the old local Y.Doc able to repaint the page.
+                      if (active.id === reverted.id) {
+                        editor?.bindCollaborator(undefined);
+                        stopActiveCollaborativeTransport();
+                        restartCollaborativeTransport = true;
+                      }
+                      removeCollaborativeSnapshot(
+                        collaborativeMarkdownSnapshotKey(workspaceId, reverted.id),
+                      );
+                      resetMarkdownCollaborator(reverted);
+                    }
                   }
                   dirtyDocIds.delete(ev.itemId);
                   removeLocalEditOperations(ev.itemId);
@@ -3787,6 +3815,9 @@ export async function startBackendWorkbench(): Promise<void> {
                   await persistRefreshTree();
                   syncEditorWithActive();
                   renderAll();
+                  if (restartCollaborativeTransport && active.id === reverted.id) {
+                    void startCollaborativeTransport(active).catch(() => undefined);
+                  }
                   await refreshHistoryPanel?.();
                   saveStatus(saveStatusEl, t("status.reverted"));
                 } catch (e) {
