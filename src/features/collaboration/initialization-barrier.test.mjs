@@ -31,8 +31,8 @@ test("page collaboration waits for a canonical CRDT lineage before binding the e
   );
   assert.doesNotMatch(source, /markdownHost\.inert\s*=\s*pending/);
   assert.doesNotMatch(source, /structuredHost\.inert\s*=\s*pending/);
-  assert.match(source, /markdownHost\.inert\s*=\s*false/);
-  assert.match(source, /structuredHost\.inert\s*=\s*false/);
+  assert.match(source, /markdownHost\.inert\s*=\s*documentLoadBlocked/);
+  assert.match(source, /structuredHost\.inert\s*=\s*documentLoadBlocked/);
   assert.match(
     bindBlock,
     /if \(!hydratedDocIds\.has\(active\.id\)\) \{[\s\S]*?editor\.bindCollaborator\(undefined\);[\s\S]*?setMarkdownBodyLoading\(true\);[\s\S]*?return;/,
@@ -56,7 +56,7 @@ test("first-time Markdown navigation hides stale editor content until the full b
   assert.doesNotMatch(switchBlock, /commitLocalEdit\(doc\.id, \{ markdown:/);
   assert.match(switchBlock, /editor\.setMarkdown\(nextMarkdown, true\);[\s\S]*?setMarkdownBodyLoading\(false\)/);
   assert.match(switchBlock, /const hydrated = await hydrateMarkdownDocInPlace\(doc, cached\)/);
-  assert.match(switchBlock, /\.catch\(\(error\) => \{[\s\S]*?setMarkdownBodyLoading\(true\)/);
+  assert.match(switchBlock, /\.catch\(\(error\) => \{[\s\S]*?markDocumentLoadFailed\(doc\.id\)/);
   assert.match(source, /const markdownHydrationInFlight = new Map<string, Promise<WorkspaceDoc>>\(\)/);
   assert.match(source, /pointerenter[\s\S]{0,100}?prefetchMarkdownDoc\(doc\)/);
   assert.match(styles, /\.doc-editor-surface--markdown\.is-body-loading > \*[\s\S]*?visibility: hidden/);

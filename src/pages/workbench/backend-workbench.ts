@@ -1108,17 +1108,60 @@ export async function startBackendWorkbench(): Promise<void> {
 
   let editor: DocEditor | undefined;
   let imageSync: WorkspaceImageSync | undefined;
+  let documentLoadBlocked = false;
+  let rerenderDocumentLoadGuard: (() => void) | undefined;
+  let forceActiveDocumentEdit: (() => void) | undefined;
   const markdownHost = document.createElement("div");
   markdownHost.className = "doc-editor-surface doc-editor-surface--markdown";
   const setMarkdownBodyLoading = (bodyLoading: boolean): void => {
     markdownHost.classList.toggle("is-body-loading", bodyLoading);
-    markdownHost.inert = bodyLoading;
+    markdownHost.inert = bodyLoading || documentLoadBlocked;
     markdownHost.setAttribute("aria-busy", String(bodyLoading));
     markdownHost.dataset.loadingLabel = t("status.loading");
   };
   const structuredHost = document.createElement("div");
   structuredHost.className = "doc-editor-surface doc-editor-surface--structured";
-  editorRoot.replaceChildren(markdownHost, structuredHost);
+  const documentLoadGuard = document.createElement("section");
+  documentLoadGuard.className = "document-load-guard";
+  documentLoadGuard.hidden = true;
+  documentLoadGuard.setAttribute("role", "alertdialog");
+  documentLoadGuard.setAttribute("aria-modal", "true");
+  const documentLoadGuardPanel = document.createElement("div");
+  documentLoadGuardPanel.className = "document-load-guard-panel";
+  const documentLoadGuardKicker = document.createElement("span");
+  documentLoadGuardKicker.className = "document-load-guard-kicker";
+  const documentLoadGuardTitle = document.createElement("h2");
+  documentLoadGuardTitle.className = "document-load-guard-title";
+  const documentLoadGuardDescription = document.createElement("p");
+  documentLoadGuardDescription.className = "document-load-guard-description";
+  const documentLoadGuardActions = document.createElement("div");
+  documentLoadGuardActions.className = "document-load-guard-actions";
+  const documentLoadRefreshBtn = document.createElement("button");
+  documentLoadRefreshBtn.type = "button";
+  documentLoadRefreshBtn.className = "document-load-guard-btn document-load-guard-btn--primary";
+  const documentLoadForceBtn = document.createElement("button");
+  documentLoadForceBtn.type = "button";
+  documentLoadForceBtn.className = "document-load-guard-btn document-load-guard-btn--danger";
+  documentLoadGuardActions.append(documentLoadRefreshBtn, documentLoadForceBtn);
+  documentLoadGuardPanel.append(
+    documentLoadGuardKicker,
+    documentLoadGuardTitle,
+    documentLoadGuardDescription,
+    documentLoadGuardActions,
+  );
+  documentLoadGuard.appendChild(documentLoadGuardPanel);
+  documentLoadRefreshBtn.addEventListener("click", () => window.location.reload());
+  documentLoadForceBtn.addEventListener("click", () => forceActiveDocumentEdit?.());
+  const translateDocumentLoadGuard = (): void => {
+    documentLoadGuardKicker.textContent = t("editor.loadGuard.kicker");
+    documentLoadGuardTitle.textContent = t("editor.loadGuard.title");
+    documentLoadGuardDescription.textContent = t("editor.loadGuard.description");
+    documentLoadRefreshBtn.textContent = t("editor.loadGuard.refresh");
+    documentLoadForceBtn.textContent = t("editor.loadGuard.forceEdit");
+    documentLoadGuard.setAttribute("aria-label", t("editor.loadGuard.title"));
+  };
+  translateDocumentLoadGuard();
+  editorRoot.replaceChildren(markdownHost, structuredHost, documentLoadGuard);
   let tableView: TableViewHandle | undefined;
   let boardView: BoardViewHandle | undefined;
   let structuredSurfaceDocId: string | null = null;
@@ -1158,6 +1201,7 @@ export async function startBackendWorkbench(): Promise<void> {
     applyI18n(document, i18n);
     renderLanguageSwitcher();
     renderWorkspacePlan();
+    translateDocumentLoadGuard();
     tableView?.destroy?.();
     boardView?.destroy?.();
     tableView = undefined;
@@ -1171,6 +1215,7 @@ export async function startBackendWorkbench(): Promise<void> {
     void refreshActiveWorkspaceInfoPanel?.();
     void refreshActiveHistoryPanel?.();
     void refreshQuotaBar?.();
+    rerenderDocumentLoadGuard?.();
   };
   const disposeLocaleObserver = observePreferredLocaleChanges(handleLocaleChanged);
 
@@ -1811,12 +1856,18 @@ export async function startBackendWorkbench(): Promise<void> {
     setSidebarSectionCollapsed("trash", false);
 
     const dirtyDocIds = new Set<string>();
+    let initialDocumentLoadError: unknown;
     if (active.kind === "page" || active.kind === "table" || active.kind === "board") {
-      const fullActive = await session.loadItem(active.id);
-      active = await hydrateDocWithLocalDraft({
-        ...active,
-        ...fullActive,
-      });
+      try {
+        const fullActive = await session.loadItem(active.id);
+        active = await hydrateDocWithLocalDraft({
+          ...active,
+          ...fullActive,
+        });
+      } catch (error) {
+        initialDocumentLoadError = error;
+        active = await hydrateDocWithLocalDraft(active);
+      }
     } else {
       active = await hydrateDocWithLocalDraft(active);
     }
@@ -1831,6 +1882,44 @@ export async function startBackendWorkbench(): Promise<void> {
     const creatingDocIds = new Set<string>();
     const isCreatePendingDocId = (docId: string): boolean => creatingDocIds.has(docId) || isOptimisticDocId(docId);
     const hydratedDocIds = new Set<string>();
+    const documentLoadFailedDocIds = new Set<string>(initialDocumentLoadError ? [active.id] : []);
+    const forceEditableDocIds = new Set<string>();
+    const renderDocumentLoadGuard = (): void => {
+      const guarded = documentLoadFailedDocIds.has(active.id) && !forceEditableDocIds.has(active.id);
+      documentLoadBlocked = guarded;
+      documentLoadGuard.hidden = !guarded;
+      editorRoot.classList.toggle("has-document-load-error", guarded);
+      markdownHost.inert = guarded || markdownHost.classList.contains("is-body-loading");
+      structuredHost.inert = guarded;
+      titleInput.readOnly = guarded || active.kind === "welcome" || active.id === ROOT_FOLDER_ID;
+    };
+    const clearDocumentLoadFailure = (docId: string): void => {
+      documentLoadFailedDocIds.delete(docId);
+      forceEditableDocIds.delete(docId);
+      if (active.id === docId) renderDocumentLoadGuard();
+    };
+    const markDocumentLoadFailed = (docId: string): void => {
+      documentLoadFailedDocIds.add(docId);
+      forceEditableDocIds.delete(docId);
+      if (active.id !== docId) return;
+      setMarkdownBodyLoading(false);
+      renderDocumentLoadGuard();
+      documentLoadRefreshBtn.focus({ preventScroll: true });
+    };
+    forceActiveDocumentEdit = (): void => {
+      if (!documentLoadFailedDocIds.has(active.id)) return;
+      forceEditableDocIds.add(active.id);
+      // The user explicitly chose the cached body after a failed authoritative
+      // load. Treat it as usable so navigation guards do not immediately hide it
+      // again, while normal revision checks still protect the eventual save.
+      markDocHydrated(active.id);
+      renderDocumentLoadGuard();
+      syncEditorWithActive();
+      renderAll();
+      editor?.focus();
+      saveStatus(saveStatusEl, t("editor.loadGuard.forcedStatus"));
+    };
+    rerenderDocumentLoadGuard = renderDocumentLoadGuard;
     for (const doc of workspace.docs) {
       localCollaborativeDocCache.set(doc.id, doc);
     }
@@ -1839,7 +1928,7 @@ export async function startBackendWorkbench(): Promise<void> {
         hydratedDocIds.add(docId);
       }
     };
-    if (active.kind === "page" || active.kind === "table" || active.kind === "board") {
+    if (!initialDocumentLoadError && (active.kind === "page" || active.kind === "table" || active.kind === "board")) {
       // The initial active body was loaded above before the hydration registry
       // existed. Record that fact so navigation never treats it like a tree
       // summary and paints an empty body over the editor.
@@ -1960,10 +2049,10 @@ export async function startBackendWorkbench(): Promise<void> {
         // Realtime bootstrap is an enhancement, not an edit permission gate.
         // Keep the editor interactive while WebSocket/CRDT state reconnects;
         // ordinary revision-guarded REST saves continue to protect the text.
-        markdownHost.inert = false;
+        markdownHost.inert = documentLoadBlocked || markdownHost.classList.contains("is-body-loading");
         markdownHost.setAttribute("aria-busy", String(pending));
       } else {
-        structuredHost.inert = false;
+        structuredHost.inert = documentLoadBlocked;
         structuredHost.setAttribute("aria-busy", String(pending));
       }
     };
@@ -3517,13 +3606,14 @@ export async function startBackendWorkbench(): Promise<void> {
     };
 
     const syncEditorWithActive = (): void => {
+      renderDocumentLoadGuard();
       const isActivePageComposing = active.kind === "page" && editor?.isComposing() === true;
       editorRoot.classList.toggle(
         "doc-editor-host--wide",
         active.kind === "table" || active.kind === "board" || active.kind === "folder",
       );
       titleInput.value = activeTitleInputValue();
-      titleInput.readOnly = active.kind === "welcome" || active.id === ROOT_FOLDER_ID;
+      titleInput.readOnly = documentLoadBlocked || active.kind === "welcome" || active.id === ROOT_FOLDER_ID;
       pageKindTag.textContent = docKindLabel(active);
       if (active.kind === "welcome") {
         mentionPicker.close();
@@ -3859,7 +3949,7 @@ export async function startBackendWorkbench(): Promise<void> {
       renderDocRows(docTree, tree, { search: q });
       renderDocRows(trashList, trash, { showTrashActions: true, search: q });
       titleInput.value = activeTitleInputValue();
-      titleInput.readOnly = active.kind === "welcome" || active.id === ROOT_FOLDER_ID;
+      titleInput.readOnly = documentLoadBlocked || active.kind === "welcome" || active.id === ROOT_FOLDER_ID;
       pageKindTag.textContent = docKindLabel(active);
       setSidebarActionLabel(pinBtn, active.pinned ? t("sidebar.unpin") : t("sidebar.pin"));
       pinBtn.disabled = active.kind === "welcome" || active.id === ROOT_FOLDER_ID || active.inTrash;
@@ -4213,6 +4303,7 @@ export async function startBackendWorkbench(): Promise<void> {
           : await session.loadItem(doc.id);
         const hydrated = normalizeLoadedDoc(await hydrateDocWithLocalDraft(full));
         markDocHydrated(doc.id);
+        clearDocumentLoadFailure(doc.id);
         if (!dirtyDocIds.has(doc.id)) {
           updateDocById(doc.id, () => hydrated);
         }
@@ -4238,6 +4329,7 @@ export async function startBackendWorkbench(): Promise<void> {
           ? await session.loadItem(doc.id)
           : (localCollaborativeDocCache.get(doc.id) ?? cached);
         markDocHydrated(doc.id);
+        clearDocumentLoadFailure(doc.id);
         const hasEditDuringHydration = hasNewerLocalEditGeneration(
           hydrationGeneration,
           localEditGenerationByDoc.get(doc.id) ?? 0,
@@ -4269,7 +4361,10 @@ export async function startBackendWorkbench(): Promise<void> {
           renderAll();
         }
       })()
-        .catch((error) => notifyError(error))
+        .catch((error) => {
+          markDocumentLoadFailed(doc.id);
+          notifyError(error);
+        })
         .finally(() => {
           if (structuredHydrationInFlight.get(doc.id) === hydration) {
             structuredHydrationInFlight.delete(doc.id);
@@ -4377,10 +4472,9 @@ export async function startBackendWorkbench(): Promise<void> {
         void imageSync?.warmMarkdowns([collaborator.getMarkdown()]).catch(() => undefined);
       })().catch((error) => {
         if (active.id === doc.id) {
-          // Never reveal the still-mounted body from the previously active
-          // page after a failed first load. The user can retry by selecting the
-          // page again; the toast explains why it remains unavailable.
-          setMarkdownBodyLoading(true);
+          // Keep the cached surface read-only beneath a persistent warning.
+          // The user must explicitly reload or accept the consistency risk.
+          markDocumentLoadFailed(doc.id);
         }
         notifyError(error);
       });

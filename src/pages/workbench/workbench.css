@@ -1610,6 +1610,7 @@ body {
   padding: 0;
 }
 .doc-editor-host {
+  position: relative;
   flex: 1;
   min-height: 480px;
   width: min(100%, 980px);
@@ -1645,6 +1646,89 @@ body {
   color: #777;
   font-size: 14px;
   line-height: 1.5;
+}
+.doc-editor-host.has-document-load-error .doc-editor-surface {
+  filter: blur(5px);
+  opacity: 0.56;
+  user-select: none;
+  pointer-events: none;
+}
+.document-load-guard {
+  position: absolute;
+  z-index: 20;
+  inset: 0;
+  min-height: 360px;
+  padding: clamp(24px, 7vh, 72px) 18px 40px;
+  box-sizing: border-box;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  background: rgba(248, 248, 246, 0.48);
+  backdrop-filter: blur(2px);
+}
+.document-load-guard[hidden] {
+  display: none !important;
+}
+.document-load-guard-panel {
+  width: min(100%, 560px);
+  padding: 22px 24px;
+  border: 1px solid rgba(172, 132, 64, 0.32);
+  border-radius: 16px;
+  background: rgba(255, 253, 247, 0.94);
+  box-shadow: 0 18px 54px rgba(42, 36, 25, 0.14);
+}
+.document-load-guard-kicker {
+  display: block;
+  margin-bottom: 7px;
+  color: #9a651f;
+  font-size: 12px;
+  font-weight: 650;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.document-load-guard-title {
+  margin: 0;
+  color: #2c2923;
+  font-size: 20px;
+  line-height: 1.35;
+}
+.document-load-guard-description {
+  margin: 10px 0 18px;
+  color: #665f54;
+  font-size: 14px;
+  line-height: 1.65;
+}
+.document-load-guard-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.document-load-guard-btn {
+  min-height: 38px;
+  padding: 8px 15px;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.document-load-guard-btn--primary {
+  border-color: #2f2f2d;
+  background: #2f2f2d;
+  color: #fff;
+}
+.document-load-guard-btn--primary:hover {
+  background: #1f1f1e;
+}
+.document-load-guard-btn--danger {
+  border-color: #d8b0aa;
+  background: #fff8f6;
+  color: #9b3d34;
+}
+.document-load-guard-btn--danger:hover {
+  border-color: #bd756d;
+  background: #fff0ed;
 }
 .doc-editor-surface[hidden] {
   display: none !important;
