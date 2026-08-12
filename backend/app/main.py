@@ -38,6 +38,8 @@ from .collab_relay import (
     reset_collaborative_relay_for_tests as reset_collaborative_relay_hub_for_tests,
 )
 from .collab_store import (
+    CollaborativeRoomCorruptError,
+    CollaborativeRoomTransientError,
     configure_collaborative_gateway_provider,
     get_collaborative_update_store,
     reset_collab_store_for_tests,
@@ -488,6 +490,26 @@ async def http_exception_handler(_: Request, exc: HTTPException) -> JSONResponse
             code = "conflict"
     payload = ErrorResponse(error=ErrorBody(code=code, message=str(exc.detail))).model_dump()
     return JSONResponse(status_code=exc.status_code, content=payload)
+
+
+@app.exception_handler(CollaborativeRoomCorruptError)
+async def collab_room_corrupt_exception_handler(
+    _: Request, exc: CollaborativeRoomCorruptError
+) -> JSONResponse:
+    payload = ErrorResponse(
+        error=ErrorBody(code="collaborative_room_corrupt", message=str(exc)),
+    ).model_dump()
+    return JSONResponse(status_code=status.HTTP_409_CONFLICT, content=payload)
+
+
+@app.exception_handler(CollaborativeRoomTransientError)
+async def collab_room_transient_exception_handler(
+    _: Request, exc: CollaborativeRoomTransientError
+) -> JSONResponse:
+    payload = ErrorResponse(
+        error=ErrorBody(code="collaborative_room_transient", message=str(exc)),
+    ).model_dump()
+    return JSONResponse(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, content=payload)
 
 
 @app.exception_handler(DatabaseUnavailableError)

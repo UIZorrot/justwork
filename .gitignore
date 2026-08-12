@@ -28,6 +28,7 @@ scripts/*
 .justwork-data/
 .justwork-backend/
 output
+_temp/
 
 # --- Python ---
 backend/tests/
