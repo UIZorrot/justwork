@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 import json
+import logging
+import base64
 import os
 import secrets
+import subprocess
+import sys
 import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, TypeVar, cast
 
@@ -23,6 +28,108 @@ T = TypeVar("T")
 _COLLAB_GATEWAY_PROVIDER: Callable[[], DatabaseGateway] | None = None
 _COMPACT_UPDATE_COUNT = max(8, int(os.getenv("JUSTWORK_COLLAB_COMPACT_UPDATE_COUNT", "64")))
 _COMPACT_UPDATE_BYTES = max(65_536, int(os.getenv("JUSTWORK_COLLAB_COMPACT_UPDATE_BYTES", "1048576")))
+_YJS_MERGE_TIMEOUT_SECONDS = max(
+    2.0, float(os.getenv("JUSTWORK_COLLAB_YJS_MERGE_TIMEOUT_SECONDS", "20"))
+)
+_logger = logging.getLogger("justwork.collab")
+
+
+class CollaborativeRoomCorruptError(RuntimeError):
+    """Room CRDT bytes confirmed unsafe (yrs aborted in an isolated worker)."""
+
+
+class CollaborativeRoomTransientError(RuntimeError):
+    """CRDT merge worker failed transiently; room must NOT be quarantined."""
+
+
+@dataclass(frozen=True)
+class YjsMergeResult:
+    kind: str  # "ok" | "abort" | "transient"
+    merged: bytes | None = None
+    detail: str = ""
+
+
+def safe_merge_yjs_updates(
+    updates: list[bytes],
+    *,
+    timeout_seconds: float | None = None,
+) -> YjsMergeResult:
+    """Merge Yjs updates in an isolated subprocess.
+
+    A separate interpreter process is required: yrs panics abort the process, and
+    multiprocessing fork/spawn from a threaded uvicorn worker is unreliable
+    (false "unmergable" → mass quarantine of healthy rooms).
+    Only a negative/crash exit without JSON ok is treated as confirmed corruption.
+    """
+    if not updates:
+        return YjsMergeResult("ok", b"")
+    timeout = (
+        _YJS_MERGE_TIMEOUT_SECONDS if timeout_seconds is None else float(timeout_seconds)
+    )
+    request = json.dumps(
+        {"updates": [base64.b64encode(item).decode("ascii") for item in updates]},
+        separators=(",", ":"),
+    ).encode("utf-8")
+    try:
+        completed = subprocess.run(
+            [sys.executable, "-m", "app.yjs_merge_cli"],
+            input=request,
+            capture_output=True,
+            timeout=timeout,
+            check=False,
+            cwd=str(Path(__file__).resolve().parent.parent),
+        )
+    except subprocess.TimeoutExpired:
+        return YjsMergeResult("transient", None, "merge_worker_timeout")
+    except OSError as exc:
+        return YjsMergeResult("transient", None, f"merge_worker_os:{exc}")
+
+    # Signal death (yrs abort) typically yields negative returncode and empty/partial stdout.
+    if completed.returncode < 0:
+        return YjsMergeResult(
+            "abort",
+            None,
+            f"merge_worker_signal_{-completed.returncode}",
+        )
+    raw = (completed.stdout or b"").strip()
+    if not raw:
+        # Non-zero without payload: treat as transient unless clearly aborted above.
+        return YjsMergeResult(
+            "transient",
+            None,
+            f"merge_worker_empty_stdout exitcode={completed.returncode} "
+            f"stderr={(completed.stderr or b'')[:200]!r}",
+        )
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        # Panic output on stdout is rare; prefer transient to avoid false quarantine.
+        return YjsMergeResult("transient", None, f"merge_worker_bad_json:{exc}")
+    if payload.get("ok") is True and isinstance(payload.get("merged"), str):
+        try:
+            return YjsMergeResult("ok", base64.b64decode(payload["merged"].encode("ascii")))
+        except Exception as exc:  # noqa: BLE001
+            return YjsMergeResult("transient", None, f"merge_worker_b64:{exc}")
+    err = str(payload.get("error") or "merge_worker_reported_error")
+    # Python exceptions from y-py are usually soft; yrs hard abort uses signal path.
+    return YjsMergeResult("transient", None, err)
+
+
+def _raise_for_merge_failure(
+    result: YjsMergeResult,
+    *,
+    workspace_id: str,
+    item_id: str,
+    chunks: int,
+    has_snapshot: bool,
+) -> None:
+    detail = (
+        f"collab room {workspace_id}/{item_id} chunks={chunks} "
+        f"snapshot={'yes' if has_snapshot else 'no'} ({result.detail})"
+    )
+    if result.kind == "abort":
+        raise CollaborativeRoomCorruptError(f"unsafe/unmergable {detail}")
+    raise CollaborativeRoomTransientError(f"transient merge failure {detail}")
 
 
 def _default_collab_dir() -> Path:
@@ -64,7 +171,7 @@ class CollaborativeUpdateStore:
         legacy_snapshot: bytes | None = None,
         legacy_epoch: str | None = None,
     ) -> tuple[YDoc, bool]:
-        document = YDoc()
+        chunks: list[bytes] = []
         used_legacy_plaintext = False
         if current is not None:
             epoch = current.room_epoch
@@ -74,7 +181,7 @@ class CollaborativeUpdateStore:
                     current.snapshot,
                     aad=self._aad(workspace_id, item_id, epoch, "snapshot", current.snapshot_version),
                 )
-                apply_update(document, snapshot)
+                chunks.append(snapshot)
                 used_legacy_plaintext = not encrypted
             for version, payload in current.updates:
                 update, encrypted = decrypt_collaboration_bytes(
@@ -82,7 +189,7 @@ class CollaborativeUpdateStore:
                     payload,
                     aad=self._aad(workspace_id, item_id, epoch, "update", version),
                 )
-                apply_update(document, update)
+                chunks.append(update)
                 used_legacy_plaintext = used_legacy_plaintext or not encrypted
         elif legacy_snapshot is not None:
             epoch = legacy_epoch or "legacy"
@@ -91,9 +198,77 @@ class CollaborativeUpdateStore:
                 legacy_snapshot,
                 aad=self._aad(workspace_id, item_id, epoch, "file", 0),
             )
-            apply_update(document, update)
+            chunks.append(update)
             used_legacy_plaintext = not encrypted
+
+        if not chunks:
+            return YDoc(), used_legacy_plaintext
+
+        merge = safe_merge_yjs_updates(chunks)
+        if merge.kind != "ok" or merge.merged is None:
+            _raise_for_merge_failure(
+                merge,
+                workspace_id=workspace_id,
+                item_id=item_id,
+                chunks=len(chunks),
+                has_snapshot=current is not None and current.snapshot is not None,
+            )
+        document = YDoc()
+        # Merged full-state from a successful child merge; apply once in-process.
+        apply_update(document, merge.merged)
         return document, used_legacy_plaintext
+
+    def _quarantine_and_reset_room(
+        self,
+        workspace_id: str,
+        item_id: str,
+        *,
+        reason: str,
+        lease_seconds: float = 15.0,
+    ) -> tuple[str, bytes | None, bool]:
+        """Preserve bad CRDT bytes, wipe live room, return bootstrap join state.
+
+        Must run *outside* mutate_collaborative_room (uses its own transaction).
+        Does not touch workspace payload / revisionHistory.
+        """
+        gateway = self._database_gateway(workspace_id)
+        quarantine_id = None
+        if gateway is not None:
+            try:
+                quarantine_id = gateway.quarantine_collaborative_room(
+                    workspace_id, item_id, reason=reason
+                )
+            except Exception:
+                _logger.exception(
+                    "failed to quarantine collab room %s/%s", workspace_id, item_id
+                )
+        _logger.error(
+            "collab room quarantined workspace=%s item=%s quarantine_id=%s reason=%s",
+            workspace_id,
+            item_id,
+            quarantine_id,
+            reason,
+        )
+        self._remove_legacy_file_state(workspace_id, item_id)
+        if gateway is None:
+            epoch = self._new_epoch()
+            return epoch, None, True
+        now = time.time()
+        epoch = self._new_epoch()
+
+        def create_bootstrap(_current):
+            return CollaborativeRoomMutation(
+                room_epoch=epoch,
+                snapshot=None,
+                bootstrap_lease_until=now + lease_seconds,
+                result=(epoch, None, True),
+                persist=True,
+                compact=False,
+            )
+
+        return gateway.mutate_collaborative_room(
+            workspace_id, item_id, create_bootstrap
+        )
 
     def _database_state_mutation(
         self,
@@ -112,9 +287,12 @@ class CollaborativeUpdateStore:
     ) -> CollaborativeRoomMutation:
         next_version = (current.version if current else 0) + 1
         tail_bytes = sum(len(payload) for _, payload in current.updates) if current else 0
+        # Never persist incremental updates while snapshot is still NULL — that
+        # incomplete CRDT state can make yrs abort the whole API process on load.
         compact = (
             force_compact
             or current is None
+            or current.snapshot is None
             or len(current.updates) + 1 >= _COMPACT_UPDATE_COUNT
             or tail_bytes + len(raw_update or b"") >= _COMPACT_UPDATE_BYTES
         )
@@ -316,11 +494,25 @@ class CollaborativeUpdateStore:
             def read_or_create(current):
                 nonlocal migrated
                 if current is not None:
-                    document, legacy_plaintext = self._decrypt_room_document(
-                        workspace_id, item_id, current, key
+                    try:
+                        document, legacy_plaintext = self._decrypt_room_document(
+                            workspace_id, item_id, current, key
+                        )
+                    except (CollaborativeRoomCorruptError, CollaborativeRoomTransientError) as exc:
+                        return CollaborativeRoomMutation(
+                            current.room_epoch,
+                            current.snapshot,
+                            current.bootstrap_lease_until,
+                            exc,
+                            False,
+                        )
+                    merged = (
+                        encode_state_as_update(document)
+                        if current.snapshot is not None or current.updates
+                        else None
                     )
-                    merged = encode_state_as_update(document) if current.snapshot is not None or current.updates else None
-                    if merged is None or not legacy_plaintext:
+                    needs_heal = current.snapshot is None and bool(current.updates)
+                    if merged is None or (not legacy_plaintext and not needs_heal):
                         return CollaborativeRoomMutation(
                             current.room_epoch,
                             current.snapshot,
@@ -343,10 +535,13 @@ class CollaborativeUpdateStore:
                 migrated = legacy is not None
                 if snapshot is None:
                     return CollaborativeRoomMutation(epoch, None, 0, (epoch, None))
-                document, _ = self._decrypt_room_document(
-                    workspace_id, item_id, None, key,
-                    legacy_snapshot=snapshot, legacy_epoch=epoch,
-                )
+                try:
+                    document, _ = self._decrypt_room_document(
+                        workspace_id, item_id, None, key,
+                        legacy_snapshot=snapshot, legacy_epoch=epoch,
+                    )
+                except (CollaborativeRoomCorruptError, CollaborativeRoomTransientError) as exc:
+                    return CollaborativeRoomMutation(epoch, None, 0, exc, False)
                 merged = encode_state_as_update(document)
                 return self._database_state_mutation(
                     workspace_id, item_id, None, epoch, merged, key, (epoch, merged),
@@ -354,6 +549,13 @@ class CollaborativeUpdateStore:
                 )
 
             result = gateway.mutate_collaborative_room(workspace_id, item_id, read_or_create)
+            if isinstance(result, CollaborativeRoomCorruptError):
+                epoch, snapshot, _ = self._quarantine_and_reset_room(
+                    workspace_id, item_id, reason=str(result)
+                )
+                return epoch, snapshot
+            if isinstance(result, CollaborativeRoomTransientError):
+                raise result
             if migrated:
                 self._remove_legacy_file_state(workspace_id, item_id)
             return result
@@ -397,11 +599,21 @@ class CollaborativeUpdateStore:
             def join(current):
                 nonlocal migrated
                 if current is not None and (current.snapshot is not None or current.updates):
-                    document, legacy_plaintext = self._decrypt_room_document(
-                        workspace_id, item_id, current, key
-                    )
+                    try:
+                        document, legacy_plaintext = self._decrypt_room_document(
+                            workspace_id, item_id, current, key
+                        )
+                    except (CollaborativeRoomCorruptError, CollaborativeRoomTransientError) as exc:
+                        return CollaborativeRoomMutation(
+                            current.room_epoch,
+                            current.snapshot,
+                            0,
+                            exc,
+                            False,
+                        )
                     merged = encode_state_as_update(document)
-                    if legacy_plaintext or current.bootstrap_lease_until != 0:
+                    needs_heal = current.snapshot is None and bool(current.updates)
+                    if legacy_plaintext or current.bootstrap_lease_until != 0 or needs_heal:
                         return self._database_state_mutation(
                             workspace_id, item_id, current, current.room_epoch, merged, key,
                             (current.room_epoch, merged, False), force_compact=True,
@@ -420,10 +632,15 @@ class CollaborativeUpdateStore:
                     )
                 if current is None and legacy is not None and legacy[1] is not None:
                     migrated = True
-                    document, _ = self._decrypt_room_document(
-                        workspace_id, item_id, None, key,
-                        legacy_snapshot=legacy[1], legacy_epoch=legacy[0],
-                    )
+                    try:
+                        document, _ = self._decrypt_room_document(
+                            workspace_id, item_id, None, key,
+                            legacy_snapshot=legacy[1], legacy_epoch=legacy[0],
+                        )
+                    except (CollaborativeRoomCorruptError, CollaborativeRoomTransientError) as exc:
+                        return CollaborativeRoomMutation(
+                            legacy[0], None, 0, exc, False
+                        )
                     merged = encode_state_as_update(document)
                     return self._database_state_mutation(
                         workspace_id, item_id, None, legacy[0], merged, key,
@@ -435,9 +652,20 @@ class CollaborativeUpdateStore:
                     snapshot=None,
                     bootstrap_lease_until=now + lease_seconds,
                     result=(epoch, None, True),
+                    # Must not claim snapshot_version while snapshot is still NULL.
+                    compact=False,
                 )
 
             result = gateway.mutate_collaborative_room(workspace_id, item_id, join)
+            if isinstance(result, CollaborativeRoomCorruptError):
+                return self._quarantine_and_reset_room(
+                    workspace_id,
+                    item_id,
+                    reason=str(result),
+                    lease_seconds=max(lease_seconds, 15.0),
+                )
+            if isinstance(result, CollaborativeRoomTransientError):
+                raise result
             if migrated:
                 self._remove_legacy_file_state(workspace_id, item_id)
             return result
@@ -562,11 +790,40 @@ class CollaborativeUpdateStore:
                         legacy_epoch=legacy[0] if current is None and legacy else None,
                     )
                     result = self._content_from_document(document)
+                except CollaborativeRoomCorruptError as exc:
+                    return CollaborativeRoomMutation(
+                        current.room_epoch if current else None,
+                        current.snapshot if current else None,
+                        0,
+                        exc,
+                        False,
+                    )
+                except CollaborativeRoomTransientError as exc:
+                    return CollaborativeRoomMutation(
+                        current.room_epoch if current else None,
+                        current.snapshot if current else None,
+                        0,
+                        exc,
+                        False,
+                    )
                 except BaseException as exc:  # noqa: BLE001
-                    result = exc
+                    return CollaborativeRoomMutation(
+                        current.room_epoch if current else None,
+                        current.snapshot if current else None,
+                        0,
+                        exc,
+                        False,
+                    )
                 return CollaborativeRoomMutation(None, None, 0, result)
 
             stored = gateway.mutate_collaborative_room(workspace_id, item_id, drain)
+            if isinstance(stored, CollaborativeRoomCorruptError):
+                self._quarantine_and_reset_room(
+                    workspace_id, item_id, reason=str(stored)
+                )
+                raise stored
+            if isinstance(stored, CollaborativeRoomTransientError):
+                raise stored
             result = self._unwrap_database_result(stored)
             self._remove_legacy_file_state(workspace_id, item_id)
             return result
@@ -631,8 +888,29 @@ class CollaborativeUpdateStore:
                         legacy_snapshot=legacy[1] if current is None and legacy else None,
                         legacy_epoch=legacy[0] if current is None and legacy else None,
                     )
-                    apply_update(document, update)
-                    merged = encode_state_as_update(document)
+                    # Isolate incremental apply too — a bad client update must not abort.
+                    merge = safe_merge_yjs_updates(
+                        [encode_state_as_update(document), update]
+                    )
+                    if merge.kind != "ok" or merge.merged is None:
+                        _raise_for_merge_failure(
+                            merge,
+                            workspace_id=workspace_id,
+                            item_id=item_id,
+                            chunks=2,
+                            has_snapshot=current is not None and current.snapshot is not None,
+                        )
+                    document = YDoc()
+                    apply_update(document, merge.merged)
+                    merged = merge.merged
+                except CollaborativeRoomCorruptError as exc:
+                    return CollaborativeRoomMutation(
+                        epoch, current.snapshot if current else None, 0, exc, False
+                    )
+                except CollaborativeRoomTransientError as exc:
+                    return CollaborativeRoomMutation(
+                        epoch, current.snapshot if current else None, 0, exc, False
+                    )
                 except BaseException as exc:  # noqa: BLE001
                     return CollaborativeRoomMutation(
                         epoch, current.snapshot if current else None, 0, exc, False
@@ -655,6 +933,13 @@ class CollaborativeUpdateStore:
                 item_id,
                 merge,
             )
+            if isinstance(result, CollaborativeRoomCorruptError):
+                self._quarantine_and_reset_room(
+                    workspace_id, item_id, reason=str(result)
+                )
+                raise result
+            if isinstance(result, CollaborativeRoomTransientError):
+                raise result
             inserted = bool(self._unwrap_database_result(result))
             if migrated:
                 self._remove_legacy_file_state(workspace_id, item_id)
@@ -731,10 +1016,30 @@ class CollaborativeUpdateStore:
                         legacy_snapshot=legacy[1] if current is None and legacy else None,
                         legacy_epoch=legacy[0] if current is None and legacy else None,
                     )
-                    apply_update(document, update)
-                    merged = encode_state_as_update(document)
+                    merge = safe_merge_yjs_updates(
+                        [encode_state_as_update(document), update]
+                    )
+                    if merge.kind != "ok" or merge.merged is None:
+                        _raise_for_merge_failure(
+                            merge,
+                            workspace_id=workspace_id,
+                            item_id=item_id,
+                            chunks=2,
+                            has_snapshot=current is not None and current.snapshot is not None,
+                        )
+                    document = YDoc()
+                    apply_update(document, merge.merged)
+                    merged = merge.merged
                     merged_markdown = str(document.get_text("markdown"))
                     result = commit(merged_markdown)
+                except CollaborativeRoomCorruptError as exc:
+                    return CollaborativeRoomMutation(
+                        epoch, current.snapshot if current else None, 0, exc, False
+                    )
+                except CollaborativeRoomTransientError as exc:
+                    return CollaborativeRoomMutation(
+                        epoch, current.snapshot if current else None, 0, exc, False
+                    )
                 except BaseException as exc:  # noqa: BLE001
                     return CollaborativeRoomMutation(
                         epoch, current.snapshot if current else None, 0, exc, False
@@ -756,6 +1061,13 @@ class CollaborativeUpdateStore:
                 item_id,
                 merge_and_commit,
             )
+            if isinstance(stored, CollaborativeRoomCorruptError):
+                self._quarantine_and_reset_room(
+                    workspace_id, item_id, reason=str(stored)
+                )
+                raise stored
+            if isinstance(stored, CollaborativeRoomTransientError):
+                raise stored
             result = self._unwrap_database_result(stored)
             if migrated:
                 self._remove_legacy_file_state(workspace_id, item_id)

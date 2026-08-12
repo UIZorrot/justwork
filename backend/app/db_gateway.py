@@ -225,6 +225,32 @@ class DatabaseGateway:
                 )
                 cur.execute(
                     """
+                    CREATE TABLE IF NOT EXISTS collaborative_room_quarantine (
+                      quarantine_id BIGSERIAL PRIMARY KEY,
+                      workspace_id TEXT NOT NULL,
+                      item_id TEXT NOT NULL,
+                      room_epoch TEXT NOT NULL,
+                      snapshot BYTEA,
+                      version BIGINT NOT NULL,
+                      snapshot_version BIGINT NOT NULL,
+                      reason TEXT NOT NULL,
+                      quarantined_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    )
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS collaborative_update_quarantine (
+                      quarantine_id BIGINT NOT NULL REFERENCES collaborative_room_quarantine (quarantine_id) ON DELETE CASCADE,
+                      room_version BIGINT NOT NULL,
+                      room_epoch TEXT NOT NULL,
+                      payload BYTEA NOT NULL,
+                      PRIMARY KEY (quarantine_id, room_version)
+                    )
+                    """
+                )
+                cur.execute(
+                    """
                     CREATE TABLE IF NOT EXISTS workspace_events (
                       event_id BIGSERIAL PRIMARY KEY,
                       workspace_id TEXT NOT NULL,
@@ -687,8 +713,21 @@ class DatabaseGateway:
                 )
             else:
                 next_version = (current.version if current else 0) + 1
-                snapshot = mutation.snapshot if mutation.compact else current.snapshot if current else mutation.snapshot
-                snapshot_version = next_version if mutation.compact else current.snapshot_version if current else 0
+                # compact=True with snapshot=None is used for empty bootstrap leases.
+                # It must NOT advance snapshot_version or prune updates — that creates
+                # rooms that load as "missing base + orphan deltas" and can abort yrs.
+                effective_compact = bool(mutation.compact and mutation.snapshot is not None)
+                if effective_compact:
+                    snapshot = mutation.snapshot
+                    snapshot_version = next_version
+                elif current is not None:
+                    # Non-compact append, or null-snapshot bootstrap refresh: never claim a
+                    # snapshot_version without snapshot bytes.
+                    snapshot = current.snapshot
+                    snapshot_version = current.snapshot_version
+                else:
+                    snapshot = None
+                    snapshot_version = 0
                 cur.execute(
                         """
                         INSERT INTO collaborative_rooms (
@@ -722,7 +761,7 @@ class DatabaseGateway:
                             """,
                             (workspace_id, item_id, mutation.room_epoch, next_version, mutation.update_payload),
                         )
-                if mutation.compact:
+                if effective_compact:
                     cur.execute(
                             """
                             DELETE FROM collaborative_updates
@@ -780,6 +819,85 @@ class DatabaseGateway:
                         (workspace_id, item_id, workspace_id, item_id),
                     )
         return mutation.result
+
+    def quarantine_collaborative_room(
+        self,
+        workspace_id: str,
+        item_id: str,
+        *,
+        reason: str,
+    ) -> int | None:
+        """Copy room snapshot/updates aside, then delete live collab rows.
+
+        Returns quarantine_id, or None when no live room existed.
+        Does not touch workspace payload / revisionHistory.
+        """
+        routed = self._routed_gateway(self._workspace_route(workspace_id))
+        if routed is not None:
+            return routed.quarantine_collaborative_room(
+                workspace_id, item_id, reason=reason
+            )
+        if not self._database_url:
+            return None
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT room_epoch, snapshot, version, snapshot_version
+                    FROM collaborative_rooms
+                    WHERE workspace_id = %s AND item_id = %s
+                    FOR UPDATE
+                    """,
+                    (workspace_id, item_id),
+                )
+                room = cur.fetchone()
+                if room is None:
+                    return None
+                room_epoch, snapshot, version, snapshot_version = room
+                cur.execute(
+                    """
+                    INSERT INTO collaborative_room_quarantine (
+                      workspace_id, item_id, room_epoch, snapshot, version,
+                      snapshot_version, reason
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    RETURNING quarantine_id
+                    """,
+                    (
+                        workspace_id,
+                        item_id,
+                        room_epoch,
+                        snapshot,
+                        int(version),
+                        int(snapshot_version),
+                        reason[:2000],
+                    ),
+                )
+                quarantine_id = int(cur.fetchone()[0])
+                cur.execute(
+                    """
+                    INSERT INTO collaborative_update_quarantine (
+                      quarantine_id, room_version, room_epoch, payload
+                    )
+                    SELECT %s, room_version, room_epoch, payload
+                    FROM collaborative_updates
+                    WHERE workspace_id = %s AND item_id = %s
+                    """,
+                    (quarantine_id, workspace_id, item_id),
+                )
+                cur.execute(
+                    "DELETE FROM collaborative_updates WHERE workspace_id = %s AND item_id = %s",
+                    (workspace_id, item_id),
+                )
+                cur.execute(
+                    "DELETE FROM collaborative_rooms WHERE workspace_id = %s AND item_id = %s",
+                    (workspace_id, item_id),
+                )
+                cur.execute(
+                    "DELETE FROM collaborative_update_receipts WHERE workspace_id = %s AND item_id = %s",
+                    (workspace_id, item_id),
+                )
+            conn.commit()
+            return quarantine_id
 
     def collaborative_event_cursor(self, workspace_id: str, item_id: str) -> int:
         routed = self._routed_gateway(self._workspace_route(workspace_id))
