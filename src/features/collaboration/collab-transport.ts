@@ -63,6 +63,7 @@ export function createCollaborativeTransport(
   let stagedUpdates: Uint8Array[] = [];
   let stagedBytes = 0;
   let batchTimer: number | undefined;
+  let disposed = false;
 
   const stagePendingUpdate = (): void => {
     if (stagedUpdates.length === 0) return;
@@ -107,12 +108,17 @@ export function createCollaborativeTransport(
     for (const handler of statusHandlers) handler(socket.readyState);
   };
   socket.addEventListener("open", () => {
+    if (disposed) {
+      socket.close();
+      return;
+    }
     flushPendingUpdates();
     notifyStatus();
   });
   socket.addEventListener("close", notifyStatus);
   socket.addEventListener("error", notifyStatus);
   socket.addEventListener("message", (event) => {
+    if (disposed) return;
     const payload = event.data;
     if (typeof payload === "string") {
       try {
@@ -122,6 +128,14 @@ export function createCollaborativeTransport(
           payloadBase64?: string;
         };
         if (message.type === "collab.ack" && message.updateId) {
+          pendingUpdates.delete(message.updateId);
+          if (pendingUpdates.size === 0 && stagedUpdates.length === 0) durablePendingByRoom.delete(key);
+          flushPendingUpdates();
+          return;
+        }
+        if (message.type === "collab.error" && message.updateId) {
+          // The backend has durably rejected this one update. Retrying it on
+          // every reconnect can never succeed and creates a reconnect storm.
           pendingUpdates.delete(message.updateId);
           if (pendingUpdates.size === 0 && stagedUpdates.length === 0) durablePendingByRoom.delete(key);
           flushPendingUpdates();
@@ -154,7 +168,7 @@ export function createCollaborativeTransport(
       return socket.readyState;
     },
     sendUpdate: (update) => {
-      if (socket.readyState === WebSocket.CLOSING || socket.readyState === WebSocket.CLOSED) {
+      if (disposed || socket.readyState === WebSocket.CLOSING || socket.readyState === WebSocket.CLOSED) {
         throw new Error("Collaborative transport is closed");
       }
       const pendingBytes = Array.from(pendingUpdates.values()).reduce(
@@ -186,12 +200,18 @@ export function createCollaborativeTransport(
       };
     },
     close: () => {
+      if (disposed) return;
+      disposed = true;
       if (batchTimer !== undefined) window.clearTimeout(batchTimer);
       batchTimer = undefined;
       stagePendingUpdate();
       flushPendingUpdates();
       window.clearInterval(retryTimer);
-      socket.close();
+      // Calling close() while CONNECTING makes Chromium emit
+      // "WebSocket is closed before the connection is established". Let the
+      // handshake settle; the open handler above closes this stale generation
+      // before it can flush or deliver updates.
+      if (socket.readyState !== WebSocket.CONNECTING) socket.close();
       handlers.clear();
       statusHandlers.clear();
     },

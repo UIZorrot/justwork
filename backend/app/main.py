@@ -1613,15 +1613,24 @@ async def workspace_collab_relay(
                 # the revision-guarded REST markdown delta path.
                 continue
             if protocol_version >= 3:
-                inserted = await anyio_to_thread.run_sync(partial(
-                    store.append_update,
-                    workspace_id,
-                    item_id,
-                    next_payload,
-                    expected_epoch=room_epoch,
-                    encryption_key=collaboration_key,
-                    update_id=update_id,
-                ))
+                try:
+                    inserted = await anyio_to_thread.run_sync(partial(
+                        store.append_update,
+                        workspace_id,
+                        item_id,
+                        next_payload,
+                        expected_epoch=room_epoch,
+                        encryption_key=collaboration_key,
+                        update_id=update_id,
+                    ))
+                except ValueError:
+                    async with collab_send_lock:
+                        await websocket.send_json({
+                            "type": "collab.error",
+                            "code": "invalid_update",
+                            "updateId": update_id,
+                        })
+                    continue
             else:
                 # Legacy test/extension clients can close immediately after their
                 # final binary frame. Finish that frame inline so teardown cannot
@@ -2055,6 +2064,8 @@ def update_workspace_item(
             if "epoch conflict" in str(exc):
                 raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="invalid collaborative update") from exc
+        except (CollaborativeRoomCorruptError, CollaborativeRoomTransientError):
+            raise
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="invalid collaborative update") from exc
     elif doc.get("kind") == "page" and body.markdown is not None:

@@ -32,6 +32,9 @@ _temp/
 
 # --- Python ---
 backend/tests/
+!backend/tests/
+backend/tests/*
+!backend/tests/test_collab_safety.py
 __pycache__/
 *.py[cod]
 .pytest_cache/

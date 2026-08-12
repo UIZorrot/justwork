@@ -51,6 +51,36 @@ http://127.0.0.1:1446/openapi.json
 http://127.0.0.1:1446/docs
 ```
 
+### Reverse proxy WebSocket requirements
+
+Both `/v1/workspaces/{workspace_id}/relay` and
+`/v1/workspaces/{workspace_id}/items/{item_id}/collab` are WebSocket routes.
+Every reverse-proxy hop must preserve the HTTP/1.1 Upgrade headers. A minimal
+nginx setup is:
+
+```nginx
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+
+location / {
+    proxy_pass http://127.0.0.1:1446;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection $connection_upgrade;
+    proxy_read_timeout 3600s;
+}
+```
+
+A plain HTTP `GET .../collab` returning `404` is expected because this is not an
+HTTP endpoint. If nginx or Uvicorn logs that request as `HTTP/1.0 GET` during an
+actual browser WebSocket attempt, an upstream hop stripped `Upgrade`. Test the
+public `wss://` URL with a real WebSocket client; an invalid ticket should reach
+the application and be rejected with HTTP `403`, rather than appear as a plain
+HTTP `404`.
+
 ## PostgreSQL Mode
 
 ```powershell

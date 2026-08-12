@@ -5,6 +5,7 @@ import logging
 import base64
 import os
 import secrets
+import signal
 import subprocess
 import sys
 import threading
@@ -59,7 +60,7 @@ def safe_merge_yjs_updates(
     A separate interpreter process is required: yrs panics abort the process, and
     multiprocessing fork/spawn from a threaded uvicorn worker is unreliable
     (false "unmergable" → mass quarantine of healthy rooms).
-    Only a negative/crash exit without JSON ok is treated as confirmed corruption.
+    Only a confirmed SIGABRT is treated as corrupt CRDT evidence.
     """
     if not updates:
         return YjsMergeResult("ok", b"")
@@ -84,12 +85,14 @@ def safe_merge_yjs_updates(
     except OSError as exc:
         return YjsMergeResult("transient", None, f"merge_worker_os:{exc}")
 
-    # Signal death (yrs abort) typically yields negative returncode and empty/partial stdout.
-    if completed.returncode < 0:
+    # Only yrs' confirmed SIGABRT is evidence that these bytes can crash the
+    # process. SIGTERM/SIGKILL can come from deploy shutdowns, OOM pressure, or
+    # operators and must never cause durable room quarantine.
+    if completed.returncode == -signal.SIGABRT:
         return YjsMergeResult(
             "abort",
             None,
-            f"merge_worker_signal_{-completed.returncode}",
+            f"merge_worker_signal_{signal.SIGABRT}",
         )
     raw = (completed.stdout or b"").strip()
     if not raw:
@@ -130,6 +133,31 @@ def _raise_for_merge_failure(
     if result.kind == "abort":
         raise CollaborativeRoomCorruptError(f"unsafe/unmergable {detail}")
     raise CollaborativeRoomTransientError(f"transient merge failure {detail}")
+
+
+def _raise_for_incremental_merge_failure(
+    result: YjsMergeResult,
+    *,
+    workspace_id: str,
+    item_id: str,
+) -> None:
+    """Reject one unsafe client update without condemning a healthy room.
+
+    Callers invoke this only after the existing room has already merged in an
+    isolated worker. Therefore a SIGABRT in the second merge implicates the new
+    update, not the durable room bytes.
+    """
+    if result.kind == "abort":
+        raise ValueError(
+            f"invalid collaborative update for {workspace_id}/{item_id} ({result.detail})"
+        )
+    _raise_for_merge_failure(
+        result,
+        workspace_id=workspace_id,
+        item_id=item_id,
+        chunks=2,
+        has_snapshot=True,
+    )
 
 
 def _default_collab_dir() -> Path:
@@ -238,10 +266,16 @@ class CollaborativeUpdateStore:
                 quarantine_id = gateway.quarantine_collaborative_room(
                     workspace_id, item_id, reason=reason
                 )
-            except Exception:
+            except Exception as exc:
                 _logger.exception(
                     "failed to quarantine collab room %s/%s", workspace_id, item_id
                 )
+                # Never rotate the epoch on top of the old bytes when the
+                # preservation/delete transaction failed. That would make the
+                # encrypted snapshot unreadable and lose the recovery trail.
+                raise CollaborativeRoomTransientError(
+                    f"collab quarantine failed for {workspace_id}/{item_id}"
+                ) from exc
         _logger.error(
             "collab room quarantined workspace=%s item=%s quarantine_id=%s reason=%s",
             workspace_id,
@@ -893,12 +927,10 @@ class CollaborativeUpdateStore:
                         [encode_state_as_update(document), update]
                     )
                     if merge.kind != "ok" or merge.merged is None:
-                        _raise_for_merge_failure(
+                        _raise_for_incremental_merge_failure(
                             merge,
                             workspace_id=workspace_id,
                             item_id=item_id,
-                            chunks=2,
-                            has_snapshot=current is not None and current.snapshot is not None,
                         )
                     document = YDoc()
                     apply_update(document, merge.merged)
@@ -1020,12 +1052,10 @@ class CollaborativeUpdateStore:
                         [encode_state_as_update(document), update]
                     )
                     if merge.kind != "ok" or merge.merged is None:
-                        _raise_for_merge_failure(
+                        _raise_for_incremental_merge_failure(
                             merge,
                             workspace_id=workspace_id,
                             item_id=item_id,
-                            chunks=2,
-                            has_snapshot=current is not None and current.snapshot is not None,
                         )
                     document = YDoc()
                     apply_update(document, merge.merged)
