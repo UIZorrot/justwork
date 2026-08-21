@@ -104,6 +104,23 @@ test("structured collaborative saves are rejected when live content moved on", a
   assert.equal(stale, true);
 });
 
+test("canonical structured CRDT responses may normalize JSON without leaving the editor dirty", async () => {
+  const mod = await importTsModule("src/features/collaboration/save-race.ts");
+  const request = {
+    nextTitle: "Sheet",
+    nextMarkdown: "",
+    content: { kind: "table", rows: [{ id: "row_1", cells: { a: "value" } }] },
+  };
+  const saved = {
+    title: "Sheet",
+    markdown: "",
+    content: { kind: "table", rows: [{ cells: { a: "value" }, id: "row_1" }], workbookData: { id: "canonical" } },
+  };
+
+  assert.equal(mod.hasUnexpectedCollaborativeSaveResult(saved, request), true);
+  assert.equal(mod.hasUnexpectedCollaborativeSaveResult(saved, request, { ignoreContent: true }), false);
+});
+
 test("separate debounced save batches receive separate idempotency keys", async () => {
   const mod = await importTsModule("src/features/collaboration/save-race.ts");
   let sequence = 0;

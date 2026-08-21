@@ -8,6 +8,8 @@
       content="JustWork is an encrypted Agent-native collaborative workspace for humans and AI agents."
     />
     <title data-i18n="app.workbench.title">JustWork Workspace</title>
+    <link rel="icon" type="image/png" sizes="32x32" href="%BASE_URL%icons/icon-32.png?v=0.0.9" />
+    <link rel="icon" type="image/png" sizes="16x16" href="%BASE_URL%icons/icon-16.png?v=0.0.9" />
     <link rel="stylesheet" href="./workbench.css" />
   </head>
   <body>
@@ -137,12 +139,15 @@
             <span class="gate-btn-label" data-i18n="gate.setup.button">Create and unlock</span>
             <span class="gate-btn-spinner" aria-hidden="true"></span>
           </button>
+          <button id="login-workspace-btn" class="gate-secondary-btn" type="button" data-i18n="gate.setup.loginWorkspace">
+            Log in to an existing workspace
+          </button>
         </div>
 
         <div id="workspace-unlock-panel" class="workspace-gate-panel" hidden>
           <div class="gate-kicker" data-i18n="gate.unlock.kicker">Encrypted workspace</div>
-          <h1 data-i18n="gate.unlock.title">Unlock workspace</h1>
-          <p data-i18n="gate.unlock.description">The workspace is locked. Enter the password to read document contents.</p>
+          <h1 data-i18n="gate.unlock.title">Log in to an existing workspace</h1>
+          <p data-i18n="gate.unlock.description">Enter the workspace ID and password to open an existing encrypted workspace.</p>
           <div id="backend-unlock-extras" class="backend-gate-extras">
             <input
               id="backend-workspace-id-input"

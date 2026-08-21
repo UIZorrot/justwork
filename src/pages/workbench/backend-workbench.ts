@@ -166,6 +166,8 @@ import {
 import { showToast, type ToastVariant } from "@/shared/toast";
 import { formatBackendOrUnknownError } from "@/shared/user-facing-error";
 
+declare const __JUSTWORK_WEB_APP__: boolean;
+
 const DRAG_TYPE = "application/x-justwork-doc-id";
 const OPTIMISTIC_DOC_ID_PREFIX = "optimistic_";
 // Realtime relay invalidations are the primary refresh path. This interval is
@@ -763,6 +765,7 @@ export async function startBackendWorkbench(): Promise<void> {
   const setupRememberPasswordInput = document.getElementById("setup-remember-password-input") as HTMLInputElement | null;
   const unlockRememberPasswordInput = document.getElementById("unlock-remember-password-input") as HTMLInputElement | null;
   const setupWorkspaceBtn = document.getElementById("setup-workspace-btn") as HTMLButtonElement | null;
+  const loginWorkspaceBtn = document.getElementById("login-workspace-btn") as HTMLButtonElement | null;
   const unlockWorkspaceBtn = document.getElementById("unlock-workspace-btn") as HTMLButtonElement | null;
   const createWorkspaceBtn = document.getElementById("create-workspace-btn") as HTMLButtonElement | null;
   const lockWorkspaceBtn = document.getElementById("lock-workspace-btn") as HTMLButtonElement | null;
@@ -869,6 +872,7 @@ export async function startBackendWorkbench(): Promise<void> {
     !setupRememberPasswordInput ||
     !unlockRememberPasswordInput ||
     !setupWorkspaceBtn ||
+    !loginWorkspaceBtn ||
     !unlockWorkspaceBtn ||
     !createWorkspaceBtn ||
     !lockWorkspaceBtn ||
@@ -1432,6 +1436,7 @@ export async function startBackendWorkbench(): Promise<void> {
     unlockWorkspaceBtn.setAttribute("aria-label", unlockText);
     gateRecentSection.classList.toggle("is-disabled", busy);
     setupWorkspaceBtn.disabled = busy;
+    loginWorkspaceBtn.disabled = busy;
     unlockWorkspaceBtn.disabled = busy;
     createWorkspaceBtn.disabled = busy;
     setupPasswordInput.disabled = busy;
@@ -2011,6 +2016,7 @@ export async function startBackendWorkbench(): Promise<void> {
       } else if (snapshot) {
         removeCollaborativeSnapshot(collaborativeMarkdownSnapshotKey(workspaceId, doc.id));
       }
+      collectLocalCollaborativeUpdates(doc.id, collaborator);
       collaborativeStructuredDocs.set(doc.id, collaborator);
       return collaborator;
     };
@@ -2022,6 +2028,7 @@ export async function startBackendWorkbench(): Promise<void> {
       const collaborator = createStructuredCollaborator({
         kind: doc.kind === "table" ? "table" : "board",
       });
+      collectLocalCollaborativeUpdates(doc.id, collaborator);
       collaborativeStructuredDocs.set(doc.id, collaborator);
       collaborationReadyDocIds.delete(doc.id);
       collaborationEpochByDoc.delete(doc.id);
@@ -2078,6 +2085,29 @@ export async function startBackendWorkbench(): Promise<void> {
       activeCollaborativeTransport = undefined;
       activeCollaborativeItemId = null;
       activeCollaborativeJoinItemId = null;
+    };
+    const invalidateStaleStructuredCollaborator = (
+      doc: WorkspaceDoc,
+      authoritativeContent: WorkspaceDocContent | null | undefined,
+    ): boolean => {
+      if (doc.kind !== "table" && doc.kind !== "board") return false;
+      const collaborator = collaborativeStructuredDocs.get(doc.id);
+      if (!collaborator || !collaborationReadyDocIds.has(doc.id)) return false;
+      const normalizedAuthoritative = normalizeStructuredDocumentContent(
+        doc.kind,
+        authoritativeContent ?? {},
+      );
+      if (syncValuesEqual(collaborator.getContent(), normalizedAuthoritative)) return false;
+
+      // A REST refresh can advance a structured document before this browser
+      // observes the room reset/update. Never leave the freshly rendered body
+      // attached to an older Y.Doc: the next cell/card edit would otherwise
+      // submit the untouched fields from that stale lineage and overwrite the
+      // remote author/Agent change.
+      if (active.id === doc.id) stopActiveCollaborativeTransport();
+      removeCollaborativeSnapshot(collaborativeMarkdownSnapshotKey(workspaceId, doc.id));
+      resetStructuredCollaborator(doc);
+      return true;
     };
     const startCollaborativeTransport = async (doc: WorkspaceDoc): Promise<void> => {
       if (!(["page", "table", "board"] as const).includes(doc.kind as "page" | "table" | "board") || doc.id === WELCOME_DOC_ID) {
@@ -2265,8 +2295,32 @@ export async function startBackendWorkbench(): Promise<void> {
           markdownCollaborator.applyLocalMarkdown(seedMarkdown);
           replayedBootstrapEdit = hasUnboundBootstrapEdit && seedMarkdown !== bootstrapBaseMarkdown;
         } else if (structuredCollaborator && (doc.kind === "table" || doc.kind === "board")) {
+          // An empty epoch can be the result of an authoritative history
+          // rollback. The workbench which wins bootstrap may still have the
+          // previous body cached, so always seed a new structured lineage from
+          // the current REST item rather than from that cache.
+          let seedContent = normalizeStructuredDocumentContent(doc.kind, doc.content ?? {});
+          try {
+            const authoritative = await session.loadItem(doc.id);
+            if (authoritative.kind === doc.kind) {
+              seedContent = normalizeStructuredDocumentContent(doc.kind, authoritative.content ?? {});
+              if (!dirtyDocIds.has(doc.id)) {
+                updateDocById(doc.id, (candidate) => ({
+                  ...candidate,
+                  title: authoritative.title,
+                  revision: authoritative.revision,
+                  updatedAt: authoritative.updatedAt,
+                  content: seedContent,
+                }));
+              }
+            }
+          } catch {
+            // The hydrated item remains a safe fallback for a genuinely new
+            // room; normal revision checks still guard its subsequent save.
+          }
+          if (generation !== collaborativeTransportGeneration || active.id !== doc.id) return;
           structuredCollaborator.applyLocalContent(
-            normalizeStructuredDocumentContent(doc.kind, doc.content ?? {}),
+            seedContent,
           );
         }
         markCollaborationReady(doc);
@@ -2957,6 +3011,14 @@ export async function startBackendWorkbench(): Promise<void> {
               return nextContent;
             }
             const collaborator = getStructuredCollaboratorForDoc(doc);
+            if (!syncValuesEqual(collaborator.getContent(), viewBaseContent)) {
+              invalidateStaleStructuredCollaborator(doc, viewBaseContent);
+              commitLocalEdit(doc.id, { content: nextContent });
+              scheduleDocSave(doc.id, expectedRevision, { content: nextContent }, active.title, "", "", 180, {
+                content: previousContent,
+              });
+              return nextContent;
+            }
             collaborator.applyLocalContent(nextContent, viewBaseContent);
             const convergedContent = collaborator.getContent();
             saveCollaborativeSnapshot(
@@ -3038,6 +3100,14 @@ export async function startBackendWorkbench(): Promise<void> {
               return nextContent;
             }
             const collaborator = getStructuredCollaboratorForDoc(doc);
+            if (!syncValuesEqual(collaborator.getContent(), viewBaseContent)) {
+              invalidateStaleStructuredCollaborator(doc, viewBaseContent);
+              commitLocalEdit(doc.id, { content: nextContent });
+              scheduleDocSave(doc.id, expectedRevision, { content: nextContent }, active.title, "", "", 180, {
+                content: previousContent,
+              });
+              return nextContent;
+            }
             collaborator.applyLocalContent(nextContent, viewBaseContent);
             const convergedContent = collaborator.getContent();
             saveCollaborativeSnapshot(
@@ -3210,7 +3280,9 @@ export async function startBackendWorkbench(): Promise<void> {
         }
         const activeCollaborator = nextPatch.markdown !== undefined
           ? markdownCollaborator
-          : undefined;
+          : nextPatch.content !== undefined
+            ? structuredCollaborator
+            : undefined;
         const collaborativeUpdate = activeCollaborator
           && collaborationReadyDocIds.has(itemId)
           && pendingUpdateCount > 0
@@ -3371,12 +3443,16 @@ export async function startBackendWorkbench(): Promise<void> {
             );
             const hasCollaborativeMarkdown = request.patch.markdown !== undefined
               && collaborativeMarkdownDocs.has(request.itemId);
+            const hasCollaborativeStructuredContent = request.patch.content !== undefined
+              && collaborativeStructuredDocs.has(request.itemId)
+              && collaborationReadyDocIds.has(request.itemId);
             const isStale = hasNewerLocalEdit || hasUnexpectedCollaborativeSaveResult(
               next,
               collaborativeSaveRequest,
               {
                 ignoreMarkdown: hasCollaborativeMarkdown,
                 ignoreTitle: request.patch.title === undefined,
+                ignoreContent: hasCollaborativeStructuredContent,
               },
             );
             const saveResolution = reconcileCollaborativeSave(liveDoc, isStale, hasNewerDraft);
@@ -3432,6 +3508,13 @@ export async function startBackendWorkbench(): Promise<void> {
               } else {
                 saveStatus(saveStatusEl, request.doneText);
               }
+            } else if (!docSaveQueues.has(active.id) && !dirtyDocIds.has(active.id)) {
+              // The save indicator is workspace-global. If the user navigates
+              // while the previous document's request is in flight, its
+              // completion must still clear the old "Saving" label; otherwise
+              // the newly opened Table/Sheet appears to be saving forever even
+              // though it has issued no write at all.
+              saveStatus(saveStatusEl, t("status.saved"));
             }
           } catch (e) {
             if (shouldQueueAsOfflinePending(e)) {
@@ -3465,6 +3548,9 @@ export async function startBackendWorkbench(): Promise<void> {
     }
 
     const refreshWorkspaceFromRemote = async (): Promise<void> => {
+      const previousTreeRevisionByItem = new Map(
+        treeData.items.map((item) => [item.id, item.revision] as const),
+      );
       treeData = await session.loadTree();
       workspaceRevision = treeData.workspace_revision;
       const nextActiveId = treeData.items.some((item) => item.id === active.id && !item.in_trash)
@@ -3493,17 +3579,18 @@ export async function startBackendWorkbench(): Promise<void> {
         ?? workspace.docs[0]!;
       let collaborator = summary.kind === "page" ? getCollaboratorForDoc(summary) : null;
       const local = localCollaborativeDocCache.get(summary.id) ?? null;
+      const treeRevisionAdvanced = summary.revision > (previousTreeRevisionByItem.get(summary.id) ?? -1);
       const isComposingActivePage = summary.kind === "page" && summary.id === active.id && editor?.isComposing() === true;
       const shouldReloadPage = (
         summary.kind === "page" &&
         !isComposingActivePage &&
         !dirtyDocIds.has(summary.id) &&
-        (!hydratedDocIds.has(summary.id) || (local?.revision ?? 0) < summary.revision)
+        (treeRevisionAdvanced || !hydratedDocIds.has(summary.id) || (local?.revision ?? 0) < summary.revision)
       );
       const shouldReloadStructured = (
         (summary.kind === "table" || summary.kind === "board") &&
         !dirtyDocIds.has(summary.id) &&
-        (!hydratedDocIds.has(summary.id) || (local?.revision ?? 0) < summary.revision)
+        (treeRevisionAdvanced || !hydratedDocIds.has(summary.id) || (local?.revision ?? 0) < summary.revision)
       );
       const full = summary.kind === "welcome"
         ? { ...summary, markdown: buildLocalizedWelcomeMarkdown(workspace) }
@@ -3512,6 +3599,9 @@ export async function startBackendWorkbench(): Promise<void> {
           : hydratedDocIds.has(summary.id)
           ? (localCollaborativeDocCache.get(summary.id) ?? summary)
           : await session.loadItem(summary.id);
+      if (shouldReloadStructured && (summary.kind === "table" || summary.kind === "board")) {
+        invalidateStaleStructuredCollaborator(summary, full.content);
+      }
       if (summary.kind === "page" && collaborator && shouldReloadPage) {
         const canonicalState = await session.loadCollaborativeMarkdownState(summary.id);
         const currentEpoch = collaborationEpochByDoc.get(summary.id);
@@ -3826,10 +3916,11 @@ export async function startBackendWorkbench(): Promise<void> {
                   }
                   // A delayed local save must never run after the authoritative
                   // history inverse and silently re-apply the newer content.
-                  flushPendingDocSave(ev.itemId);
+                  await flushPendingDocSave(ev.itemId);
                   await waitForDocSaveQueueToSettle(ev.itemId);
                   const current = await session.loadItem(ev.itemId);
                   const revertMutationId = mutationId();
+                  const revertPatch = buildLocalHistoryRevertPatch(ev, current.kind);
                   let reverted = await runHistoryRevertWithRetry(
                     () => ev.op === "workspace.item.create"
                       ? session.trashItem(ev.itemId, current.revision, revertMutationId)
@@ -3853,7 +3944,11 @@ export async function startBackendWorkbench(): Promise<void> {
                               ? session.trashItem(ev.itemId, current.revision, revertMutationId)
                               : session.restoreItem(ev.itemId, current.revision, revertMutationId)
                             : session.saveItem(ev.itemId, {
-                              ...buildLocalHistoryRevertPatch(ev),
+                              ...revertPatch,
+                              resetCollaborativeState: (
+                                (current.kind === "table" || current.kind === "board")
+                                && revertPatch.content !== undefined
+                              ),
                               expectedRevision: current.revision,
                               mutationId: revertMutationId,
                             }),
@@ -3888,6 +3983,22 @@ export async function startBackendWorkbench(): Promise<void> {
                       );
                       resetMarkdownCollaborator(reverted);
                     }
+                  } else if (
+                    (reverted.kind === "table" || reverted.kind === "board")
+                    && ev.before.content !== undefined
+                  ) {
+                    // The backend rotated the structured room together with the
+                    // authoritative inverse. Drop every local copy of the old
+                    // lineage before rendering or reconnecting, otherwise its
+                    // next component command can restore the state just reverted.
+                    if (active.id === reverted.id) {
+                      stopActiveCollaborativeTransport();
+                      restartCollaborativeTransport = true;
+                    }
+                    removeCollaborativeSnapshot(
+                      collaborativeMarkdownSnapshotKey(workspaceId, reverted.id),
+                    );
+                    resetStructuredCollaborator(reverted);
                   }
                   dirtyDocIds.delete(ev.itemId);
                   removeLocalEditOperations(ev.itemId);
@@ -4328,6 +4439,9 @@ export async function startBackendWorkbench(): Promise<void> {
         const full = needsRemoteLoad
           ? await session.loadItem(doc.id)
           : (localCollaborativeDocCache.get(doc.id) ?? cached);
+        if (needsRemoteLoad) {
+          invalidateStaleStructuredCollaborator(doc, full.content);
+        }
         markDocHydrated(doc.id);
         clearDocumentLoadFailure(doc.id);
         const hasEditDuringHydration = hasNewerLocalEditGeneration(
@@ -5903,6 +6017,10 @@ export async function startBackendWorkbench(): Promise<void> {
     showGate("setup");
   });
 
+  loginWorkspaceBtn.addEventListener("click", () => {
+    showGate("unlock");
+  });
+
   lockWorkspaceBtn.addEventListener("click", () => {
     tableView?.destroy?.();
     boardView?.destroy?.();
@@ -5923,5 +6041,5 @@ export async function startBackendWorkbench(): Promise<void> {
     imageSync?.disconnect();
   });
 
-  showGate(savedWsId ? "unlock" : "setup");
+  showGate(savedWsId || __JUSTWORK_WEB_APP__ ? "unlock" : "setup");
 }

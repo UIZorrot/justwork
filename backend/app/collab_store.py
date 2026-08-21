@@ -1013,6 +1013,7 @@ class CollaborativeUpdateStore:
         commit: Callable[[str], T],
         expected_epoch: str | None = None,
         encryption_key: bytes | None = None,
+        commit_document: Callable[[str, dict], T] | None = None,
     ) -> tuple[bytes, str, T]:
         """Commit a Yjs update and its workspace revision as one guarded operation.
 
@@ -1060,8 +1061,12 @@ class CollaborativeUpdateStore:
                     document = YDoc()
                     apply_update(document, merge.merged)
                     merged = merge.merged
-                    merged_markdown = str(document.get_text("markdown"))
-                    result = commit(merged_markdown)
+                    _, merged_markdown, merged_content = self._content_from_document(document)
+                    result = (
+                        commit_document(merged_markdown, merged_content)
+                        if commit_document is not None
+                        else commit(merged_markdown)
+                    )
                 except CollaborativeRoomCorruptError as exc:
                     return CollaborativeRoomMutation(
                         epoch, current.snapshot if current else None, 0, exc, False
@@ -1116,11 +1121,19 @@ class CollaborativeUpdateStore:
                 apply_update(document, current)
             apply_update(document, update)
             merged = encode_state_as_update(document)
-            merged_markdown = str(document.get_text("markdown"))
+            _, merged_markdown, merged_content = self._content_from_document(document)
             encrypted = encrypt_collaboration_bytes(
                 key, merged, aad=self._aad(workspace_id, item_id, epoch, "file", 0)
             )
-            result = self._commit_snapshot_locked(path, encrypted, lambda: commit(merged_markdown))
+            result = self._commit_snapshot_locked(
+                path,
+                encrypted,
+                lambda: (
+                    commit_document(merged_markdown, merged_content)
+                    if commit_document is not None
+                    else commit(merged_markdown)
+                ),
+            )
             self._bootstrap_leases.pop(self._bootstrap_key(workspace_id, item_id), None)
             return merged, merged_markdown, result
 

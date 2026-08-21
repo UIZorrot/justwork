@@ -8,6 +8,9 @@ import manifest from "./src/manifest";
 const rootDir = path.dirname(fileURLToPath(import.meta.url));
 
 export default defineConfig({
+  define: {
+    __JUSTWORK_WEB_APP__: JSON.stringify(false),
+  },
   resolve: {
     alias: {
       "@": path.resolve(rootDir, "src"),

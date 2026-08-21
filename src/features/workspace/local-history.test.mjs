@@ -52,6 +52,34 @@ test("local history builds revert patch from before snapshot", async () => {
   });
 });
 
+test("history revert only restores fields writable by the document kind", async () => {
+  const mod = await loadTranspiledModule("src/features/workspace/local-history.ts");
+  const event = {
+    id: "rev_remote",
+    workspaceId: "ws_1",
+    op: "workspace.item.set",
+    itemId: "doc_1",
+    timestamp: "2026-05-11T00:00:00.000Z",
+    title: "Doc",
+    // Backend revision snapshots contain both fields regardless of kind.
+    before: { title: "Old", markdown: "", content: { rows: [] } },
+    after: { title: "New", markdown: "", content: { rows: [{ id: "row_1" }] } },
+  };
+
+  assert.deepEqual(mod.buildLocalHistoryRevertPatch(event, "page"), {
+    title: "Old",
+    markdown: "",
+  });
+  assert.deepEqual(mod.buildLocalHistoryRevertPatch(event, "table"), {
+    title: "Old",
+    content: { rows: [] },
+  });
+  assert.deepEqual(mod.buildLocalHistoryRevertPatch(event, "board"), {
+    title: "Old",
+    content: { rows: [] },
+  });
+});
+
 test("local history allows structural move, pin, trash, and restore events to be reverted", async () => {
   const mod = await loadTranspiledModule("src/features/workspace/local-history.ts");
   const base = {

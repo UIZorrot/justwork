@@ -1,0 +1,10 @@
+﻿{
+  "name": "JustWork",
+  "short_name": "JustWork",
+  "description": "Encrypted collaborative workspace for humans and AI agents.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f7f7f3",
+  "theme_color": "#111111",
+  "icons": [{ "src": "/justwork-brand-v008.png", "sizes": "800x800", "type": "image/png" }]
+}

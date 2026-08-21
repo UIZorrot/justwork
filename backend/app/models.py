@@ -239,6 +239,7 @@ class WorkspaceItemUpdateRequest(WriteSigningEnvelope):
     content: dict[str, Any] | None = None
     collaborative_update: str | None = None
     collaborative_epoch: str | None = None
+    reset_collaborative_state: bool = False
     expected_revision: int
 
 

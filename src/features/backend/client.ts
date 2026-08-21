@@ -177,6 +177,7 @@ export type UpdateItemBody = {
   content?: WorkspaceDocContent | null;
   collaborative_update?: string | null;
   collaborative_epoch?: string | null;
+  reset_collaborative_state?: boolean;
   expected_revision: number;
   client_mutation_id?: string | null;
 };

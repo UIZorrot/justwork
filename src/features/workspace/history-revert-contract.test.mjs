@@ -8,11 +8,14 @@ test("history revert drains delayed saves and adopts the canonical collaborative
   const handlerEnd = source.indexOf("historyList.appendChild(li)", handlerStart);
   const handler = source.slice(handlerStart, handlerEnd);
 
-  assert.match(handler, /flushPendingDocSave\(ev\.itemId\)/);
+  assert.match(handler, /await flushPendingDocSave\(ev\.itemId\)/);
   assert.match(handler, /await waitForDocSaveQueueToSettle\(ev\.itemId\)/);
+  assert.match(handler, /buildLocalHistoryRevertPatch\(ev, current\.kind\)/);
+  assert.match(handler, /resetCollaborativeState/);
   assert.match(handler, /runHistoryRevertWithRetry/);
   assert.match(handler, /applyAuthoritativeCollaborativeState\(reverted\)/);
   assert.match(handler, /resetMarkdownCollaborator\(reverted\)/);
+  assert.match(handler, /resetStructuredCollaborator\(reverted\)/);
   assert.match(handler, /dirtyDocIds\.delete\(ev\.itemId\)/);
   assert.match(handler, /removeBackendDocDraft\(workspaceId, ev\.itemId, Number\.MAX_SAFE_INTEGER\)/);
 });

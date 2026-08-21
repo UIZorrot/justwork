@@ -163,11 +163,23 @@ export function isRevertableLocalHistoryEvent(event: LocalHistoryEvent): boolean
   return false;
 }
 
-export function buildLocalHistoryRevertPatch(event: LocalHistoryEvent): OfflineMutationPatch {
+export function buildLocalHistoryRevertPatch(
+  event: LocalHistoryEvent,
+  kind?: "welcome" | "page" | "folder" | "table" | "board",
+): OfflineMutationPatch {
   const patch: OfflineMutationPatch = {};
   if (event.before.title !== undefined) patch.title = event.before.title;
-  if (event.before.markdown !== undefined) patch.markdown = event.before.markdown;
-  if (event.before.content !== undefined) patch.content = event.before.content;
+  // Remote revision snapshots intentionally contain both `markdown` and
+  // `content` for every item. Sending those fields back blindly makes table
+  // and board rollback fail (`<kind> markdown cannot be updated`) and makes a
+  // page rollback carry an irrelevant structured body. Only restore fields
+  // which are writable for the live document kind.
+  if ((kind === undefined || kind === "page") && event.before.markdown !== undefined) {
+    patch.markdown = event.before.markdown;
+  }
+  if ((kind === undefined || kind === "table" || kind === "board") && event.before.content !== undefined) {
+    patch.content = event.before.content;
+  }
   return patch;
 }
 

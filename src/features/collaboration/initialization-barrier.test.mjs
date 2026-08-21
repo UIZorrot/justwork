@@ -107,3 +107,22 @@ test("pending structured collaboration never renders or edits from an empty coll
   );
   assert.match(source, /if \(structuredCollaborator && active\.id === doc\.id\) \{[\s\S]*?renderAll\(\);/);
 });
+
+test("authoritative structured refreshes detach stale Yjs state before the next edit", async () => {
+  const source = await readFile("src/pages/workbench/backend-workbench.ts", "utf8");
+  const invalidateBlock = /const invalidateStaleStructuredCollaborator = \([\s\S]*?\n    \};/.exec(source)?.[0] ?? "";
+
+  assert.match(invalidateBlock, /syncValuesEqual\(collaborator\.getContent\(\), normalizedAuthoritative\)/);
+  assert.match(invalidateBlock, /stopActiveCollaborativeTransport\(\)/);
+  assert.match(invalidateBlock, /removeCollaborativeSnapshot/);
+  assert.match(invalidateBlock, /resetStructuredCollaborator\(doc\)/);
+  assert.match(source, /shouldReloadStructured[\s\S]{0,900}?invalidateStaleStructuredCollaborator\(summary, full\.content\)/);
+  assert.match(source, /const previousTreeRevisionByItem = new Map/);
+  assert.match(source, /treeRevisionAdvanced \|\| !hydratedDocIds\.has\(summary\.id\)/);
+  assert.match(source, /needsRemoteLoad[\s\S]{0,600}?invalidateStaleStructuredCollaborator\(doc, full\.content\)/);
+  assert.equal(
+    source.match(/if \(!syncValuesEqual\(collaborator\.getContent\(\), viewBaseContent\)\) \{/g)?.length,
+    2,
+    "table and board must reject a rendered body backed by a stale collaborator",
+  );
+});

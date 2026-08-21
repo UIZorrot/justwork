@@ -7,6 +7,9 @@ const rootDir = path.dirname(fileURLToPath(import.meta.url));
 const workbenchDir = path.resolve(rootDir, "src/pages/workbench");
 
 export default defineConfig({
+  define: {
+    __JUSTWORK_WEB_APP__: JSON.stringify(true),
+  },
   root: workbenchDir,
   envDir: rootDir,
   publicDir: path.resolve(rootDir, "public"),

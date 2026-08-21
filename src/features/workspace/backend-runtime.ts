@@ -168,6 +168,7 @@ export function createBackendWorkspaceSession(opts: BackendWorkspaceSessionOptio
         content?: WorkspaceDocContent | null;
         collaborativeUpdate?: string;
         collaborativeEpoch?: string;
+        resetCollaborativeState?: boolean;
         expectedRevision: number;
         mutationId?: string;
       },
@@ -179,6 +180,7 @@ export function createBackendWorkspaceSession(opts: BackendWorkspaceSessionOptio
         content: patch.content ?? null,
         collaborative_update: patch.collaborativeUpdate ?? null,
         collaborative_epoch: patch.collaborativeEpoch ?? null,
+        reset_collaborative_state: patch.resetCollaborativeState ?? false,
         expected_revision: patch.expectedRevision,
         client_mutation_id: patch.mutationId ?? null,
       });

@@ -1,7 +1,7 @@
 {
   "name": "justwork-doc-shell",
   "private": true,
-  "version": "0.0.8",
+  "version": "0.0.9",
   "type": "module",
   "workspaces": [
     "packages/*"
@@ -15,6 +15,9 @@
     "build": "yarn build:extension && yarn build:web",
     "build:extension": "node node_modules/vite/bin/vite.js build --mode release && node scripts/sanitize-chrome-store-dist.mjs",
     "build:web": "node node_modules/vite/bin/vite.js build --mode release --config vite.web.config.ts",
+    "build:web:site": "node node_modules/vite/bin/vite.js build --mode release --config vite.web.config.ts --base=/app/",
+    "build:site": "yarn build:web:site && node node_modules/vite/bin/vite.js build --config vite.site.config.ts",
+    "dev:site": "node node_modules/vite/bin/vite.js --config vite.site.config.ts",
     "build:local": "yarn build:local:extension && yarn build:local:web",
     "build:local:extension": "node node_modules/vite/bin/vite.js build && node scripts/sanitize-chrome-store-dist.mjs",
     "build:local:web": "node node_modules/vite/bin/vite.js build --config vite.web.config.ts",
@@ -30,7 +33,8 @@
     "test:backend": "python -m unittest backend.tests.test_backend_agent_api backend.tests.test_write_signing",
     "test:cli": "yarn build:packages && powershell -NoProfile -ExecutionPolicy Bypass -File scripts/cli-workspace-e2e.ps1",
     "justwork": "node packages/cli/dist/index.js",
-    "package:chrome-store": "powershell -NoProfile -ExecutionPolicy Bypass -File .publish/package-extension.ps1"
+    "package:chrome-store": "powershell -NoProfile -ExecutionPolicy Bypass -File .publish/package-extension.ps1",
+    "deploy:site": "yarn build:site && npx wrangler@4 pages deploy dist-site --project-name=justwork --branch=main"
   },
   "dependencies": {
     "@justwork/security": "0.0.1",

@@ -222,6 +222,10 @@ async function main() {
     });
     await pageA.goto(`${staticServer.baseUrl}${entryPath}?backendUrl=${encodeURIComponent(backendUrl)}`);
     await pageA.waitForFunction(() => document.querySelector("#backend-health-status")?.getAttribute("data-status") === "online");
+    if (!(await pageA.locator("#backend-title-setup-input").isVisible())) {
+      await pageA.click("#create-workspace-btn");
+      await pageA.locator("#backend-title-setup-input").waitFor({ state: "visible" });
+    }
     await pageA.fill("#backend-title-setup-input", `${distribution} distribution E2E`);
     await pageA.fill("#setup-password-input", password);
     await pageA.click("#setup-workspace-btn");
@@ -279,6 +283,11 @@ async function main() {
     const editorA = await editorFor(pageA);
     const bootstrapMarker = `${markerPrefix}_BOOTSTRAP_INPUT`;
     await typeAtEnd(pageA, editorA, bootstrapMarker);
+    await pageA.waitForFunction(
+      (marker) => document.querySelector("#editor-root .doc-editor-surface--markdown")?.textContent?.includes(marker),
+      bootstrapMarker,
+      { timeout: 2_000 },
+    );
     for (let attempt = 0; attempt < 80; attempt += 1) {
       assert.equal(count((await editorA.textContent()) ?? "", bootstrapMarker), 1);
       await new Promise((resolve) => setTimeout(resolve, 50));

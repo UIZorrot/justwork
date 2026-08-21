@@ -50,13 +50,14 @@ export function hasStaleCollaborativeSave(
 export function hasUnexpectedCollaborativeSaveResult(
   savedDoc: CollaborativeDocState | null | undefined,
   request: CollaborativeSaveRequest,
-  options: { ignoreMarkdown?: boolean; ignoreTitle?: boolean } = {},
+  options: { ignoreMarkdown?: boolean; ignoreTitle?: boolean; ignoreContent?: boolean } = {},
 ): boolean {
   if (!savedDoc) return true;
   return (
     (!options.ignoreTitle && savedDoc.title !== request.nextTitle) ||
     (!options.ignoreMarkdown && savedDoc.markdown !== request.nextMarkdown) ||
     (
+      !options.ignoreContent &&
       request.content !== undefined &&
       stableContentKey(savedDoc.content) !== stableContentKey(request.content)
     )

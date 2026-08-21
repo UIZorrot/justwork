@@ -1,0 +1,108 @@
+﻿<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="JustWork 是面向人类与 AI Agent 的端到端加密协作工作区。支持 Markdown、表格、工作表、看板、实时协作与可追溯历史。" />
+    <meta name="theme-color" content="#111111" />
+    <meta property="og:title" content="JustWork — Encrypted Collaborative Workspace" />
+    <meta property="og:description" content="一个真正为人类和 AI Agent 共同工作而设计的加密协作空间。" />
+    <meta property="og:type" content="website" />
+    <meta property="og:locale" content="zh_CN" />
+    <meta property="og:url" content="https://justwork.txzy.net/" />
+    <meta property="og:image" content="https://justwork.txzy.net/og-justwork.svg" />
+    <link rel="canonical" href="https://justwork.txzy.net/" />
+    <link rel="alternate" hreflang="zh-CN" href="https://justwork.txzy.net/" />
+    <link rel="alternate" hreflang="en" href="https://justwork.txzy.net/en/" />
+    <link rel="alternate" hreflang="x-default" href="https://justwork.txzy.net/" />
+    <link rel="manifest" href="/site.webmanifest" />
+    <link rel="icon" href="/justwork-brand-v008.png" />
+    <link rel="stylesheet" href="/site.css" />
+    <title>JustWork — 加密协作工作区</title>
+  </head>
+  <body>
+    <a class="skip-link" href="#main">跳到正文</a>
+    <header class="site-header">
+      <div class="shell nav-row">
+        <a class="brand" href="/" aria-label="JustWork 首页"><img class="brand-mark" src="/justwork-brand-v008.png" alt="" /><span>JustWork</span></a>
+        <nav class="site-nav" data-site-nav aria-label="主导航">
+          <a href="#features">功能</a><a href="/docs/">使用文档</a><a href="#download">下载</a><a href="/privacy/">隐私</a><a class="mobile-nav-only" href="/app/">在线使用</a>
+        </nav>
+        <div class="nav-actions">
+          <label class="language-picker"><span class="sr-only">选择语言</span><select data-language-switcher aria-label="选择语言"><option value="zh-CN" selected>中文</option><option value="en">EN</option></select></label>
+          <a class="button secondary small" href="https://chromewebstore.google.com/detail/justwork-%E2%80%94-encrypted-coll/fhplelioofjbochfoogomboajhalcehl?hl=zh-CN&amp;utm_source=ext_sidebar" target="_blank" rel="noopener noreferrer">Chrome 商店 ↗</a>
+          <a class="button small" href="/app/">在线使用</a>
+          <button class="menu-button" type="button" data-menu-button aria-label="打开菜单" aria-expanded="false">菜单</button>
+        </div>
+      </div>
+    </header>
+
+    <main id="main">
+      <section class="shell hero">
+        <div class="hero-copy" data-reveal>
+          <p class="eyebrow">Humans × AI Agents</p>
+          <h1>Work,<br />without walls.<span>人与 Agent 共用的加密协作空间。</span></h1>
+          <p class="hero-lede">文档、数据、任务与上下文都在一个工作区。浏览器里完成日常协作，Agent 通过开放接口参与同一份工作。</p>
+          <div class="hero-actions">
+            <a class="button" href="/app/">立即在线使用 <span aria-hidden="true">→</span></a>
+            <a class="button secondary" href="#download">下载 Chrome 扩展</a>
+          </div>
+          <p class="hero-note">无需注册 · 工作区密码不会写入后端数据库 · 可随时导出或离开</p>
+        </div>
+        <div class="hero-visual" aria-label="JustWork 工作区界面示意" data-reveal>
+          <div class="product-frame">
+            <div class="frame-top"><span class="frame-dot"></span><span class="frame-dot"></span><span class="frame-dot"></span><span class="frame-title">justwork / launch</span></div>
+            <div class="workspace-ui">
+              <aside class="workspace-tree"><div class="tree-label">Workspace</div><div class="tree-row active">▣ Launch brief</div><div class="tree-row">⌗ Research</div><div class="tree-row indent">Market notes</div><div class="tree-row indent">Roadmap</div><div class="tree-row">▦ Metrics</div><div class="tree-row">▤ Tasks</div></aside>
+              <div class="workspace-doc"><div class="doc-kicker">Shared document · saved</div><div class="doc-title">Launch brief</div><div class="doc-rule"></div><div class="doc-rule mid"></div><div class="doc-rule"></div><div class="doc-rule short"></div><div class="agent-card"><div class="agent-card-top"><span>Agent contribution</span><span class="live-badge">Live</span></div><div class="agent-line">@agent summarized the research and updated 3 action items.</div></div></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="shell proof-strip" aria-label="产品能力概览">
+        <div class="proof"><strong>E2EE</strong><span>内容在客户端加密后同步</span></div>
+        <div class="proof"><strong>4 formats</strong><span>Markdown、Table、Sheet、Board</span></div>
+        <div class="proof"><strong>1,000</strong><span>付费工作区历史记录上限</span></div>
+        <div class="proof"><strong>Open</strong><span>人类界面与 Agent API 同源</span></div>
+      </section>
+
+      <section class="section" id="features">
+        <div class="shell">
+          <div class="section-heading" data-reveal><h2>不是又一个<br />文档工具。</h2><p>JustWork 把协作对象从“文件”扩展到完整工作上下文：结构、权限、历史和 Agent 都围绕同一个加密工作区运行。</p></div>
+          <div class="feature-grid" data-reveal>
+            <article class="feature-card"><span class="feature-index">01 / ENCRYPTION</span><h3>密码掌握在你手里</h3><p>内容先在客户端加密，再同步到后端。工作区密码不会写入后端数据库；选择“记住密码”时，只保存在当前浏览器设备。</p></article>
+            <article class="feature-card"><span class="feature-index">02 / COLLABORATION</span><h3>实时，而且可追溯</h3><p>多人进入同一工作区协作，保存状态、成员在线状态与操作历史清晰可见；历史是追加记录，不提供改写历史的 rebase。</p></article>
+            <article class="feature-card"><span class="feature-index">03 / AGENT-NATIVE</span><h3>Agent 是参与者，不是外挂</h3><p>从侧栏复制连接说明给 Agent。它通过同一后端 API 读写工作区，并在历史里留下可识别的操作归因。</p></article>
+            <article class="feature-card"><span class="feature-index">04 / STRUCTURE</span><h3>一种空间，四种表达</h3><p>长文写 Markdown，数据放 Table 或 Sheet，流程与项目进入 Board。文件夹、置顶和垃圾箱构成统一的信息结构。</p></article>
+            <article class="feature-card"><span class="feature-index">05 / RECOVERY</span><h3>撤销、恢复、找得回来</h3><p>从操作历史回滚内容，从垃圾箱恢复误删项目。重要更改不需要靠记忆和运气。</p></article>
+            <article class="feature-card"><span class="feature-index">06 / OWNERSHIP</span><h3>数据库也可以是你的</h3><p>付费工作区可选连接你自己的 PostgreSQL。它不是必填项；留空即可使用 JustWork 托管存储。</p></article>
+          </div>
+        </div>
+      </section>
+
+      <section class="section">
+        <div class="shell">
+          <div class="section-heading" data-reveal><h2>从零开始，<br />三步进入工作。</h2><p>无需账号体系和复杂邀请流程。创建者建立工作区，把 ID 与密码安全地交给协作者，即可开始。</p></div>
+          <div class="workflow" data-reveal>
+            <article class="workflow-step"><div class="step-no">01</div><h3>打开 JustWork</h3><p>使用网页版，或从 Chrome 商店 / ZIP 安装扩展。</p></article>
+            <article class="workflow-step"><div class="step-no">02</div><h3>创建加密工作区</h3><p>设置名称与工作区密码。妥善保存密码，它无法由服务端找回。</p></article>
+            <article class="workflow-step"><div class="step-no">03</div><h3>邀请人类与 Agent</h3><p>共享工作区凭据；需要 Agent 时，从工作区侧栏复制专用连接说明。</p></article>
+          </div>
+        </div>
+      </section>
+
+      <section class="section" id="download">
+        <div class="shell download-panel" data-reveal>
+          <div class="download-copy"><p class="eyebrow">Direct download</p><h2>把 JustWork<br />留在浏览器侧栏。</h2><p>直接下载与 Chrome 商店版本一致的已校验扩展包。ZIP 适合开发者模式手动安装；希望自动更新时，请使用 Chrome Web Store。</p><div class="hero-actions"><a class="button" href="/downloads/justwork-chrome-store-v0.0.9.zip" data-direct-download>下载 ZIP</a><a class="button secondary" href="https://chromewebstore.google.com/detail/justwork-%E2%80%94-encrypted-coll/fhplelioofjbochfoogomboajhalcehl?hl=zh-CN&amp;utm_source=ext_sidebar" target="_blank" rel="noopener noreferrer">前往 Chrome 商店 ↗</a></div><p><a href="/docs/#install">查看手动安装方法</a></p></div>
+          <div class="release-card"><div><div class="release-label">Current release</div><div class="release-version" data-release-version>v0.0.9</div><div class="release-meta" data-release-meta><span data-release-size>—</span> · Chrome Manifest V3</div></div><div><a class="button" href="/downloads/justwork-chrome-store-v0.0.9.zip" data-direct-download>下载最新版本 ↓</a><div class="hash"><code data-release-sha>—</code><button type="button" class="copy-button" data-copy-sha>复制 SHA-256</button></div></div></div>
+        </div>
+      </section>
+
+      <section class="shell cta-section" data-reveal><h2>让工作区同时理解人和 Agent。</h2><p>直接在浏览器中开始，不需要安装。</p><div class="cta-actions"><a class="button" href="/app/">打开在线版</a><a class="button secondary" href="/docs/">阅读使用文档</a></div></section>
+    </main>
+
+    <footer class="site-footer"><div class="shell"><div class="footer-main"><div class="footer-brand"><a class="brand" href="/"><img class="brand-mark" src="/justwork-brand-v008.png" alt="" />JustWork</a><p class="footer-tagline">Encrypted collaborative workspace for humans and AI agents.</p></div><div class="footer-group"><strong>Product</strong><a href="/app/">在线使用</a><a href="#download">下载扩展</a><a href="/docs/">使用文档</a></div><div class="footer-group"><strong>Legal</strong><a href="/privacy/">隐私政策</a><a href="/disclaimer/">免责声明</a></div><div class="footer-group"><strong>Elsewhere</strong><a href="https://chromewebstore.google.com/detail/justwork-%E2%80%94-encrypted-coll/fhplelioofjbochfoogomboajhalcehl?hl=zh-CN&amp;utm_source=ext_sidebar" target="_blank" rel="noopener noreferrer">Chrome Web Store ↗</a><a href="https://github.com/UIZorrot/justwork" target="_blank" rel="noopener noreferrer">GitHub ↗</a></div></div><div class="footer-bottom"><span>© <span data-current-year>2026</span> JustWork.</span><span>Built for useful work.</span></div></div></footer>
+    <script type="module" src="/site.js"></script>
+  </body>
+</html>

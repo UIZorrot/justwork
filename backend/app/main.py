@@ -458,6 +458,15 @@ def _disconnect_workspace_realtime_clients(workspace_id: str) -> None:
         pass
 
 
+def _disconnect_collaborative_item_clients(workspace_id: str, item_id: str) -> None:
+    """Force clients to rejoin after an authoritative structured rollback."""
+    try:
+        from_thread.run(get_collab_relay_hub().disconnect_item, workspace_id, item_id, 4409)
+    except RuntimeError:
+        # Direct unit calls do not always run inside an AnyIO worker thread.
+        pass
+
+
 def require_backend_token(authorization: str | None = Header(default=None)) -> None:
     if not _backend_token:
         return
@@ -1549,6 +1558,17 @@ async def workspace_collab_relay(
             while True:
                 had_events = False
                 try:
+                    epoch_is_current = await asyncio.to_thread(
+                        store.epoch_matches,
+                        workspace_id,
+                        item_id,
+                        room_epoch,
+                        collaboration_key,
+                    )
+                    if not epoch_is_current:
+                        async with collab_send_lock:
+                            await websocket.close(code=4409)
+                        return
                     events = await asyncio.to_thread(
                         store.events_since,
                         workspace_id,
@@ -1983,14 +2003,38 @@ def update_workspace_item(
     mutation_id = client_mutation_id_from_body(body)
     recorded_item = recorded_mutation_item(state_payload, mutation_id, operation="update", target_id=item_id)
     if recorded_item is not None:
+        should_finish_structured_reset = bool(
+            body.reset_collaborative_state
+            or (
+                body.collaborative_update is None
+                and recorded_item.get("kind") in {"table", "board"}
+                and body.content is not None
+            )
+        )
+        if should_finish_structured_reset:
+            if recorded_item.get("kind") not in {"table", "board"} or body.content is None:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="collaborative reset requires table or board content",
+                )
+            # The workspace write may have committed before a previous room
+            # reset failed. An idempotent retry must finish that second half
+            # instead of returning while the obsolete room is still live.
+            get_collaborative_update_store().delete_snapshot(workspace_id, item_id)
+            _disconnect_collaborative_item_clients(workspace_id, item_id)
         return WorkspaceItemResponse(ok=True, workspace_id=workspace_id, item=recorded_item)
     collaborative_update: bytes | None = None
     try:
         cur = require_expected_revision(state_payload, item_id, body.expected_revision)
         before_doc = dict(cur)
         if body.collaborative_update is not None:
-            if cur.get("kind") != "page" or body.markdown is None:
-                raise ValueError("collaborative_update requires page markdown")
+            kind = cur.get("kind")
+            has_matching_body = (
+                (kind == "page" and body.markdown is not None)
+                or (kind in {"table", "board"} and body.content is not None)
+            )
+            if not has_matching_body:
+                raise ValueError("collaborative_update requires matching document content")
             if not body.collaborative_epoch:
                 raise HTTPException(
                     status_code=status.HTTP_409_CONFLICT,
@@ -2006,11 +2050,33 @@ def update_workspace_item(
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
+    if body.reset_collaborative_state and (
+        doc.get("kind") not in {"table", "board"} or body.content is None
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="collaborative reset requires table or board content",
+        )
+
+    reset_structured_collaboration = bool(
+        body.reset_collaborative_state
+        or (
+            collaborative_update is None
+            and doc.get("kind") in {"table", "board"}
+            and body.content is not None
+            and body.content != before_doc.get("content")
+        )
+    )
     deferred_notifications: list[Callable[[], None]] = []
 
-    def commit_doc(merged_markdown: str | None = None) -> dict:
+    def commit_doc(
+        merged_markdown: str | None = None,
+        merged_content: dict | None = None,
+    ) -> dict:
         if merged_markdown is not None:
             doc["markdown"] = merged_markdown
+        if merged_content is not None:
+            doc["content"] = merged_content
         unchanged = (
             doc.get("title", "") == before_doc.get("title", "")
             and doc.get("markdown", "") == before_doc.get("markdown", "")
@@ -2050,6 +2116,7 @@ def update_workspace_item(
     committed_update: bytes | None = None
     if collaborative_update is not None:
         try:
+            is_structured_update = doc.get("kind") in {"table", "board"}
             committed_update, _, item = get_collaborative_update_store().commit_update(
                 workspace_id,
                 item_id,
@@ -2057,6 +2124,11 @@ def update_workspace_item(
                 commit_doc,
                 expected_epoch=body.collaborative_epoch,
                 encryption_key=cached_workspace_collaboration_key(workspace_id, body.password),
+                commit_document=(
+                    (lambda _markdown, content: commit_doc(merged_content=content))
+                    if is_structured_update
+                    else None
+                ),
             )
         except HTTPException:
             raise
@@ -2084,6 +2156,13 @@ def update_workspace_item(
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     else:
         item = commit_doc()
+    if reset_structured_collaboration:
+        # Agent/plain REST structured writes and history inverses are
+        # authoritative whole-document replacements. The previous room does
+        # not contain that JSON change, so retaining it lets an idle client
+        # repaint and save the obsolete state.
+        get_collaborative_update_store().delete_snapshot(workspace_id, item_id)
+        _disconnect_collaborative_item_clients(workspace_id, item_id)
     for notify in deferred_notifications:
         notify()
     if committed_update is not None:

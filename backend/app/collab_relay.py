@@ -146,6 +146,17 @@ class CollaborativeRelayHub:
             except Exception:
                 pass
 
+    async def disconnect_item(self, workspace_id: str, item_id: str, code: int = 4409) -> None:
+        """Close in-process clients after an authoritative room reset."""
+        room_key = self._room_key(workspace_id, item_id)
+        async with self._lock:
+            sockets = self._rooms.pop(room_key, set())
+        for websocket in sockets:
+            try:
+                await websocket.close(code=code)
+            except Exception:
+                pass
+
     def snapshot(self, workspace_id: str, item_id: str, encryption_key: bytes) -> bytes | None:
         return self._store.get_snapshot(workspace_id, item_id, encryption_key)
 
