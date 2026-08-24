@@ -55,10 +55,12 @@ export default defineConfig({
       input: {
         home: path.resolve(siteDir, "index.html"),
         docs: path.resolve(siteDir, "docs", "index.html"),
+        changelog: path.resolve(siteDir, "changelog", "index.html"),
         privacy: path.resolve(siteDir, "privacy", "index.html"),
         disclaimer: path.resolve(siteDir, "disclaimer", "index.html"),
         homeEn: path.resolve(siteDir, "en", "index.html"),
         docsEn: path.resolve(siteDir, "en", "docs", "index.html"),
+        changelogEn: path.resolve(siteDir, "en", "changelog", "index.html"),
         privacyEn: path.resolve(siteDir, "en", "privacy", "index.html"),
         disclaimerEn: path.resolve(siteDir, "en", "disclaimer", "index.html"),
       },

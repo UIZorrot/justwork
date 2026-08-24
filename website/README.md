@@ -1,6 +1,6 @@
 # JustWork website
 
-Standalone marketing, documentation, download, privacy, disclaimer, and web app deployment for `justwork.txzy.net`.
+Standalone marketing, documentation, changelog, download, privacy, disclaimer, and web app deployment for `justwork.txzy.net`.
 
 ## Local development
 
