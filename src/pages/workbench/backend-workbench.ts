@@ -1,6 +1,7 @@
 /** JustWork online workbench: all durable document operations go through the fixed Backend API. */
 
 import { loadOrCreateLocalIdentity } from "@justwork/workspace-runtime";
+import DiffMatchPatch from "diff-match-patch";
 import { mergeUpdates } from "yjs";
 import {
   BackendApiError,
@@ -55,7 +56,6 @@ import {
 } from "@/features/workspace/local-inbox";
 import {
   appendLocalHistoryEvent,
-  buildLocalHistoryRevertPatch,
   isRevertableLocalHistoryEvent,
   listLocalHistoryEvents,
   type LocalHistoryEvent,
@@ -697,11 +697,11 @@ function historyEventTitle(op: string, translate: Translator["t"]): string {
     case "workspace.item.hard_delete":
       return translate("history.hardDelete");
     case "workspace.settings":
-      return "Workspace settings";
+      return translate("history.workspaceSettings");
     case "workspace.member.profile":
-      return "Member profile";
+      return translate("history.memberProfile");
     case "workspace.member.join":
-      return "Member joined";
+      return translate("history.memberJoined");
     case "workspace.security.password":
       return translate("history.passwordChange");
     case "doc.patch":
@@ -786,6 +786,20 @@ export async function startBackendWorkbench(): Promise<void> {
   const historyDrawerOpenBtn = document.getElementById("history-drawer-open-btn") as HTMLButtonElement | null;
   const historyList = document.getElementById("history-list") as HTMLUListElement | null;
   const historyRefreshBtn = document.getElementById("history-refresh-btn") as HTMLButtonElement | null;
+  const historyDetailDrawerRoot = document.getElementById("history-detail-drawer-root") as HTMLElement | null;
+  const historyDetailDrawerBackdrop = document.getElementById("history-detail-drawer-backdrop") as HTMLElement | null;
+  const historyDetailDrawerCloseBtn = document.getElementById("history-detail-drawer-close-btn") as HTMLButtonElement | null;
+  const historyDetailTitle = document.getElementById("history-detail-title") as HTMLElement | null;
+  const historyDetailOperation = document.getElementById("history-detail-operation") as HTMLElement | null;
+  const historyDetailTime = document.getElementById("history-detail-time") as HTMLElement | null;
+  const historyDetailActor = document.getElementById("history-detail-actor") as HTMLElement | null;
+  const historyDetailTarget = document.getElementById("history-detail-target") as HTMLElement | null;
+  const historyDetailEventId = document.getElementById("history-detail-event-id") as HTMLElement | null;
+  const historyDetailMutationRow = document.getElementById("history-detail-mutation-row") as HTMLElement | null;
+  const historyDetailMutationId = document.getElementById("history-detail-mutation-id") as HTMLElement | null;
+  const historyDetailDiff = document.getElementById("history-detail-diff") as HTMLElement | null;
+  const historyDetailBefore = document.getElementById("history-detail-before") as HTMLElement | null;
+  const historyDetailAfter = document.getElementById("history-detail-after") as HTMLElement | null;
   const workspaceInfoDrawerBackdrop = document.getElementById("workspace-info-drawer-backdrop") as HTMLElement | null;
   const workspaceInfoDrawerCloseBtn = document.getElementById("workspace-info-drawer-close-btn") as HTMLButtonElement | null;
   const workspaceInfoDrawerOpenBtn = document.getElementById("workspace-info-drawer-open-btn") as HTMLButtonElement | null;
@@ -891,6 +905,20 @@ export async function startBackendWorkbench(): Promise<void> {
     !historyDrawerOpenBtn ||
     !historyList ||
     !historyRefreshBtn ||
+    !historyDetailDrawerRoot ||
+    !historyDetailDrawerBackdrop ||
+    !historyDetailDrawerCloseBtn ||
+    !historyDetailTitle ||
+    !historyDetailOperation ||
+    !historyDetailTime ||
+    !historyDetailActor ||
+    !historyDetailTarget ||
+    !historyDetailEventId ||
+    !historyDetailMutationRow ||
+    !historyDetailMutationId ||
+    !historyDetailDiff ||
+    !historyDetailBefore ||
+    !historyDetailAfter ||
     !workspaceInfoDrawerBackdrop ||
     !workspaceInfoDrawerCloseBtn ||
     !workspaceInfoDrawerOpenBtn ||
@@ -1199,6 +1227,86 @@ export async function startBackendWorkbench(): Promise<void> {
   });
   const healthTimer = window.setInterval(() => void refreshHealth(), 60_000);
 
+  let activeHistoryDetailEvent: LocalHistoryEvent | null = null;
+  let historyDetailTrigger: HTMLElement | null = null;
+  const formatHistorySnapshot = (snapshot: LocalHistorySnapshot): string => {
+    if (Object.keys(snapshot).length === 0) return t("drawer.history.detail.empty");
+    return JSON.stringify(snapshot, null, 2);
+  };
+  const historyDiffValue = (value: unknown): string => {
+    if (typeof value === "string") return value;
+    return JSON.stringify(value, null, 2) ?? String(value ?? "");
+  };
+  const historyDiffTexts = (
+    before: LocalHistorySnapshot,
+    after: LocalHistorySnapshot,
+  ): [string, string] => {
+    const keys = [...new Set([...Object.keys(before), ...Object.keys(after)])]
+      .filter((key) => JSON.stringify(before[key as keyof LocalHistorySnapshot]) !== JSON.stringify(after[key as keyof LocalHistorySnapshot]));
+    if (keys.length === 1) {
+      const key = keys[0] as keyof LocalHistorySnapshot;
+      return [historyDiffValue(before[key]), historyDiffValue(after[key])];
+    }
+    const beforeChanges = Object.fromEntries(keys.map((key) => [key, before[key as keyof LocalHistorySnapshot]]));
+    const afterChanges = Object.fromEntries(keys.map((key) => [key, after[key as keyof LocalHistorySnapshot]]));
+    return [historyDiffValue(beforeChanges), historyDiffValue(afterChanges)];
+  };
+  const renderHistoryDiff = (before: LocalHistorySnapshot, after: LocalHistorySnapshot): void => {
+    historyDetailDiff.replaceChildren();
+    const [beforeText, afterText] = historyDiffTexts(before, after);
+    if (beforeText === afterText) {
+      historyDetailDiff.textContent = t("drawer.history.detail.noChanges");
+      return;
+    }
+    const differ = new DiffMatchPatch();
+    differ.Diff_Timeout = 0.35;
+    const diffs = differ.diff_main(beforeText, afterText);
+    differ.diff_cleanupSemantic(diffs);
+    for (const [operation, value] of diffs) {
+      const span = document.createElement("span");
+      // diff-match-patch uses -1 for deletion, 0 for equality, and 1 for insertion.
+      if (operation === -1) span.className = "history-detail-diff-removed";
+      if (operation === 1) span.className = "history-detail-diff-added";
+      span.textContent = value;
+      historyDetailDiff.append(span);
+    }
+  };
+  const renderHistoryDetail = (event: LocalHistoryEvent): void => {
+    const operation = historyEventTitle(event.op, t);
+    historyDetailTitle.textContent = event.title
+      ? `${event.title} · ${operation}`
+      : operation;
+    historyDetailOperation.textContent = operation;
+    historyDetailTime.textContent = formatHistoryTime(event.timestamp, i18n.locale);
+    historyDetailActor.textContent = event.actorUserId || t("drawer.history.detail.unknownActor");
+    historyDetailTarget.textContent = event.title
+      ? `${event.title} (${event.itemId})`
+      : event.itemId;
+    historyDetailEventId.textContent = event.id;
+    historyDetailMutationRow.hidden = !event.mutationId;
+    historyDetailMutationId.textContent = event.mutationId ?? "";
+    renderHistoryDiff(event.before, event.after);
+    historyDetailBefore.textContent = formatHistorySnapshot(event.before);
+    historyDetailAfter.textContent = formatHistorySnapshot(event.after);
+  };
+  const closeHistoryDetailDrawer = (restoreFocus = true): void => {
+    const activeEl = document.activeElement as HTMLElement | null;
+    if (activeEl && historyDetailDrawerRoot.contains(activeEl)) activeEl.blur();
+    historyDetailDrawerRoot.classList.remove("is-open");
+    historyDetailDrawerRoot.setAttribute("aria-hidden", "true");
+    activeHistoryDetailEvent = null;
+    if (restoreFocus && historyDetailTrigger?.isConnected) historyDetailTrigger.focus();
+    historyDetailTrigger = null;
+  };
+  const openHistoryDetailDrawer = (event: LocalHistoryEvent, trigger: HTMLElement): void => {
+    activeHistoryDetailEvent = event;
+    historyDetailTrigger = trigger;
+    renderHistoryDetail(event);
+    historyDetailDrawerRoot.classList.add("is-open");
+    historyDetailDrawerRoot.setAttribute("aria-hidden", "false");
+    requestAnimationFrame(() => historyDetailDrawerCloseBtn.focus());
+  };
+
   handleLocaleChanged = (nextLocale: Locale): void => {
     if (i18n.locale === nextLocale) return;
     i18n = createTranslator(nextLocale);
@@ -1220,10 +1328,12 @@ export async function startBackendWorkbench(): Promise<void> {
     void refreshActiveHistoryPanel?.();
     void refreshQuotaBar?.();
     rerenderDocumentLoadGuard?.();
+    if (activeHistoryDetailEvent) renderHistoryDetail(activeHistoryDetailEvent);
   };
   const disposeLocaleObserver = observePreferredLocaleChanges(handleLocaleChanged);
 
   const closeHistoryDrawer = (): void => {
+    closeHistoryDetailDrawer(false);
     const activeEl = document.activeElement as HTMLElement | null;
     if (activeEl && historyDrawerRoot.contains(activeEl)) activeEl.blur();
     historyDrawerRoot.classList.remove("is-open");
@@ -1261,8 +1371,14 @@ export async function startBackendWorkbench(): Promise<void> {
   workspaceInfoDrawerBackdrop.addEventListener("click", closeWorkspaceInfoDrawer);
   historyDrawerCloseBtn.addEventListener("click", closeHistoryDrawer);
   historyDrawerBackdrop.addEventListener("click", closeHistoryDrawer);
+  historyDetailDrawerCloseBtn.addEventListener("click", () => closeHistoryDetailDrawer());
+  historyDetailDrawerBackdrop.addEventListener("click", () => closeHistoryDetailDrawer());
   document.addEventListener("keydown", (e) => {
     if (e.key !== "Escape") return;
+    if (historyDetailDrawerRoot.classList.contains("is-open")) {
+      closeHistoryDetailDrawer();
+      return;
+    }
     if (historyDrawerRoot.classList.contains("is-open")) {
       closeHistoryDrawer();
       return;
@@ -1944,6 +2060,7 @@ export async function startBackendWorkbench(): Promise<void> {
     const collaborationReadyDocIds = new Set<string>();
     const collaborationEpochByDoc = new Map<string, string>();
     const pendingCollaborativeUpdatesByDoc = new Map<string, Uint8Array[]>();
+    const pendingUnboundPageEditsByDoc = new Map<string, { baseMarkdown: string; markdown: string }>();
     const cachedCollaborationEpochByDoc = new Map<string, string>();
     const collectLocalCollaborativeUpdates = (
       docId: string,
@@ -2172,14 +2289,27 @@ export async function startBackendWorkbench(): Promise<void> {
         }
       }
       collaborationEpochByDoc.set(doc.id, join.room_epoch);
+      if (doc.kind === "page" && active.id === doc.id && editor) {
+        const nativeInputBase = editor.getUncommittedNativeInputBaseMarkdown();
+        const nativeInputMarkdown = editor.getMarkdown();
+        if (nativeInputBase !== null && isMeaningfulPageEdit(nativeInputBase, nativeInputMarkdown)) {
+          const pending = pendingUnboundPageEditsByDoc.get(doc.id);
+          pendingUnboundPageEditsByDoc.set(doc.id, {
+            baseMarkdown: pending?.baseMarkdown ?? nativeInputBase,
+            markdown: nativeInputMarkdown,
+          });
+          if (!pending) commitLocalEdit(doc.id, { markdown: nativeInputMarkdown });
+        }
+      }
       const latestLocalDoc = localCollaborativeDocCache.get(doc.id)
         ?? workspace.docs.find((candidate) => candidate.id === doc.id)
         ?? doc;
-      const bootstrapEditBaseMarkdown = bootstrapBaseMarkdown;
+      const pendingUnboundPageEdit = pendingUnboundPageEditsByDoc.get(doc.id);
+      const bootstrapEditBaseMarkdown = pendingUnboundPageEdit?.baseMarkdown ?? bootstrapBaseMarkdown;
       const bootstrapLocalMarkdown = doc.kind === "page"
-        ? active.id === doc.id && editor
+        ? pendingUnboundPageEdit?.markdown ?? (active.id === doc.id && editor
           ? editor.getMarkdown()
-          : latestLocalDoc.markdown
+          : latestLocalDoc.markdown)
         : null;
       const bootstrapLocalStructuredContent = doc.kind === "table" || doc.kind === "board"
         ? normalizeStructuredDocumentContent(doc.kind, latestLocalDoc.content ?? {})
@@ -2192,11 +2322,13 @@ export async function startBackendWorkbench(): Promise<void> {
           bootstrapEditBaseMarkdown,
           bootstrapLocalMarkdown,
           collaborationReadyDocIds.has(doc.id),
-          dirtyDocIds.has(doc.id),
+          Boolean(pendingUnboundPageEdit),
         ),
       );
       let replayedBootstrapEdit = false;
+      let replayedBootstrapStructuredEdit = false;
       let bootstrapReplayBase = bootstrapEditBaseMarkdown ?? "";
+      let bootstrapStructuredReplayBase = bootstrapBaseStructuredContent;
       const hasUnboundStructuredEdit = Boolean(
         structuredCollaborator
         && bootstrapBaseStructuredContent
@@ -2240,9 +2372,8 @@ export async function startBackendWorkbench(): Promise<void> {
           saveCollaborativeSnapshot(collaborativeMarkdownSnapshotKey(workspaceId, doc.id), snapshot);
         }
       };
-      if (remoteState.length > 0) {
-        applyRemoteState(remoteState, hasUnboundStructuredEdit);
-        if (markdownCollaborator && hasUnboundBootstrapEdit && bootstrapLocalMarkdown !== null) {
+      const replayPendingBootstrapEdits = (): void => {
+        if (markdownCollaborator && hasUnboundBootstrapEdit && bootstrapLocalMarkdown !== null && !replayedBootstrapEdit) {
           bootstrapReplayBase = markdownCollaborator.getMarkdown();
           const replayed = replayMarkdownEdit(
             bootstrapEditBaseMarkdown ?? "",
@@ -2266,8 +2397,10 @@ export async function startBackendWorkbench(): Promise<void> {
           && bootstrapBaseStructuredContent
           && bootstrapLocalStructuredContent
           && hasUnboundStructuredEdit
+          && !replayedBootstrapStructuredEdit
         ) {
           const canonicalContent = structuredCollaborator.getContent();
+          bootstrapStructuredReplayBase = canonicalContent;
           const replayed = mergeSyncValue(
             bootstrapBaseStructuredContent,
             bootstrapLocalStructuredContent,
@@ -2283,8 +2416,13 @@ export async function startBackendWorkbench(): Promise<void> {
             content: structuredCollaborator!.getContent(),
             updatedAt: new Date().toISOString(),
           }));
+          replayedBootstrapStructuredEdit = true;
           if (active.id === doc.id) renderAll();
         }
+      };
+      if (remoteState.length > 0) {
+        applyRemoteState(remoteState, hasUnboundStructuredEdit);
+        replayPendingBootstrapEdits();
         markCollaborationReady(doc);
       } else if (join.bootstrap_owner) {
         if (markdownCollaborator) {
@@ -2322,6 +2460,9 @@ export async function startBackendWorkbench(): Promise<void> {
           structuredCollaborator.applyLocalContent(
             seedContent,
           );
+          if (hasUnboundStructuredEdit && bootstrapLocalStructuredContent) {
+            replayPendingBootstrapEdits();
+          }
         }
         markCollaborationReady(doc);
       }
@@ -2338,6 +2479,38 @@ export async function startBackendWorkbench(): Promise<void> {
       });
       const activeCollaborator = markdownCollaborator ?? structuredCollaborator;
       if (!activeCollaborator) return;
+      let replaySaveScheduled = false;
+      const scheduleReplayedBootstrapSave = (): void => {
+        if (replaySaveScheduled || (!replayedBootstrapEdit && !replayedBootstrapStructuredEdit)) return;
+        replaySaveScheduled = true;
+        const currentDoc = workspace.docs.find((candidate) => candidate.id === doc.id) ?? doc;
+        if (markdownCollaborator && replayedBootstrapEdit) {
+          const mergedMarkdown = markdownCollaborator.getMarkdown();
+          pendingUnboundPageEditsByDoc.delete(doc.id);
+          scheduleDocSave(
+            doc.id,
+            currentDoc.revision,
+            { markdown: mergedMarkdown },
+            currentDoc.title,
+            bootstrapReplayBase,
+            mergedMarkdown,
+            0,
+          );
+          return;
+        }
+        if (structuredCollaborator && replayedBootstrapStructuredEdit) {
+          scheduleDocSave(
+            doc.id,
+            currentDoc.revision,
+            { content: structuredCollaborator.getContent() },
+            currentDoc.title,
+            "",
+            "",
+            0,
+            { content: bootstrapStructuredReplayBase },
+          );
+        }
+      };
       const stopCollaboratorUpdates = activeCollaborator.onUpdate((update, origin) => {
           if (origin !== "local" || !collaborationReadyDocIds.has(doc.id)) return;
           safeSendCollaborativeUpdate(
@@ -2354,7 +2527,16 @@ export async function startBackendWorkbench(): Promise<void> {
       };
       transport.onUpdate((update) => {
           applyRemoteState(update);
+          replayPendingBootstrapEdits();
           markCollaborationReady(doc);
+          if (replayedBootstrapEdit || replayedBootstrapStructuredEdit) {
+            safeSendCollaborativeUpdate(
+              transport.readyState,
+              () => transport.sendUpdate(activeCollaborator.encodeUpdate()),
+              requestTransportRejoin,
+            );
+            scheduleReplayedBootstrapSave();
+          }
       });
       if (collaborationReadyDocIds.has(doc.id)) {
         markCollaborationReady(doc);
@@ -2372,19 +2554,7 @@ export async function startBackendWorkbench(): Promise<void> {
           },
           requestTransportRejoin,
         );
-        if (markdownCollaborator && replayedBootstrapEdit) {
-          const mergedMarkdown = markdownCollaborator.getMarkdown();
-          const currentDoc = workspace.docs.find((candidate) => candidate.id === doc.id) ?? doc;
-          scheduleDocSave(
-            doc.id,
-            currentDoc.revision,
-            { markdown: mergedMarkdown },
-            currentDoc.title,
-            bootstrapReplayBase,
-            mergedMarkdown,
-            0,
-          );
-        }
+        scheduleReplayedBootstrapSave();
       } else {
         window.setTimeout(() => {
           if (active.id !== doc.id || collaborationReadyDocIds.has(doc.id)) return;
@@ -3005,9 +3175,6 @@ export async function startBackendWorkbench(): Promise<void> {
               // body is authoritative. Applying a delta to the newly-created
               // empty Y.Doc would erase every untouched cell.
               commitLocalEdit(doc.id, { content: nextContent });
-              scheduleDocSave(doc.id, expectedRevision, { content: nextContent }, active.title, "", "", 180, {
-                content: previousContent,
-              });
               return nextContent;
             }
             const collaborator = getStructuredCollaboratorForDoc(doc);
@@ -3094,9 +3261,6 @@ export async function startBackendWorkbench(): Promise<void> {
               // Keep the hydrated board as the edit base while realtime state
               // is joining; an empty collaborator must never replace cards.
               commitLocalEdit(doc.id, { content: nextContent });
-              scheduleDocSave(doc.id, expectedRevision, { content: nextContent }, active.title, "", "", 180, {
-                content: previousContent,
-              });
               return nextContent;
             }
             const collaborator = getStructuredCollaboratorForDoc(doc);
@@ -3820,6 +3984,7 @@ export async function startBackendWorkbench(): Promise<void> {
           "member-profile": "workspace.member.profile",
           "member-join": "workspace.member.join",
           "workspace-password-change": "workspace.security.password",
+          "history-revert": "history.revert",
         };
         const snapshotFromRevision = (snapshot: Record<string, unknown>): LocalHistorySnapshot => ({
           ...(typeof snapshot.title === "string" ? { title: snapshot.title } : {}),
@@ -3847,6 +4012,7 @@ export async function startBackendWorkbench(): Promise<void> {
             before: snapshotFromRevision(event.before),
             after: snapshotFromRevision(event.after),
             actorUserId: event.actor_user_id ?? undefined,
+            mutationId: event.mutation_id || undefined,
           }))
           : await listLocalHistoryEvents(localStorageArea, workspaceId);
         historyList.innerHTML = "";
@@ -3855,8 +4021,14 @@ export async function startBackendWorkbench(): Promise<void> {
           li.className = "history-item";
           li.dataset.eventId = ev.id;
 
-          const main = document.createElement("div");
+          const main = document.createElement("button");
+          main.type = "button";
           main.className = "history-item-main";
+          main.setAttribute("data-testid", "history-detail-open");
+          main.setAttribute("aria-label", t("drawer.history.openDetail", {
+            event: historyEventTitle(ev.op, t),
+          }));
+          main.addEventListener("click", () => openHistoryDetailDrawer(ev, main));
 
           const meta = document.createElement("div");
           meta.className = "history-item-meta";
@@ -3920,44 +4092,14 @@ export async function startBackendWorkbench(): Promise<void> {
                   await waitForDocSaveQueueToSettle(ev.itemId);
                   const current = await session.loadItem(ev.itemId);
                   const revertMutationId = mutationId();
-                  const revertPatch = buildLocalHistoryRevertPatch(ev, current.kind);
                   let reverted = await runHistoryRevertWithRetry(
-                    () => ev.op === "workspace.item.create"
-                      ? session.trashItem(ev.itemId, current.revision, revertMutationId)
-                      : ev.op === "workspace.item.move"
-                        ? session.moveItem(
-                          ev.itemId,
-                          ev.before.parentId ?? null,
-                          ev.before.orderRank ?? ev.before.orderKey ?? current.orderRank ?? current.orderKey,
-                          current.revision,
-                          revertMutationId,
-                        )
-                        : ev.op === "workspace.item.pin"
-                          ? session.setPinned(
-                            ev.itemId,
-                            ev.before.pinned ?? false,
-                            current.revision,
-                            revertMutationId,
-                          )
-                          : ev.op === "workspace.item.trash" || ev.op === "workspace.item.restore"
-                            ? ev.before.inTrash
-                              ? session.trashItem(ev.itemId, current.revision, revertMutationId)
-                              : session.restoreItem(ev.itemId, current.revision, revertMutationId)
-                            : session.saveItem(ev.itemId, {
-                              ...revertPatch,
-                              resetCollaborativeState: (
-                                (current.kind === "table" || current.kind === "board")
-                                && revertPatch.content !== undefined
-                              ),
-                              expectedRevision: current.revision,
-                              mutationId: revertMutationId,
-                            }),
+                    () => session.revertRevision(ev.id, current.revision, revertMutationId),
                     {
                       shouldRetry: shouldQueueAsOfflinePending,
                     },
                   );
                   let restartCollaborativeTransport = false;
-                  if (reverted.kind === "page" && ev.before.markdown !== undefined) {
+                  if (reverted.kind === "page" && ev.before.markdown !== ev.after.markdown) {
                     // REST history restoration mutates the canonical Yjs room.
                     // Read that state back synchronously so an older in-memory
                     // collaborator cannot repaint the just-restored document.
@@ -3985,7 +4127,7 @@ export async function startBackendWorkbench(): Promise<void> {
                     }
                   } else if (
                     (reverted.kind === "table" || reverted.kind === "board")
-                    && ev.before.content !== undefined
+                    && !syncValuesEqual(ev.before.content, ev.after.content)
                   ) {
                     // The backend rotated the structured room together with the
                     // authoritative inverse. Drop every local copy of the old
@@ -5163,6 +5305,7 @@ export async function startBackendWorkbench(): Promise<void> {
       onChange: (markdown) => {
         if (active.kind !== "page" || active.id === WELCOME_DOC_ID) return;
         const itemId = active.id;
+        if (!isCreatePendingDocId(itemId)) getCollaboratorForDoc(active);
         const hasCollaborator = collaborativeMarkdownDocs.has(itemId);
         const persistencePlan = planPageEditPersistence(
           hasCollaborator,
@@ -5192,6 +5335,13 @@ export async function startBackendWorkbench(): Promise<void> {
         }
         const expectedRevision = active.revision;
         if (persistencePlan.commitLocalEdit) {
+          if (hasCollaborator && !collaborationReadyDocIds.has(itemId)) {
+            const pending = pendingUnboundPageEditsByDoc.get(itemId);
+            pendingUnboundPageEditsByDoc.set(itemId, {
+              baseMarkdown: pending?.baseMarkdown ?? previousMarkdown,
+              markdown,
+            });
+          }
           commitLocalEdit(itemId, { markdown });
         }
         if (persistencePlan.scheduleSave) {

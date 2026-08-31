@@ -478,6 +478,77 @@ async function main() {
         await sleep(100);
       }
 
+      console.error(`[sync-soak] ${distribution}: dedicated history rollback across collaborators`);
+      const rollbackMarker = `${markerPrefix}_ROLLBACK_ONLY_THIS_CHANGE`;
+      const laterMarker = `${markerPrefix}_KEEP_LATER_COLLABORATOR_CHANGE`;
+      await typeAtEnd(pageA, editorA, rollbackMarker);
+      let rollbackEvent;
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        const revisions = (await loadRevisions()).revisions;
+        rollbackEvent = revisions.find((event) => (
+          event.item_id === itemId
+          && count(event.after?.markdown ?? "", rollbackMarker) === 1
+          && count(event.before?.markdown ?? "", rollbackMarker) === 0
+        ));
+        if (rollbackEvent) break;
+        await sleep(100);
+      }
+      assert.ok(rollbackEvent, "the rollback target revision must be persisted");
+      await pageB.waitForFunction(
+        (marker) => (document.querySelector("#editor-root .doc-editor-surface--markdown")?.textContent ?? "").includes(marker),
+        rollbackMarker,
+        { timeout: 30_000 },
+      );
+      await typeAtEnd(pageB, editorB, laterMarker);
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        const markdown = (await loadItem(itemId)).item.markdown;
+        if (count(markdown, rollbackMarker) === 1 && count(markdown, laterMarker) === 1) break;
+        if (attempt === 99) throw new Error("later collaborator change did not persist before rollback");
+        await sleep(100);
+      }
+      await pageA.click("#history-drawer-open-btn");
+      const rollbackRow = pageA.locator(`#history-list .history-item[data-event-id="${rollbackEvent.id}"]`);
+      await rollbackRow.waitFor({ state: "visible", timeout: 15_000 });
+      await rollbackRow.locator('[data-testid="history-revert"]').click();
+      for (let attempt = 0; attempt < 150; attempt += 1) {
+        const markdown = (await loadItem(itemId)).item.markdown;
+        if (count(markdown, rollbackMarker) === 0 && count(markdown, laterMarker) === 1) break;
+        if (attempt === 149) throw new Error("dedicated rollback did not preserve the later collaborator change");
+        await sleep(100);
+      }
+      await pageA.click("#history-drawer-close-btn");
+      await Promise.all([pageA, pageB].map((targetPage) => targetPage.waitForFunction(
+        ({ removed, retained }) => {
+          const text = document.querySelector("#editor-root .doc-editor-surface--markdown")?.textContent ?? "";
+          return !text.includes(removed) && text.includes(retained);
+        },
+        { removed: rollbackMarker, retained: laterMarker },
+        { timeout: 30_000 },
+      )));
+
+      const rollbackContextC = await browser.newContext();
+      await installDistributionRuntime(rollbackContextC, staticServer.baseUrl, workspaceId);
+      const rollbackPageC = await rollbackContextC.newPage();
+      await rollbackPageC.goto(`${staticServer.baseUrl}${entryPath}?backendUrl=${encodeURIComponent(backendUrl)}`);
+      await rollbackPageC.waitForSelector("#workspace-unlock-panel:not([hidden])");
+      await rollbackPageC.fill("#backend-workspace-id-input", workspaceId);
+      await rollbackPageC.fill("#unlock-password-input", password);
+      await rollbackPageC.click("#unlock-workspace-btn");
+      await continueNicknamePrompt(rollbackPageC, `${distribution} C`);
+      await rollbackPageC.waitForSelector(".workspace-shell:not([hidden])");
+      const rollbackEditorC = await editorFor(rollbackPageC);
+      await rollbackPageC.waitForFunction(
+        ({ removed, retained }) => {
+          const text = document.querySelector("#editor-root .doc-editor-surface--markdown")?.textContent ?? "";
+          return !text.includes(removed) && text.includes(retained);
+        },
+        { removed: rollbackMarker, retained: laterMarker },
+        { timeout: 30_000 },
+      );
+      assert.equal(count((await rollbackEditorC.textContent()) ?? "", rollbackMarker), 0);
+      assert.equal(count((await rollbackEditorC.textContent()) ?? "", laterMarker), 1);
+      await rollbackContextC.close();
+
       console.error(`[sync-soak] ${distribution}: active document stability under remote structure bursts`);
       const targetTitle = `${markerPrefix} Soak Active Target`;
       const targetItem = await createRemoteItem("page", targetTitle);

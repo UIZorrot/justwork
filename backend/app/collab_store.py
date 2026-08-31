@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Callable, TypeVar, cast
 
 from diff_match_patch import diff_match_patch
-from y_py import YDoc, apply_update, encode_state_as_update
+from y_py import YArray, YDoc, YMap, apply_update, encode_state_as_update
 
 from .db_gateway import CollaborativeRoomMutation, DatabaseGateway
 from .workspace_crypto import (
@@ -765,6 +765,93 @@ class CollaborativeUpdateStore:
             self._receipt_path(path).unlink(missing_ok=True)
             self._bootstrap_leases.pop(self._bootstrap_key(workspace_id, item_id), None)
 
+    def reset_with_commit(
+        self,
+        workspace_id: str,
+        item_id: str,
+        commit: Callable[[], T],
+        canonical_snapshot: bytes,
+        encryption_key: bytes | None = None,
+    ) -> T:
+        """Replace a room lineage while its authoritative workspace state commits.
+
+        History rollback must not be merged into the current Y.Doc as an ordinary
+        edit. The new epoch is seeded in the same guard as the workspace CAS, so
+        stale reconnecting clients can never win bootstrap with their old body.
+        """
+        key = self._key(workspace_id, encryption_key)
+        next_epoch = self._new_epoch()
+        gateway = self._database_gateway(workspace_id)
+        if gateway is not None:
+            def reset(_current):
+                try:
+                    result = commit()
+                except BaseException as exc:  # noqa: BLE001
+                    return CollaborativeRoomMutation(
+                        room_epoch=_current.room_epoch if _current else None,
+                        snapshot=_current.snapshot if _current else None,
+                        bootstrap_lease_until=_current.bootstrap_lease_until if _current else 0,
+                        result=exc,
+                        persist=False,
+                    )
+                return self._database_state_mutation(
+                    workspace_id,
+                    item_id,
+                    _current,
+                    next_epoch,
+                    canonical_snapshot,
+                    key,
+                    result,
+                    force_compact=True,
+                )
+
+            stored = gateway.mutate_collaborative_room(workspace_id, item_id, reset)
+            result = self._unwrap_database_result(stored)
+            self._remove_legacy_file_state(workspace_id, item_id)
+            return result
+
+        path = self._file_path(workspace_id, item_id)
+        with self._lock:
+            previous_snapshot = self._read_snapshot_locked(path)
+            previous_epoch = (
+                self._epoch_path(path).read_text(encoding="utf-8").strip()
+                if self._epoch_path(path).exists()
+                else None
+            )
+            previous_receipts = (
+                self._receipt_path(path).read_bytes()
+                if self._receipt_path(path).exists()
+                else None
+            )
+            try:
+                self._write_epoch_locked(path, next_epoch)
+                self._write_snapshot_locked(
+                    path,
+                    encrypt_collaboration_bytes(
+                        key,
+                        canonical_snapshot,
+                        aad=self._aad(workspace_id, item_id, next_epoch, "file", 0),
+                    ),
+                )
+                self._receipt_path(path).unlink(missing_ok=True)
+                result = commit()
+            except BaseException:
+                if previous_snapshot is None:
+                    path.unlink(missing_ok=True)
+                else:
+                    self._write_snapshot_locked(path, previous_snapshot)
+                if previous_epoch is None:
+                    self._epoch_path(path).unlink(missing_ok=True)
+                else:
+                    self._write_epoch_locked(path, previous_epoch)
+                if previous_receipts is None:
+                    self._receipt_path(path).unlink(missing_ok=True)
+                else:
+                    self._receipt_path(path).write_bytes(previous_receipts)
+                raise
+            self._bootstrap_leases.pop(self._bootstrap_key(workspace_id, item_id), None)
+            return result
+
     @staticmethod
     def _decode_structured_value(value):
         if isinstance(value, list):
@@ -794,6 +881,61 @@ class CollaborativeUpdateStore:
             markdown,
             content if isinstance(content, dict) else {},
         )
+
+    @staticmethod
+    def _stable_array_entry_key(value: object) -> str | None:
+        if isinstance(value, str) and value:
+            return f"value:{value}"
+        if not isinstance(value, dict):
+            return None
+        for field in ("id", "columnId", "templateFieldId", "sheetId"):
+            candidate = value.get(field)
+            if isinstance(candidate, str) and candidate:
+                return f"{field}:{candidate}"
+        return None
+
+    @classmethod
+    def _to_y_value(cls, value: object):
+        if isinstance(value, list):
+            keys = [cls._stable_array_entry_key(entry) for entry in value]
+            if value and all(key is not None for key in keys) and len(set(keys)) == len(keys):
+                return YMap({
+                    "__type": "justwork-keyed-array-v1",
+                    "items": YMap({
+                        str(keys[index]): cls._to_y_value(entry)
+                        for index, entry in enumerate(value)
+                    }),
+                    "ranks": YMap({
+                        str(keys[index]): index * 1024
+                        for index in range(len(value))
+                    }),
+                })
+            return YArray([cls._to_y_value(entry) for entry in value])
+        if isinstance(value, dict):
+            return YMap({str(key): cls._to_y_value(entry) for key, entry in value.items()})
+        if value is None or isinstance(value, (str, int, float, bool)):
+            return value
+        return ""
+
+    @classmethod
+    def canonical_snapshot(
+        cls,
+        *,
+        markdown: str | None = None,
+        content: dict | None = None,
+    ) -> bytes:
+        """Create a fresh Yjs lineage from an authoritative REST document."""
+        document = YDoc()
+        with document.begin_transaction() as transaction:
+            if markdown is not None:
+                text = document.get_text("markdown")
+                if markdown:
+                    text.insert(transaction, 0, markdown)
+            if content is not None:
+                root = document.get_map("content")
+                for key, value in content.items():
+                    root.set(transaction, str(key), cls._to_y_value(value))
+        return encode_state_as_update(document)
 
     def drain_content(
         self,

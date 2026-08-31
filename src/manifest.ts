@@ -4,9 +4,9 @@ const isChromeStoreRelease = process.env.JUSTWORK_CHROME_STORE === "1";
 
 export default defineManifest({
   manifest_version: 3,
-  name: "JustWork — Encrypted Collaborative Workspace for Humans and AI Agents",
+  name: "JustWork",
   short_name: "JustWork",
-  version: "0.0.9",
+  version: "0.1.0",
   description: "An Agent-native collaborative workspace for teams, built end to end for usability, openness, and powerful human–Agent workflows.",
   icons: {
     "16": "justwork_logo.png",

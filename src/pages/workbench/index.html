@@ -8,7 +8,7 @@
       content="JustWork is an encrypted Agent-native collaborative workspace for humans and AI agents."
     />
     <title data-i18n="app.workbench.title">JustWork</title>
-    <link rel="icon" type="image/png" href="%BASE_URL%justwork_logo.png?v=0.0.9" />
+    <link rel="icon" type="image/png" href="%BASE_URL%justwork_logo.png?v=0.1.0" />
     <link rel="stylesheet" href="./workbench.css" />
   </head>
   <body>
@@ -44,9 +44,9 @@
           aria-controls="workspace-info-drawer"
           data-i18n="drawer.profile.title"
         >
-          Profile
+          Settings
         </button>
-        <button id="lock-workspace-btn" class="ghost-btn" type="button" hidden data-i18n="status.locked">Locked</button>
+        <button id="lock-workspace-btn" class="ghost-btn" type="button" hidden data-i18n="status.locked">Exit</button>
         <div class="language-switcher" id="language-switcher">
           <button
             id="language-switcher-btn"
@@ -311,7 +311,7 @@
         aria-labelledby="workspace-info-drawer-title"
       >
         <div class="workspace-info-drawer-header">
-          <h2 id="workspace-info-drawer-title" class="workspace-info-drawer-title" data-i18n="drawer.profile.title">Profile</h2>
+          <h2 id="workspace-info-drawer-title" class="workspace-info-drawer-title" data-i18n="drawer.profile.title">Settings</h2>
           <button
             id="workspace-info-drawer-close-btn"
             type="button"
@@ -468,9 +468,9 @@
       >
         <div class="history-drawer-header">
           <div>
-            <h2 id="history-drawer-title" class="history-drawer-title" data-i18n="drawer.history.title">Activity history</h2>
+            <h2 id="history-drawer-title" class="history-drawer-title" data-i18n="drawer.history.title">History</h2>
             <p class="history-drawer-hint" data-i18n="drawer.history.localHint">
-              Stored on this device only. Not synced to the server.
+              Workspace history. Select a record to inspect its details.
             </p>
           </div>
           <div class="history-drawer-actions">
@@ -482,6 +482,82 @@
         </div>
         <div class="history-drawer-body">
           <ul id="history-list" class="history-list" aria-label="Activity history" data-i18n-aria-label="drawer.history.ariaLabel" data-testid="history-list"></ul>
+        </div>
+      </aside>
+    </div>
+
+    <div id="history-detail-drawer-root" class="history-detail-drawer-root" aria-hidden="true">
+      <div id="history-detail-drawer-backdrop" class="history-detail-drawer-backdrop" tabindex="-1"></div>
+      <aside
+        id="history-detail-drawer"
+        class="history-detail-drawer"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="history-detail-title"
+      >
+        <div class="history-detail-drawer-header">
+          <div class="history-detail-heading">
+            <span class="history-detail-kicker" data-i18n="drawer.history.detail.kicker">History detail</span>
+            <h2 id="history-detail-title" class="history-detail-title">History detail</h2>
+          </div>
+          <button
+            id="history-detail-drawer-close-btn"
+            type="button"
+            class="history-drawer-close"
+            aria-label="Close"
+            data-i18n-aria-label="common.close"
+          >
+            ×
+          </button>
+        </div>
+        <div class="history-detail-drawer-body">
+          <dl class="history-detail-meta">
+            <div class="history-detail-meta-row">
+              <dt data-i18n="drawer.history.detail.operation">Operation</dt>
+              <dd id="history-detail-operation"></dd>
+            </div>
+            <div class="history-detail-meta-row">
+              <dt data-i18n="drawer.history.detail.time">Time</dt>
+              <dd id="history-detail-time"></dd>
+            </div>
+            <div class="history-detail-meta-row">
+              <dt data-i18n="drawer.history.detail.actor">Actor</dt>
+              <dd id="history-detail-actor"></dd>
+            </div>
+            <div class="history-detail-meta-row">
+              <dt data-i18n="drawer.history.detail.target">Target</dt>
+              <dd id="history-detail-target"></dd>
+            </div>
+            <div class="history-detail-meta-row">
+              <dt data-i18n="drawer.history.detail.eventId">Event ID</dt>
+              <dd id="history-detail-event-id"></dd>
+            </div>
+            <div id="history-detail-mutation-row" class="history-detail-meta-row" hidden>
+              <dt data-i18n="drawer.history.detail.mutationId">Mutation ID</dt>
+              <dd id="history-detail-mutation-id"></dd>
+            </div>
+          </dl>
+          <section class="history-detail-change history-detail-diff-section">
+            <div class="history-detail-diff-heading">
+              <h3 data-i18n="drawer.history.detail.changes">Changes</h3>
+              <div class="history-detail-diff-legend" aria-hidden="true">
+                <span class="history-detail-diff-added" data-i18n="drawer.history.detail.added">Added</span>
+                <span class="history-detail-diff-removed" data-i18n="drawer.history.detail.removed">Removed</span>
+              </div>
+            </div>
+            <pre id="history-detail-diff" class="history-detail-diff"></pre>
+          </section>
+          <details class="history-detail-technical">
+            <summary data-i18n="drawer.history.detail.technical">Technical snapshots</summary>
+            <section class="history-detail-change">
+              <h3 data-i18n="drawer.history.detail.before">Before</h3>
+              <pre id="history-detail-before" class="history-detail-snapshot"></pre>
+            </section>
+            <section class="history-detail-change">
+              <h3 data-i18n="drawer.history.detail.after">After</h3>
+              <pre id="history-detail-after" class="history-detail-snapshot"></pre>
+            </section>
+          </details>
         </div>
       </aside>
     </div>

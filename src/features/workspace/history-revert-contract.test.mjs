@@ -10,8 +10,8 @@ test("history revert drains delayed saves and adopts the canonical collaborative
 
   assert.match(handler, /await flushPendingDocSave\(ev\.itemId\)/);
   assert.match(handler, /await waitForDocSaveQueueToSettle\(ev\.itemId\)/);
-  assert.match(handler, /buildLocalHistoryRevertPatch\(ev, current\.kind\)/);
-  assert.match(handler, /resetCollaborativeState/);
+  assert.match(handler, /session\.revertRevision\(ev\.id, current\.revision, revertMutationId\)/);
+  assert.doesNotMatch(handler, /session\.saveItem/);
   assert.match(handler, /runHistoryRevertWithRetry/);
   assert.match(handler, /applyAuthoritativeCollaborativeState\(reverted\)/);
   assert.match(handler, /resetMarkdownCollaborator\(reverted\)/);

@@ -1,5 +1,6 @@
 import os
 import asyncio
+import copy
 import json
 import time
 import base64
@@ -25,6 +26,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Request, WebSocket,
 from pydantic import BaseModel
 from fastapi.responses import JSONResponse, HTMLResponse, PlainTextResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
+from diff_match_patch import diff_match_patch
 
 from .db_gateway import DatabaseGateway, DatabaseUnavailableError
 from .billing import BillingConfigurationError, BillingProviderError, StripeBillingService
@@ -1786,11 +1788,170 @@ def list_workspace_revision_history(
                 "after": event["after"],
                 "actor_user_id": event.get("actorUserId"),
                 "mutation_id": event.get("mutationId"),
+                "source_revision_id": event.get("sourceRevisionId"),
                 "timestamp": event["timestamp"],
             }
             for event in revisions
         ],
     )
+
+
+def _inverse_history_text(current: str, before: str, after: str) -> str:
+    if before == after:
+        return current
+    differ = diff_match_patch()
+    patches = differ.patch_make(after, before)
+    reverted, applied = differ.patch_apply(patches, current)
+    if not all(applied):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="history rollback conflicts with newer document changes",
+        )
+    return reverted
+
+
+@app.post(
+    "/v1/workspaces/{workspace_id}/revisions/{revision_id}/revert",
+    response_model=WorkspaceItemResponse,
+)
+def revert_workspace_revision(
+    workspace_id: str,
+    revision_id: str,
+    body: WorkspaceRevisionMutationRequest,
+    request: Request,
+    _: None = Depends(require_backend_token),
+    gateway: DatabaseGateway = Depends(get_gateway),
+) -> WorkspaceItemResponse:
+    actor_user_id, _, _ = actor_from_body(body, request, workspace_id, revision_id)
+    record = require_workspace(gateway, workspace_id)
+    state_payload = load_decrypted_state(record, body.password)
+    mutation_id = client_mutation_id_from_body(body)
+    recorded_item = recorded_mutation_item(
+        state_payload,
+        mutation_id,
+        operation="history-revert",
+        target_id=revision_id,
+    )
+    if recorded_item is not None:
+        # An idempotent retry is observational only. The first successful call
+        # already committed the new room epoch and canonical snapshot; clearing
+        # it here would reopen the stale-client bootstrap race we just closed.
+        return WorkspaceItemResponse(ok=True, workspace_id=workspace_id, item=recorded_item)
+
+    source = next(
+        (event for event in list_workspace_revisions(state_payload) if event.get("id") == revision_id),
+        None,
+    )
+    if source is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="history revision not found")
+    item_id = str(source.get("itemId", ""))
+    if not item_id or item_id == "workspace":
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="history revision is not a document change")
+    try:
+        current_doc = require_expected_revision(state_payload, item_id, body.expected_revision)
+    except KeyError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="item not found") from exc
+
+    before_doc = dict(current_doc)
+    source_before = source.get("before") if isinstance(source.get("before"), dict) else {}
+    source_after = source.get("after") if isinstance(source.get("after"), dict) else {}
+    operation = str(source.get("operation", ""))
+    doc = current_doc
+    body_changed = False
+
+    if operation == "create":
+        if bool(doc.get("inTrash", False)):
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="created item is already in trash")
+        doc["inTrash"] = True
+        if state_payload.get("activeDocId") == item_id:
+            state_payload["activeDocId"] = ""
+            choose_active_item_id(state_payload)
+    else:
+        scalar_fields = {
+            "title": "title",
+            "pinned": "pinned",
+            "inTrash": "inTrash",
+            "parentId": "parentId",
+            "orderKey": "orderKey",
+            "orderRank": "orderRank",
+        }
+        for snapshot_key, doc_key in scalar_fields.items():
+            before_value = source_before.get(snapshot_key)
+            after_value = source_after.get(snapshot_key)
+            if before_value == after_value:
+                continue
+            if doc.get(doc_key) != after_value:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=f"history rollback conflicts with newer {snapshot_key} changes",
+                )
+            doc[doc_key] = copy.deepcopy(before_value)
+
+        if doc.get("kind") == "page" and source_before.get("markdown") != source_after.get("markdown"):
+            doc["markdown"] = _inverse_history_text(
+                str(doc.get("markdown", "")),
+                str(source_before.get("markdown", "")),
+                str(source_after.get("markdown", "")),
+            )
+            body_changed = doc.get("markdown") != before_doc.get("markdown")
+        if doc.get("kind") in {"table", "board"} and source_before.get("content") != source_after.get("content"):
+            current_json = json.dumps(doc.get("content"), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            before_json = json.dumps(source_before.get("content"), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            after_json = json.dumps(source_after.get("content"), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            reverted_json = _inverse_history_text(current_json, before_json, after_json)
+            try:
+                doc["content"] = json.loads(reverted_json)
+            except json.JSONDecodeError as exc:
+                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="structured history rollback conflict") from exc
+            body_changed = doc.get("content") != before_doc.get("content")
+
+    if doc == before_doc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="history revision is already reverted")
+    doc["revision"] = int(before_doc.get("revision", 0)) + 1
+    doc["updatedAt"] = now_iso()
+
+    def commit_revert() -> dict:
+        item = item_view(doc)
+        record_mutation_item(
+            state_payload,
+            mutation_id,
+            operation="history-revert",
+            target_id=revision_id,
+            item=item,
+        )
+        append_workspace_revision(
+            state_payload,
+            operation="history-revert",
+            item_id=item_id,
+            title=str(doc.get("title", "")),
+            before=before_doc,
+            after=doc,
+            actor_user_id=actor_user_id,
+            mutation_id=mutation_id,
+            source_revision_id=revision_id,
+        )
+        save_state(gateway, record, state_payload, body.password, actor_user_id=actor_user_id)
+        return item
+
+    if body_changed and doc.get("kind") in {"page", "table", "board"}:
+        collaboration_store = get_collaborative_update_store()
+        canonical_snapshot = collaboration_store.canonical_snapshot(
+            markdown=str(doc.get("markdown", "")) if doc.get("kind") == "page" else None,
+            content=(doc.get("content") if isinstance(doc.get("content"), dict) else {})
+            if doc.get("kind") in {"table", "board"}
+            else None,
+        )
+        item = collaboration_store.reset_with_commit(
+            workspace_id,
+            item_id,
+            commit_revert,
+            canonical_snapshot,
+            cached_workspace_collaboration_key(workspace_id, body.password),
+        )
+        _disconnect_collaborative_item_clients(workspace_id, item_id)
+    else:
+        item = commit_revert()
+    return WorkspaceItemResponse(ok=True, workspace_id=workspace_id, item=item)
 
 
 @app.put("/v1/workspaces/{workspace_id}/settings", response_model=WorkspaceSettingsResponse)

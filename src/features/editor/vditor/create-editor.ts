@@ -118,6 +118,7 @@ export function createWysiwygEditor(options: CreateEditorOptions): DocEditor {
   };
   let compositionBaseMarkdown: string | null = null;
   let lastNativeInputAt = 0;
+  let uncommittedNativeInputBaseMarkdown: string | null = null;
   let trustedNativeInputVersion = 0;
   let programmaticRenderInputVersion: number | undefined;
   const NATIVE_INPUT_SETTLE_MS = 750;
@@ -227,6 +228,7 @@ export function createWysiwygEditor(options: CreateEditorOptions): DocEditor {
     const markdown = compositionGate.onCompositionEnd(imageSync?.fromEditorMarkdown(getMarkdown()) ?? getMarkdown());
     if (markdown === null) return;
     dispatchMarkdown(markdown);
+    uncommittedNativeInputBaseMarkdown = null;
     compositionBaseMarkdown = null;
     queueMicrotask(notifyMentionQueryChange);
   };
@@ -234,6 +236,7 @@ export function createWysiwygEditor(options: CreateEditorOptions): DocEditor {
     const markdown = compositionGate.onCompositionCancel(imageSync?.fromEditorMarkdown(getMarkdown()) ?? getMarkdown());
     if (markdown === null) return;
     dispatchMarkdown(markdown);
+    uncommittedNativeInputBaseMarkdown = null;
     compositionBaseMarkdown = null;
     queueMicrotask(notifyMentionQueryChange);
   };
@@ -301,6 +304,9 @@ export function createWysiwygEditor(options: CreateEditorOptions): DocEditor {
   container.addEventListener("compositioncancel", cancelComposedMarkdown, true);
   container.addEventListener("beforeinput", (event) => {
     if (!event.isTrusted) return;
+    if (uncommittedNativeInputBaseMarkdown === null) {
+      uncommittedNativeInputBaseMarkdown = getMarkdown();
+    }
     trustedNativeInputVersion += 1;
     lastNativeInputAt = performance.now();
   }, true);
@@ -366,6 +372,7 @@ export function createWysiwygEditor(options: CreateEditorOptions): DocEditor {
         return;
       }
       dispatchMarkdown(gatedMarkdown);
+      uncommittedNativeInputBaseMarkdown = null;
       queueMicrotask(notifyMentionQueryChange);
     },
     after: () => {
@@ -404,6 +411,7 @@ export function createWysiwygEditor(options: CreateEditorOptions): DocEditor {
     setMarkdown,
     isComposing: compositionGate.isComposing,
     isFocused: () => container.contains(document.activeElement),
+    getUncommittedNativeInputBaseMarkdown: () => uncommittedNativeInputBaseMarkdown,
     focus: () => {
       (vditor as VditorWithInsert | undefined)?.focus?.();
     },

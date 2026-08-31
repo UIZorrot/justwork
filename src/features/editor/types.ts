@@ -5,6 +5,7 @@ export type DocEditor = {
   setMarkdown: (md: string, clearHistory?: boolean) => void;
   isComposing: () => boolean;
   isFocused: () => boolean;
+  getUncommittedNativeInputBaseMarkdown: () => string | null;
   focus: () => void;
   replaceActiveMention: (mentionMarkdown: string) => boolean;
   bindCollaborator: (binding: CollaborativeMarkdownBinding | undefined) => void;

@@ -18,6 +18,6 @@ test("the web app starts at existing-workspace login while creation remains avai
   assert.match(i18n, /"gate\.setup\.loginWorkspace": "登录已有工作区"/);
   assert.match(i18n, /"gate\.unlock\.title": "登录已有工作区"/);
   assert.match(html, /<title data-i18n="app\.workbench\.title">JustWork<\/title>/);
-  assert.match(html, /href="%BASE_URL%justwork_logo\.png\?v=0\.0\.9"/);
+  assert.match(html, /href="%BASE_URL%justwork_logo\.png\?v=0\.1\.0"/);
   assert.doesNotMatch(html, /icons\/icon-(?:16|32)\.png/);
 });

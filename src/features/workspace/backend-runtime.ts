@@ -122,6 +122,15 @@ export function createBackendWorkspaceSession(opts: BackendWorkspaceSessionOptio
       return r.revisions;
     },
 
+    async revertRevision(revisionId: string, expectedRevision: number, clientMutationId?: string) {
+      const r = await client.revertRevision(opts.workspaceId, revisionId, {
+        password: currentPassword,
+        expected_revision: expectedRevision,
+        client_mutation_id: clientMutationId ?? null,
+      });
+      return apiItemToDoc(r.item);
+    },
+
     async updateWorkspaceTitle(title: string, expectedRevision: number) {
       const r = await client.updateWorkspaceSettings(opts.workspaceId, {
         password: currentPassword,

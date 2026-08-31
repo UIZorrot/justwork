@@ -353,6 +353,7 @@ class WorkspaceRevisionEvent(BaseModel):
     after: dict[str, Any]
     actor_user_id: str | None = None
     mutation_id: str | None = None
+    source_revision_id: str | None = None
     timestamp: str
 
 

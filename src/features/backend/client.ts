@@ -103,6 +103,7 @@ export type WorkspaceRevisionEvent = {
   after: Record<string, unknown>;
   actor_user_id?: string | null;
   mutation_id?: string | null;
+  source_revision_id?: string | null;
   timestamp: string;
 };
 
@@ -451,6 +452,18 @@ export function createBackendClient(opts: BackendClientOptions) {
       body: PasswordBody,
     ): Promise<{ ok: boolean; workspace_id: string; revisions: WorkspaceRevisionEvent[] }> {
       return request("POST", `/v1/workspaces/${encodeURIComponent(workspaceId)}/revisions`, body);
+    },
+
+    revertRevision(
+      workspaceId: string,
+      revisionId: string,
+      body: RevisionMutationBody,
+    ): Promise<{ ok: boolean; workspace_id: string; item: WorkspaceItem }> {
+      return request(
+        "POST",
+        `/v1/workspaces/${encodeURIComponent(workspaceId)}/revisions/${encodeURIComponent(revisionId)}/revert`,
+        body,
+      );
     },
 
     updateWorkspaceSettings(

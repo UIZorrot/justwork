@@ -1392,6 +1392,22 @@ body {
 .history-item-main {
   flex: 1;
   min-width: 0;
+  appearance: none;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  border-radius: 6px;
+}
+.history-item-main:focus-visible {
+  outline: 2px solid #222;
+  outline-offset: 4px;
+}
+.history-item-main:hover .history-item-doc {
+  text-decoration: underline;
+  text-underline-offset: 2px;
 }
 .history-item-meta {
   font-size: 11px;
@@ -1415,6 +1431,201 @@ body {
 }
 .history-revert-btn:hover {
   background: #ececea;
+}
+
+.history-detail-drawer-root {
+  position: fixed;
+  inset: 0;
+  z-index: 330;
+  pointer-events: none;
+  visibility: hidden;
+}
+.history-detail-drawer-root.is-open {
+  pointer-events: auto;
+  visibility: visible;
+}
+.history-detail-drawer-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(30, 28, 26, 0.22);
+  opacity: 0;
+  transition: opacity 0.2s ease;
+}
+.history-detail-drawer-root.is-open .history-detail-drawer-backdrop {
+  opacity: 1;
+}
+.history-detail-drawer {
+  position: absolute;
+  top: 48px;
+  right: 0;
+  bottom: 0;
+  width: min(560px, 100vw);
+  display: flex;
+  flex-direction: column;
+  background: #fff;
+  border-left: 1px solid #dededb;
+  box-shadow: -16px 0 40px rgba(30, 28, 26, 0.14);
+  transform: translateX(100%);
+  transition: transform 0.22s ease;
+}
+.history-detail-drawer-root.is-open .history-detail-drawer {
+  transform: translateX(0);
+}
+.history-detail-drawer-header {
+  flex-shrink: 0;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 16px 18px 14px;
+  border-bottom: 1px solid #ececea;
+}
+.history-detail-heading {
+  min-width: 0;
+}
+.history-detail-kicker {
+  display: block;
+  margin-bottom: 4px;
+  color: #777;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.history-detail-title {
+  margin: 0;
+  color: #1f1f1d;
+  font-size: 17px;
+  font-weight: 650;
+  overflow-wrap: anywhere;
+}
+.history-detail-drawer-body {
+  flex: 1;
+  min-height: 0;
+  padding: 16px 18px 24px;
+  overflow-y: auto;
+}
+.history-detail-meta {
+  margin: 0;
+  padding: 0;
+  border: 1px solid #e5e5e2;
+  border-radius: 10px;
+  overflow: hidden;
+}
+.history-detail-meta-row {
+  display: grid;
+  grid-template-columns: minmax(96px, 0.34fr) minmax(0, 1fr);
+  gap: 12px;
+  padding: 10px 12px;
+  border-bottom: 1px solid #ececea;
+}
+.history-detail-meta-row[hidden] {
+  display: none;
+}
+.history-detail-meta-row:last-child {
+  border-bottom: 0;
+}
+.history-detail-meta-row dt {
+  color: #777;
+  font-size: 12px;
+}
+.history-detail-meta-row dd {
+  min-width: 0;
+  margin: 0;
+  color: #262624;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.history-detail-change {
+  margin-top: 18px;
+}
+.history-detail-change h3 {
+  margin: 0 0 8px;
+  font-size: 13px;
+  font-weight: 650;
+}
+.history-detail-diff-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+.history-detail-diff-heading h3 {
+  margin: 0;
+}
+.history-detail-diff-legend {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+}
+.history-detail-diff-legend span {
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+.history-detail-diff {
+  min-height: 54px;
+  max-height: 38vh;
+  margin: 0;
+  padding: 12px;
+  overflow: auto;
+  border: 1px solid #d9d9d5;
+  border-radius: 10px;
+  background: #fff;
+  color: #292927;
+  font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.history-detail-diff-added {
+  background: #e5f5e9;
+  color: #176b38;
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+}
+.history-detail-diff-removed {
+  background: #ffebe8;
+  color: #9d2d25;
+  text-decoration: line-through;
+}
+.history-detail-technical {
+  margin-top: 18px;
+  border-top: 1px solid #ececea;
+  color: #777;
+}
+.history-detail-technical summary {
+  padding: 14px 0 0;
+  cursor: pointer;
+  font-size: 12px;
+  user-select: none;
+}
+.history-detail-technical[open] summary {
+  color: #292927;
+}
+.history-detail-snapshot {
+  min-height: 72px;
+  max-height: 38vh;
+  margin: 0;
+  padding: 12px;
+  overflow: auto;
+  border: 1px solid #e5e5e2;
+  border-radius: 10px;
+  background: #fafaf8;
+  color: #292927;
+  font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 11px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 640px) {
+  .history-detail-meta-row {
+    grid-template-columns: 1fr;
+    gap: 4px;
+  }
 }
 
 .connect-agent-dialog-root {
@@ -2599,6 +2810,23 @@ body {
   color: #404040;
   font-size: 14px;
   font-weight: 500;
+}
+
+#lock-workspace-btn {
+  border-color: #000000;
+  background: #000000;
+  color: #ffffff;
+}
+
+#lock-workspace-btn:hover {
+  border-color: #262626;
+  background: #262626;
+  color: #ffffff;
+}
+
+#lock-workspace-btn:focus-visible {
+  outline: 2px solid #000000;
+  outline-offset: 2px;
 }
 
 .workspace-info-drawer-title,

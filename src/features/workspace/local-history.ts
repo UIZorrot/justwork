@@ -40,6 +40,7 @@ export type LocalHistoryEvent = {
   before: LocalHistorySnapshot;
   after: LocalHistorySnapshot;
   actorUserId?: string;
+  mutationId?: string;
 };
 
 export type LocalHistoryState = {
@@ -110,6 +111,7 @@ function normalizeEvent(value: unknown): LocalHistoryEvent | null {
     before: normalizeSnapshot(record.before),
     after: normalizeSnapshot(record.after),
     actorUserId: typeof record.actorUserId === "string" ? record.actorUserId : undefined,
+    mutationId: typeof record.mutationId === "string" ? record.mutationId : undefined,
   };
 }
 
@@ -209,6 +211,7 @@ export async function appendLocalHistoryEvent(
     before: LocalHistorySnapshot;
     after: LocalHistorySnapshot;
     actorUserId?: string;
+    mutationId?: string;
     createdAt?: string;
   },
 ): Promise<LocalHistoryEvent | null> {
@@ -227,6 +230,7 @@ export async function appendLocalHistoryEvent(
       before: input.before,
       after: input.after,
       actorUserId: input.actorUserId,
+      mutationId: input.mutationId,
     };
     const nextEvents = [...state.events, event];
     const trimmed = nextEvents.length > LOCAL_HISTORY_MAX_EVENTS
