@@ -8,10 +8,11 @@ import path from "node:path";
 import { chromium } from "playwright";
 import * as Y from "yjs";
 
+const siteBuild = process.env.JUSTWORK_E2E_SITE === "1";
 const distribution = process.env.JUSTWORK_E2E_DISTRIBUTION === "extension" ? "extension" : "web";
-const distDir = path.resolve(distribution === "extension" ? "dist" : "dist-web");
-const entryPath = distribution === "extension" ? "/src/pages/workbench/index.html" : "/";
-const markerPrefix = distribution === "extension" ? "EXT" : "WEB";
+const distDir = path.resolve(siteBuild ? "dist-site" : distribution === "extension" ? "dist" : "dist-web");
+const entryPath = siteBuild ? "/app/" : distribution === "extension" ? "/src/pages/workbench/index.html" : "/";
+const markerPrefix = siteBuild ? "SITE" : distribution === "extension" ? "EXT" : "WEB";
 const password = `${distribution}-e2e-password`;
 const extendedSoak = process.env.JUSTWORK_E2E_EXTENDED === "1";
 const soakMs = Math.max(15_000, Number.parseInt(process.env.JUSTWORK_E2E_SOAK_MS ?? "90000", 10) || 90_000);
@@ -28,13 +29,17 @@ function startStaticServer() {
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url ?? "/", "http://127.0.0.1");
     const requested = path.normalize(decodeURIComponent(url.pathname)).replace(/^[/\\]+/, "");
-    const filePath = path.join(distDir, requested || "index.html");
+    let filePath = path.join(distDir, requested || "index.html");
     if (!filePath.startsWith(distDir)) {
       res.writeHead(403).end();
       return;
     }
     try {
-      const info = await stat(filePath);
+      let info = await stat(filePath);
+      if (info.isDirectory()) {
+        filePath = path.join(filePath, "index.html");
+        info = await stat(filePath);
+      }
       if (!info.isFile()) throw new Error("not a file");
       res.writeHead(200, { "Content-Type": contentType(filePath) });
       createReadStream(filePath).pipe(res);
@@ -199,6 +204,12 @@ async function main() {
     const contextA = await browser.newContext();
     await installDistributionRuntime(contextA, staticServer.baseUrl);
     const pageA = await contextA.newPage();
+    const vditorRuntimeResponses = [];
+    pageA.on("response", (response) => {
+      if (new URL(response.url()).pathname.endsWith("/vendor/vditor/dist/js/lute/lute.min.js")) {
+        vditorRuntimeResponses.push({ url: response.url(), status: response.status() });
+      }
+    });
     const itemSavesA = [];
     const itemSavesB = [];
     const observeItemSaves = (page, sink) => {
@@ -281,6 +292,12 @@ async function main() {
       throw new Error("remote create retry exhausted");
     };
     const editorA = await editorFor(pageA);
+    if (siteBuild) {
+      assert.deepEqual(vditorRuntimeResponses, [{
+        url: `${staticServer.baseUrl}/app/vendor/vditor/dist/js/lute/lute.min.js`,
+        status: 200,
+      }], "hosted workbench must load the Vditor runtime below /app/");
+    }
     const bootstrapMarker = `${markerPrefix}_BOOTSTRAP_INPUT`;
     await typeAtEnd(pageA, editorA, bootstrapMarker);
     await pageA.waitForFunction(

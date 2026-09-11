@@ -29,6 +29,7 @@
     "test:e2e:backend:offline": "yarn build:extension && node scripts/workbench-backend-offline-e2e.mjs",
     "test:e2e:extension": "yarn build:extension && node scripts/workbench-e2e.mjs",
     "test:e2e:web": "yarn build:web && node scripts/workbench-web-e2e.mjs",
+    "test:e2e:site": "yarn build:site && node -e \"process.env.JUSTWORK_E2E_SITE='1'; import('./scripts/workbench-web-e2e.mjs')\"",
     "test:e2e:sync:extension": "yarn build:extension && node -e \"process.env.JUSTWORK_E2E_DISTRIBUTION='extension'; import('./scripts/workbench-web-e2e.mjs')\"",
     "test:backend": "python -m unittest backend.tests.test_backend_agent_api backend.tests.test_write_signing",
     "test:cli": "yarn build:packages && powershell -NoProfile -ExecutionPolicy Bypass -File scripts/cli-workspace-e2e.ps1",

@@ -64,13 +64,22 @@ export function getSessionStorageArea(): StorageAreaLike {
   return getChromeStorageArea("session") ?? createWebStorageArea(globalThis.sessionStorage);
 }
 
+export function resolveWebRuntimeUrl(path: string, baseUrl: string): string {
+  return new URL(path.replace(/^\/+/, ""), baseUrl).toString();
+}
+
 export function getRuntimeUrl(path: string): string {
   const normalizedPath = path.replace(/^\/+/, "");
   if (globalThis.chrome?.runtime?.getURL) {
     return globalThis.chrome.runtime.getURL(normalizedPath);
   }
+  if (typeof globalThis.document !== "undefined") {
+    // The hosted workbench is deployed below /app/. Resolving from the origin
+    // incorrectly requests /vendor/... and prevents Vditor from loading Lute.
+    return resolveWebRuntimeUrl(normalizedPath, globalThis.document.baseURI);
+  }
   if (typeof globalThis.location !== "undefined") {
-    return new URL(normalizedPath, `${globalThis.location.origin}/`).toString();
+    return resolveWebRuntimeUrl(normalizedPath, `${globalThis.location.origin}/`);
   }
   return normalizedPath;
 }
