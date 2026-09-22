@@ -3,6 +3,15 @@ import test from "node:test";
 
 import { loadTranspiledModule } from "./test-module-loader.mjs";
 
+test("concurrent changes preserve independently added fields and rows", async () => {
+  const { mergeSyncValue } = await loadTranspiledModule("src/features/workspace/three-way-merge.ts");
+  assert.deepEqual(mergeSyncValue({}, { local: "L" }, { remote: "R" }).value, { local: "L", remote: "R" });
+  const base = [{ id: "a", title: "A" }];
+  const local = [...base, { id: "b", title: "new row" }];
+  const remote = [{ id: "a", title: "edited A" }];
+  assert.deepEqual(mergeSyncValue(base, local, remote).value, [...remote, local[1]]);
+});
+
 test("three-way merge combines independent sheet cell edits", async () => {
   const mod = await loadTranspiledModule("src/features/workspace/three-way-merge.ts");
   const base = { workbookData: { sheets: { one: { cellData: { 0: { 0: { v: "a" }, 1: { v: "b" } } } } } } };

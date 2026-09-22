@@ -1,3 +1,4 @@
+import { withStorageTransaction } from "./storage-transaction";
 import { STORAGE_KEYS, type WorkspaceDocContent } from "../../shared/storage-keys";
 import {
   clearStoredWorkspaceMutationsForWorkspace,
@@ -104,31 +105,37 @@ export async function enqueueOfflineMutation(
   storage: OfflineQueueStorage,
   mutation: OfflineMutation,
 ): Promise<OfflineMutation[]> {
-  const current = await loadOfflineMutations(storage);
-  const next = mergeOfflineMutation(current, mutation);
-  await saveOfflineMutations(storage, next);
-  await mirrorOfflineMutationToWorkspaceLog(storage, current, mutation);
-  return next;
+  return withStorageTransaction(STORAGE_KEYS.OFFLINE_MUTATION_QUEUE, async () => {
+    const current = await loadOfflineMutations(storage);
+    const next = mergeOfflineMutation(current, mutation);
+    await saveOfflineMutations(storage, next);
+    await mirrorOfflineMutationToWorkspaceLog(storage, current, next.find((entry) => entry.id === mutation.id)!);
+    return next;
+  });
 }
 
 export async function removeOfflineMutation(
   storage: OfflineQueueStorage,
   mutationId: string,
 ): Promise<OfflineMutation[]> {
-  const current = await loadOfflineMutations(storage);
-  const next = current.filter((entry) => entry.id !== mutationId);
-  await saveOfflineMutations(storage, next);
-  await removeStoredWorkspaceMutation(storage, mutationId);
-  return next;
+  return withStorageTransaction(STORAGE_KEYS.OFFLINE_MUTATION_QUEUE, async () => {
+    const current = await loadOfflineMutations(storage);
+    const next = current.filter((entry) => entry.id !== mutationId);
+    await saveOfflineMutations(storage, next);
+    await removeStoredWorkspaceMutation(storage, mutationId);
+    return next;
+  });
 }
 
 export async function clearOfflineMutationsForWorkspace(
   storage: OfflineQueueStorage,
   workspaceId: string,
 ): Promise<OfflineMutation[]> {
-  const current = await loadOfflineMutations(storage);
-  const next = current.filter((entry) => entry.workspaceId !== workspaceId);
-  await saveOfflineMutations(storage, next);
-  await clearStoredWorkspaceMutationsForWorkspace(storage, workspaceId);
-  return next;
+  return withStorageTransaction(STORAGE_KEYS.OFFLINE_MUTATION_QUEUE, async () => {
+    const current = await loadOfflineMutations(storage);
+    const next = current.filter((entry) => entry.workspaceId !== workspaceId);
+    await saveOfflineMutations(storage, next);
+    await clearStoredWorkspaceMutationsForWorkspace(storage, workspaceId);
+    return next;
+  });
 }

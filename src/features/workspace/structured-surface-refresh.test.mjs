@@ -26,7 +26,8 @@ test("structured hydration cannot overwrite an edit made while the item request 
   assert.match(hydrationBlock, /const hydrationGeneration = localEditGenerationByDoc\.get\(doc\.id\)/);
   assert.match(hydrationBlock, /await session\.loadItem\(doc\.id\)/);
   assert.match(hydrationBlock, /hasNewerLocalEditGeneration\([\s\S]*?hydrationGeneration/);
-  assert.match(hydrationBlock, /hasEditDuringHydration \|\| dirtyDocIds\.has\(doc\.id\)/);
+  assert.match(hydrationBlock, /if \(hasEditDuringHydration\)/);
+  assert.match(hydrationBlock, /await hydrateDocWithLocalDraft\(full\)/);
 });
 
 test("structured bodies prefetch on intent without duplicate backend reads", async () => {

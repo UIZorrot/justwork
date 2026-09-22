@@ -174,3 +174,8 @@ test("bootstrap replay keeps typing made before the canonical room becomes ready
   assert.equal(replayed.clean, true);
   assert.equal(replayed.markdown, "Remote heading\nRoadmap\nLocal idea\n");
 });
+
+test("replaying a draft already present in canonical content never duplicates it", async () => {
+  const { replayMarkdownEdit } = await importTsModule("src/features/collaboration/yjs-vditor-binding.ts");
+  assert.deepEqual(replayMarkdownEdit("base", "base new work", "base new work"), { markdown: "base new work", clean: true });
+});

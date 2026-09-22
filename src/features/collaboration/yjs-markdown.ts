@@ -42,11 +42,6 @@ function applyMarkdownDiff(text: Y.Text, current: string, next: string): void {
   if (inserted.length > 0) text.insert(prefixLength, inserted);
 }
 
-function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {
-  if (left.length !== right.length) return false;
-  return left.every((value, index) => value === right[index]);
-}
-
 export function createMarkdownCollaborator(
   options: MarkdownCollaboratorOptions = {},
 ): MarkdownCollaborator {
@@ -85,13 +80,14 @@ export function createMarkdownCollaborator(
       }, localOrigin);
     },
     applyRemoteUpdate: (update) => {
-      const beforeState = Y.encodeStateVector(doc);
+      const beforeMarkdown = text.toString();
       // CRDT updates are merged as received. Never rebuild either side's history or
       // synthesize a replacement update here: that would be a client-side rebase and
       // can turn a not-yet-hydrated empty document into a destructive write.
       Y.applyUpdate(doc, update, remoteOrigin);
 
-      return !bytesEqual(beforeState, Y.encodeStateVector(doc));
+      // Delete-only updates do not advance a Yjs state vector.
+      return beforeMarkdown !== text.toString();
     },
     encodeUpdate: () => Y.encodeStateAsUpdate(doc),
     onUpdate: (handler) => {

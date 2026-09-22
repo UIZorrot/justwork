@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import json
+import tempfile
 from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
@@ -1284,13 +1285,29 @@ class DatabaseGateway:
         return value
 
     def _write_control_records_unlocked(self, records: dict) -> None:
-        self._control_file.write_text(json.dumps(records, ensure_ascii=False, indent=2), encoding="utf-8")
+        self._atomic_write_json(self._control_file, records)
 
     def _read_file_records(self) -> dict:
         return json.loads(self._data_file.read_text(encoding="utf-8"))
 
     def _write_file_records(self, records: dict) -> None:
-        self._data_file.write_text(json.dumps(records, ensure_ascii=False, indent=2), encoding="utf-8")
+        self._atomic_write_json(self._data_file, records)
+
+    @staticmethod
+    def _atomic_write_json(path: Path, records: dict) -> None:
+        # Never truncate the last good workspace file before the replacement is
+        # complete. A failed write or process interruption leaves it readable.
+        pending: str | None = None
+        try:
+            with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent, delete=False) as stream:
+                pending = stream.name
+                json.dump(records, stream, ensure_ascii=False, indent=2)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(pending, path)
+        finally:
+            if pending is not None:
+                Path(pending).unlink(missing_ok=True)
 
     def _file_get_workspace(self, workspace_id: str) -> Optional[WorkspaceRecord]:
         with self._lock:

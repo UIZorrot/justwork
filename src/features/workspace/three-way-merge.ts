@@ -53,7 +53,11 @@ function mergeArray(base: unknown[], local: unknown[], remote: unknown[], path: 
     const remoteEntry = remoteById.get(id);
     if (localEntry === undefined || remoteEntry === undefined) {
       const changedSide = localEntry ?? remoteEntry;
-      if (baseEntry === undefined || syncValuesEqual(changedSide, baseEntry)) continue;
+      if (baseEntry === undefined) {
+        if (changedSide !== undefined) merged.push(changedSide);
+        continue;
+      }
+      if (syncValuesEqual(changedSide, baseEntry)) continue;
       conflicts.push(`${path}.${id}`);
       if (remoteEntry !== undefined) merged.push(remoteEntry);
       continue;
@@ -82,7 +86,11 @@ function mergeRecord(
     if (!hasLocal || !hasRemote) {
       if (!hasLocal && !hasRemote) continue;
       const surviving = hasLocal ? local[key] : remote[key];
-      if (!hasBase || syncValuesEqual(surviving, base[key])) continue;
+      if (!hasBase) {
+        merged[key] = surviving;
+        continue;
+      }
+      if (syncValuesEqual(surviving, base[key])) continue;
       conflicts.push(childPath);
       if (hasRemote) merged[key] = remote[key];
       continue;

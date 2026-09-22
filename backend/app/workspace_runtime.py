@@ -103,8 +103,16 @@ def default_content_for_kind(kind: str) -> dict | None:
 
 
 def normalize_doc_payload(doc: dict) -> dict:
+    if not isinstance(doc, dict):
+        raise ValueError("document must be an object")
     next_doc = dict(doc)
     kind = str(next_doc.get("kind", "page"))
+    if kind not in {"page", "folder", "table", "board"}:
+        raise ValueError("unsupported stored document kind")
+    if "markdown" in next_doc and not isinstance(next_doc["markdown"], str):
+        raise ValueError("stored markdown must be a string")
+    if kind in {"table", "board"} and next_doc.get("content") is not None and not isinstance(next_doc["content"], dict):
+        raise ValueError("stored structured content must be an object")
     if kind == "page":
         next_doc["markdown"] = str(next_doc.get("markdown", ""))
         next_doc["content"] = None
@@ -337,13 +345,10 @@ def looks_like_legacy_welcome_markdown(markdown: str) -> bool:
 
 
 def normalize_legacy_welcome_doc(doc: dict) -> dict:
-    markdown = str(doc.get("markdown", ""))
-    if doc.get("kind") != "welcome" and not looks_like_legacy_welcome_markdown(markdown):
+    if doc.get("kind") != "welcome":
         return doc
-    title = str(doc.get("title", "")).strip() or "未命名文档"
     next_doc = dict(doc)
     next_doc["kind"] = "page"
-    next_doc["markdown"] = f"# {title}\n"
     return next_doc
 
 
@@ -366,11 +371,18 @@ def strip_auto_title_heading(doc: dict) -> dict:
 
 
 def normalize_workspace_state(state: dict) -> dict:
+    if not isinstance(state, dict) or not isinstance(state.get("docs"), list) or not state["docs"]:
+        raise ValueError("workspace must contain a document list")
+    ids = set()
+    for doc in state["docs"]:
+        if not isinstance(doc, dict) or not isinstance(doc.get("id"), str) or not doc["id"]:
+            raise ValueError("stored document must have an id")
+        if doc["id"] in ids:
+            raise ValueError("duplicate stored document id")
+        ids.add(doc["id"])
     docs = []
     for doc in state.get("docs", []):
         normalized = normalize_legacy_welcome_doc(doc)
-        if doc.get("kind") != "welcome":
-            normalized = strip_auto_title_heading(normalized)
         docs.append(normalize_doc_payload(normalized))
     next_order_by_parent: dict[str, float] = {}
     for doc in docs:

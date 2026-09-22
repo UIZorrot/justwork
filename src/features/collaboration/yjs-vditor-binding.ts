@@ -29,6 +29,9 @@ export function replayMarkdownEdit(
   locallyEditedMarkdown: string,
   currentCollaborativeMarkdown: string,
 ): ComposedMarkdownMerge {
+  if (locallyEditedMarkdown === currentCollaborativeMarkdown) {
+    return { markdown: currentCollaborativeMarkdown, clean: true };
+  }
   if (locallyEditedMarkdown === editBase) {
     return { markdown: currentCollaborativeMarkdown, clean: true };
   }

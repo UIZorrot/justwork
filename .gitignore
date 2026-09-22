@@ -18,16 +18,18 @@ dist-site/
 id_rsa
 id_rsa.pub
 *.secret
-docs
+/docs/
 !website/docs/
 !website/docs/**
 !website/en/docs/
 !website/en/docs/**
-scripts
+/scripts
 !scripts/
 scripts/*
 !scripts/workbench-backend-e2e.mjs
 !scripts/workbench-web-e2e.mjs
+!scripts/run-node-tests.mjs
+!scripts/sanitize-chrome-store-dist.mjs
 
 # --- Local data / dev databases (may contain workspace ciphertext & metadata) ---
 .justwork-data/
@@ -40,6 +42,9 @@ backend/tests/
 !backend/tests/
 backend/tests/*
 !backend/tests/test_collab_safety.py
+!backend/tests/test_sync_integrity.py
+!backend/tests/test_backend_sync_mutations.py
+!backend/tests/test_workspace_runtime_migration.py
 __pycache__/
 *.py[cod]
 .pytest_cache/

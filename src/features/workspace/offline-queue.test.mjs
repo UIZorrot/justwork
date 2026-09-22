@@ -27,6 +27,32 @@ function createStorage() {
   };
 }
 
+test("concurrent offline writes and acknowledgements preserve every pending document", async () => {
+  const queue = await loadTranspiledModule("src/features/workspace/offline-queue.ts");
+  const storage = createStorage();
+  const mutation = (id, itemId) => ({ id, itemId, workspaceId: "w", patch: { markdown: id }, expectedRevision: 1, createdAt: "2026-09-22" });
+  await Promise.all(Array.from({ length: 20 }, (_, i) => queue.enqueueOfflineMutation(storage, mutation(`m${i}`, `p${i}`))));
+  assert.equal((await queue.loadOfflineMutations(storage)).length, 20);
+  await Promise.all([
+    queue.removeOfflineMutation(storage, "m0"),
+    queue.enqueueOfflineMutation(storage, mutation("new", "p0")),
+  ]);
+  const pending = await queue.loadOfflineMutations(storage);
+  assert.equal(pending.length, 20);
+  assert.equal(pending.find((entry) => entry.itemId === "p0").id, "new");
+});
+
+test("coalesced offline patches retain the original base and all fields in the replay log", async () => {
+  const queue = await loadTranspiledModule("src/features/workspace/offline-queue.ts");
+  const log = await loadTranspiledModule("src/features/workspace/mutation-log.ts");
+  const storage = createStorage();
+  await queue.enqueueOfflineMutation(storage, { id: "one", workspaceId: "w", itemId: "p", patch: { markdown: "body" }, expectedRevision: 1, createdAt: "2026-09-22" });
+  await queue.enqueueOfflineMutation(storage, { id: "two", workspaceId: "w", itemId: "p", patch: { title: "title" }, expectedRevision: 2, createdAt: "2026-09-22" });
+  const [entry] = await log.loadWorkspaceMutationLog(storage, "w");
+  assert.deepEqual(entry.patch, { markdown: "body", title: "title" });
+  assert.equal(entry.baseRevision, 1);
+});
+
 test("offline queue has a bounded persistence contract and the sync conflict copy is localized", async () => {
   await access(queuePath);
   const queue = await readFile(queuePath, "utf8");

@@ -138,7 +138,7 @@ from .workspace_runtime import (
     workspace_member_views,
 )
 
-app = FastAPI(title="JustWork Backend Gateway", version="0.1.0")
+app = FastAPI(title="JustWork Backend Gateway", version="0.1.1")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -566,9 +566,11 @@ def load_decrypted_state(record: WorkspaceRecord, password: str) -> dict:
             normalized = normalize_workspace_state(state)
             ensure_workspace_members(normalized, record.owner_user_id, record.owner_nickname)
             return normalized
-        return state
+        raise ValueError("workspace state must be an object")
     except InvalidWorkspacePassword as exc:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="invalid workspace password") from exc
+    except (ValueError, TypeError, KeyError) as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="invalid stored workspace state") from exc
 
 
 def actor_from_body(
@@ -2164,25 +2166,8 @@ def update_workspace_item(
     mutation_id = client_mutation_id_from_body(body)
     recorded_item = recorded_mutation_item(state_payload, mutation_id, operation="update", target_id=item_id)
     if recorded_item is not None:
-        should_finish_structured_reset = bool(
-            body.reset_collaborative_state
-            or (
-                body.collaborative_update is None
-                and recorded_item.get("kind") in {"table", "board"}
-                and body.content is not None
-            )
-        )
-        if should_finish_structured_reset:
-            if recorded_item.get("kind") not in {"table", "board"} or body.content is None:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="collaborative reset requires table or board content",
-                )
-            # The workspace write may have committed before a previous room
-            # reset failed. An idempotent retry must finish that second half
-            # instead of returning while the obsolete room is still live.
-            get_collaborative_update_store().delete_snapshot(workspace_id, item_id)
-            _disconnect_collaborative_item_clients(workspace_id, item_id)
+        # The room reset and workspace write now commit together. Retrying an
+        # old receipt must never delete the room containing subsequent edits.
         return WorkspaceItemResponse(ok=True, workspace_id=workspace_id, item=recorded_item)
     collaborative_update: bytes | None = None
     try:
@@ -2315,15 +2300,18 @@ def update_workspace_item(
             raise
         except ValueError as exc:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    elif reset_structured_collaboration:
+        store = get_collaborative_update_store()
+        item = store.reset_with_commit(
+            workspace_id,
+            item_id,
+            commit_doc,
+            store.canonical_snapshot(content=doc.get("content") or {}),
+            cached_workspace_collaboration_key(workspace_id, body.password),
+        )
+        _disconnect_collaborative_item_clients(workspace_id, item_id)
     else:
         item = commit_doc()
-    if reset_structured_collaboration:
-        # Agent/plain REST structured writes and history inverses are
-        # authoritative whole-document replacements. The previous room does
-        # not contain that JSON change, so retaining it lets an idle client
-        # repaint and save the obsolete state.
-        get_collaborative_update_store().delete_snapshot(workspace_id, item_id)
-        _disconnect_collaborative_item_clients(workspace_id, item_id)
     for notify in deferred_notifications:
         notify()
     if committed_update is not None:

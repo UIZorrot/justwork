@@ -1,3 +1,4 @@
+import { withStorageTransaction } from "./storage-transaction";
 import { STORAGE_KEYS } from "../../shared/storage-keys";
 import type { OfflineQueueStorage } from "./offline-queue";
 import type { WorkspaceDoc, WorkspaceDocsState } from "../../shared/storage-keys";
@@ -68,6 +69,7 @@ async function mirrorOfflineDeleteMutationToWorkspaceLog(
     workspaceId: mutation.workspaceId,
     itemId: mutation.itemId,
     kind: mutation.kind,
+    baseRevision: mutation.expectedRevision,
     status: "pending",
     clientSeq: nextClientSeq(mutations),
     createdAt: mutation.createdAt,
@@ -88,22 +90,26 @@ export async function enqueueOfflineDeleteMutation(
   storage: OfflineQueueStorage,
   mutation: OfflineDeleteMutation,
 ): Promise<OfflineDeleteMutation[]> {
-  const current = await loadOfflineDeleteMutations(storage);
-  const next = mergeOfflineDeleteMutation(current, mutation);
-  await saveOfflineDeleteMutations(storage, next);
-  await mirrorOfflineDeleteMutationToWorkspaceLog(storage, current, mutation);
-  return next;
+  return withStorageTransaction(STORAGE_KEYS.OFFLINE_DELETE_MUTATION_QUEUE, async () => {
+    const current = await loadOfflineDeleteMutations(storage);
+    const next = mergeOfflineDeleteMutation(current, mutation);
+    await saveOfflineDeleteMutations(storage, next);
+    await mirrorOfflineDeleteMutationToWorkspaceLog(storage, current, mutation);
+    return next;
+  });
 }
 
 export async function removeOfflineDeleteMutation(
   storage: OfflineQueueStorage,
   mutationId: string,
 ): Promise<OfflineDeleteMutation[]> {
-  const current = await loadOfflineDeleteMutations(storage);
-  const next = current.filter((entry) => entry.id !== mutationId);
-  await saveOfflineDeleteMutations(storage, next);
-  await removeStoredWorkspaceMutation(storage, mutationId);
-  return next;
+  return withStorageTransaction(STORAGE_KEYS.OFFLINE_DELETE_MUTATION_QUEUE, async () => {
+    const current = await loadOfflineDeleteMutations(storage);
+    const next = current.filter((entry) => entry.id !== mutationId);
+    await saveOfflineDeleteMutations(storage, next);
+    await removeStoredWorkspaceMutation(storage, mutationId);
+    return next;
+  });
 }
 
 function collectAffectedIds(docs: WorkspaceDoc[], itemId: string): Set<string> {

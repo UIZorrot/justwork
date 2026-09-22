@@ -1,3 +1,4 @@
+import { withStorageTransaction } from "./storage-transaction";
 import { STORAGE_KEYS, type WorkspaceDoc, type WorkspaceDocContent, type WorkspaceDocsState } from "../../shared/storage-keys";
 
 export type WorkspaceMutationKind =
@@ -260,24 +261,15 @@ async function saveWorkspaceMutationLog(
   await storage.set({ [STORAGE_KEYS.WORKSPACE_MUTATION_LOG]: mutations });
 }
 
-const mutationLogWriteQueues = new WeakMap<object, Promise<void>>();
-
 async function mutateStoredWorkspaceLog(
   storage: WorkspaceMutationLogStorage,
   mutate: (current: WorkspaceMutation[]) => WorkspaceMutation[],
 ): Promise<WorkspaceMutation[]> {
-  let result: WorkspaceMutation[] = [];
-  const previous = mutationLogWriteQueues.get(storage) ?? Promise.resolve();
-  const current = previous
-    .catch(() => undefined)
-    .then(async () => {
-      const stored = await loadWorkspaceMutationLog(storage);
-      result = mutate(stored);
-      await saveWorkspaceMutationLog(storage, result);
-    });
-  mutationLogWriteQueues.set(storage, current.catch(() => undefined));
-  await current;
-  return result;
+  return withStorageTransaction(STORAGE_KEYS.WORKSPACE_MUTATION_LOG, async () => {
+    const result = mutate(await loadWorkspaceMutationLog(storage));
+    await saveWorkspaceMutationLog(storage, result);
+    return result;
+  });
 }
 
 export async function loadWorkspaceMutationLog(

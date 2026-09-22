@@ -729,6 +729,40 @@ async function main() {
       console.error(`[sync-soak] ${distribution}: late joiner restored`);
       await contextC.close();
     }
+    console.error(`[sync-integrity] ${distribution}: offline tab close and draft recovery`);
+    const recoveryTitle = await pageA.locator("#doc-title-input").inputValue();
+    const recoveryTree = await loadTree();
+    const recoveryItem = recoveryTree.items.find((item) => item.title === recoveryTitle && item.kind === "page");
+    assert.ok(recoveryItem);
+    const recoveryEditor = await editorFor(pageA);
+    await contextA.setOffline(true);
+    const closeMarker = `${markerPrefix}_OFFLINE_CLOSE_RECOVERY`;
+    await typeAtEnd(pageA, recoveryEditor, closeMarker);
+    await pageA.waitForFunction((marker) => Object.keys(localStorage).some((key) => {
+      if (!key.startsWith("justwork.backend.docDrafts.v1:")) return false;
+      return localStorage.getItem(key)?.includes(marker);
+    }), closeMarker);
+    await pageA.close();
+    await contextA.setOffline(false);
+    const recoveredPage = await contextA.newPage();
+    await recoveredPage.goto(`${staticServer.baseUrl}${entryPath}?backendUrl=${encodeURIComponent(backendUrl)}`);
+    await recoveredPage.waitForSelector("#workspace-unlock-panel:not([hidden])");
+    await recoveredPage.fill("#backend-workspace-id-input", workspaceId);
+    await recoveredPage.fill("#unlock-password-input", password);
+    await recoveredPage.click("#unlock-workspace-btn");
+    await continueNicknamePrompt(recoveredPage, `${distribution} A`);
+    await recoveredPage.waitForSelector(".workspace-shell:not([hidden])");
+    await recoveredPage.locator("#doc-tree .doc-list-item", { hasText: recoveryTitle }).first().click();
+    await recoveredPage.waitForFunction((marker) => document.querySelector("#editor-root .doc-editor-surface--markdown")?.textContent?.includes(marker), closeMarker, { timeout: 25000 });
+    const recoverDeadline = Date.now() + 25000;
+    let recoveredBody = "";
+    while (Date.now() < recoverDeadline) {
+      recoveredBody = (await loadItem(recoveryItem.id)).item.markdown;
+      if (count(recoveredBody, closeMarker) === 1) break;
+      await sleep(150);
+    }
+    assert.equal(count(recoveredBody, closeMarker), 1, "closed-tab offline draft must persist exactly once");
+    console.error(`[sync-integrity] ${distribution}: offline draft recovered exactly once`);
   } catch (error) {
     try {
       const log = await readFile(backendLogPath, "utf8");

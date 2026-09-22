@@ -2842,3 +2842,7 @@ body {
   color: #000000;
   font-weight: 500;
 }
+
+.draft-recovery-notice { display: flex; gap: 12px; align-items: center; padding: 10px 16px; background: #fff4d6; color: #573e00; font-size: 13px; }
+.draft-recovery-notice[hidden] { display: none; }
+.draft-recovery-notice button { flex-shrink: 0; cursor: pointer; }

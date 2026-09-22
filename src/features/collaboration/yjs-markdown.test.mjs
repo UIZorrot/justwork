@@ -82,3 +82,15 @@ test("minimal markdown edits converge without dropping concurrent suffixes", asy
   left.destroy();
   right.destroy();
 });
+
+test("delete-only updates report a visible change and duplicate delivery is a no-op", async () => {
+  const { createMarkdownCollaborator } = await importTsModule("src/features/collaboration/yjs-markdown.ts");
+  const sender = createMarkdownCollaborator({ initialMarkdown: "keep delete" });
+  const receiver = createMarkdownCollaborator();
+  receiver.applyRemoteUpdate(sender.encodeUpdate());
+  sender.applyLocalMarkdown("keep");
+  assert.equal(receiver.applyRemoteUpdate(sender.encodeUpdate()), true);
+  assert.equal(receiver.getMarkdown(), "keep");
+  assert.equal(receiver.applyRemoteUpdate(sender.encodeUpdate()), false);
+  sender.destroy(); receiver.destroy();
+});
