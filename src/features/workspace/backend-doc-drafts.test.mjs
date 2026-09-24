@@ -61,3 +61,60 @@ test("drafts based on the current server revision still overlay local unsaved ed
   assert.equal(mod.shouldApplyBackendDocDraft(doc, draft), true);
   assert.equal(mod.applyBackendDocDraft(doc, draft).markdown, "Local unsaved body");
 });
+
+test("draftIndicatesNewerLocalEdit only compares fields from the in-flight patch", async () => {
+  const mod = await loadTranspiledModule("src/features/workspace/backend-doc-drafts.ts");
+  const equals = (left, right) => JSON.stringify(left) === JSON.stringify(right);
+  const draft = {
+    workspaceId: "ws-1",
+    itemId: "page-1",
+    title: "Saved title",
+    markdown: "Stale leftover markdown",
+    seq: 3,
+    updatedAt: "2026-05-19T10:01:00.000Z",
+  };
+
+  assert.equal(
+    mod.draftIndicatesNewerLocalEdit(
+      draft,
+      3,
+      { title: "Saved title" },
+      { title: "Saved title", markdown: "Server body", content: null },
+      equals,
+    ),
+    false,
+  );
+
+  assert.equal(
+    mod.draftIndicatesNewerLocalEdit(
+      { ...draft, title: "Typed after save started" },
+      3,
+      { title: "Saved title" },
+      { title: "Saved title", markdown: "Server body", content: null },
+      equals,
+    ),
+    true,
+  );
+
+  assert.equal(
+    mod.draftIndicatesNewerLocalEdit(
+      draft,
+      3,
+      { markdown: "Server body" },
+      { title: "Saved title", markdown: "Server body", content: null },
+      equals,
+    ),
+    true,
+  );
+
+  assert.equal(
+    mod.draftIndicatesNewerLocalEdit(
+      { ...draft, seq: 4 },
+      3,
+      { title: "Saved title" },
+      { title: "Saved title", markdown: "Server body", content: null },
+      equals,
+    ),
+    true,
+  );
+});

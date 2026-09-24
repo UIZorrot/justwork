@@ -112,7 +112,11 @@ import {
   stageOptimisticCreatePatch,
 } from "@/features/workspace/optimistic-create-patches";
 import { createBackendDraftStore } from "@/features/workspace/backend-draft-store";
-import { applyBackendDocDraft, type BackendDocDraft } from "@/features/workspace/backend-doc-drafts";
+import {
+  applyBackendDocDraft,
+  draftIndicatesNewerLocalEdit,
+  type BackendDocDraft,
+} from "@/features/workspace/backend-doc-drafts";
 import { mergeSyncValue, syncValuesEqual } from "@/features/workspace/three-way-merge";
 import { compareDocumentOrder, orderKeyForInsertion, orderRankForInsertion } from "@/features/workspace/document-order";
 import { createTableView, type TableViewHandle } from "@/features/workspace/table-view";
@@ -3506,11 +3510,16 @@ export async function startBackendWorkbench(): Promise<void> {
             const next = saveResult.doc;
             markDocHydrated(request.itemId);
             const draft = await getBackendDocDraft(workspaceId, request.itemId);
-            const hasNewerDraft = draft !== null && (
-              draft.seq > (submittedDraft?.seq ?? 0)
-              || (draft.title !== undefined && draft.title !== request.nextTitle)
-              || (draft.markdown !== undefined && draft.markdown !== request.nextMarkdown)
-              || (draft.content !== undefined && !syncValuesEqual(draft.content, request.patch.content ?? next.content))
+            const hasNewerDraft = draftIndicatesNewerLocalEdit(
+              draft,
+              submittedDraft?.seq ?? 0,
+              request.patch,
+              {
+                title: request.nextTitle,
+                markdown: request.nextMarkdown,
+                content: request.patch.content ?? next.content,
+              },
+              syncValuesEqual,
             );
             const liveDoc = localCollaborativeDocCache.get(request.itemId);
             const collaborativeSaveRequest = {
@@ -3708,12 +3717,15 @@ export async function startBackendWorkbench(): Promise<void> {
         const canonicalState = await session.loadCollaborativeMarkdownState(summary.id);
         const currentEpoch = collaborationEpochByDoc.get(summary.id);
         if (currentEpoch && canonicalState.room_epoch !== currentEpoch) {
-          if (dirtyDocIds.has(summary.id)) return;
-          if (active.id === summary.id) editor?.bindCollaborator(undefined);
-          stopActiveCollaborativeTransport();
-          removeCollaborativeSnapshot(collaborativeMarkdownSnapshotKey(workspaceId, summary.id));
-          collaborator = resetMarkdownCollaborator(summary);
-          void startCollaborativeTransport(summary).catch(() => undefined);
+          // Doc may become dirty while awaiting the room state. Skip only the
+          // reset branch — never abort the whole refresh after the tree swap.
+          if (!dirtyDocIds.has(summary.id)) {
+            if (active.id === summary.id) editor?.bindCollaborator(undefined);
+            stopActiveCollaborativeTransport();
+            removeCollaborativeSnapshot(collaborativeMarkdownSnapshotKey(workspaceId, summary.id));
+            collaborator = resetMarkdownCollaborator(summary);
+            void startCollaborativeTransport(summary).catch(() => undefined);
+          }
         } else {
           const canonicalUpdate = decodeCollaborativeUpdate(canonicalState.snapshot_base64);
           if (canonicalUpdate.length > 0) {
@@ -3748,7 +3760,10 @@ export async function startBackendWorkbench(): Promise<void> {
       const refreshedDoc = shouldPreferLocal && local
         ? {
           ...hydrated,
-          revision: Math.max(local.revision, hydrated.revision),
+          // Keep the local CAS base. Adopting max(remote revision) while
+          // retaining local body lets a later save succeed against the remote
+          // revision with stale content and clobber peer edits.
+          revision: local.revision,
           title: local.title,
           markdown: local.kind === "page" ? (canonicalMarkdown ?? local.markdown) : hydrated.markdown,
           content: local.content ?? hydrated.content ?? null,
