@@ -2,6 +2,7 @@
 export type DocEditor = {
   readonly root: HTMLElement;
   getMarkdown: () => string;
+  flushPendingInput: (finishComposition?: boolean) => void;
   setMarkdown: (md: string, clearHistory?: boolean) => void;
   isComposing: () => boolean;
   isFocused: () => boolean;

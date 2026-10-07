@@ -8,31 +8,22 @@ export type CompositionGate = {
 
 export function createCompositionGate(): CompositionGate {
   let composing = false;
-  let pendingMarkdown: string | null = null;
-
-  const flush = (currentMarkdown: string): string | null => {
-    const nextMarkdown = pendingMarkdown ?? currentMarkdown;
-    pendingMarkdown = null;
-    return nextMarkdown;
-  };
 
   return {
     isComposing: () => composing,
     onCompositionStart: () => {
       composing = true;
-      pendingMarkdown = null;
     },
     onCompositionEnd: (currentMarkdown) => {
       composing = false;
-      return flush(currentMarkdown);
+      return currentMarkdown;
     },
     onCompositionCancel: (currentMarkdown) => {
       composing = false;
-      return flush(currentMarkdown);
+      return currentMarkdown;
     },
     onInput: (markdown) => {
       if (!composing) return markdown;
-      pendingMarkdown = markdown;
       return null;
     },
   };

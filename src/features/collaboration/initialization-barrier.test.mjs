@@ -27,8 +27,9 @@ test("page collaboration waits for a canonical CRDT lineage before binding the e
   );
   assert.match(
     transportBlock,
-    /replayedBootstrapEdit = hasUnboundBootstrapEdit && seedMarkdown !== bootstrapBaseMarkdown/,
+    /replayedBootstrapEdit = hasUnboundBootstrapEdit;/,
   );
+  assert.doesNotMatch(transportBlock, /replayedBootstrapEdit = hasUnboundBootstrapEdit && seedMarkdown !== bootstrapBaseMarkdown/);
   assert.doesNotMatch(source, /markdownHost\.inert\s*=\s*pending/);
   assert.doesNotMatch(source, /structuredHost\.inert\s*=\s*pending/);
   assert.match(source, /markdownHost\.inert\s*=\s*documentLoadBlocked/);

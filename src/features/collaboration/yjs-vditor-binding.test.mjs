@@ -179,3 +179,42 @@ test("replaying a draft already present in canonical content never duplicates it
   const { replayMarkdownEdit } = await importTsModule("src/features/collaboration/yjs-vditor-binding.ts");
   assert.deepEqual(replayMarkdownEdit("base", "base new work", "base new work"), { markdown: "base new work", clean: true });
 });
+
+test("remote rendering consumes pending DOM input before replacing the editor", async () => {
+  const bindingMod = await importTsModule("src/features/collaboration/yjs-vditor-binding.ts");
+  const collabMod = await importTsModule("src/features/collaboration/yjs-markdown.ts");
+  const editor = createFakeEditorSurface("draft", () => false, () => true);
+  const collaborator = collabMod.createMarkdownCollaborator({ initialMarkdown: "draft" });
+  const binding = bindingMod.createVditorMarkdownBinding(editor, collaborator);
+  let pendingInput = true;
+  editor.flushPendingInput = () => {
+    if (!pendingInput) return;
+    pendingInput = false;
+    editor.emitInput("draft local");
+  };
+  collaborator.applyLocalMarkdown("remote draft");
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  assert.equal(editor.getMarkdown(), "remote draft local");
+  assert.equal(collaborator.getMarkdown(), "remote draft local");
+  binding.destroy();
+  collaborator.destroy();
+});
+
+test("binding a canonical snapshot during IME waits for the composed edit", async () => {
+  const bindingMod = await importTsModule("src/features/collaboration/yjs-vditor-binding.ts");
+  const collabMod = await importTsModule("src/features/collaboration/yjs-markdown.ts");
+  let composing = true;
+  const editor = createFakeEditorSurface("draft ni", () => composing);
+  editor.getCompositionBaseMarkdown = () => "draft";
+  const collaborator = collabMod.createMarkdownCollaborator({ initialMarkdown: "remote draft" });
+  const binding = bindingMod.createVditorMarkdownBinding(editor, collaborator);
+  binding.applyRemoteMarkdown(collaborator.getMarkdown());
+  assert.equal(editor.getMarkdown(), "draft ni");
+  assert.deepEqual(editor.getSetMarkdownCalls(), []);
+  composing = false;
+  editor.emitInput("draft 你好");
+  assert.equal(collaborator.getMarkdown(), "remote draft 你好");
+  assert.equal(editor.getMarkdown(), "remote draft 你好");
+  binding.destroy();
+  collaborator.destroy();
+});

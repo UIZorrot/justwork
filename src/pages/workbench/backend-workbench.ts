@@ -2098,6 +2098,7 @@ export async function startBackendWorkbench(): Promise<void> {
       }
     };
     const markCollaborationReady = (doc: WorkspaceDoc): void => {
+      if (active.id === doc.id && doc.kind === "page") editor?.flushPendingInput();
       collaborationReadyDocIds.add(doc.id);
       const epoch = collaborationEpochByDoc.get(doc.id);
       if (epoch) {
@@ -2210,7 +2211,7 @@ export async function startBackendWorkbench(): Promise<void> {
       if (doc.kind === "page" && active.id === doc.id && editor) {
         const nativeInputBase = editor.getUncommittedNativeInputBaseMarkdown();
         const nativeInputMarkdown = editor.getMarkdown();
-        if (nativeInputBase !== null && isMeaningfulPageEdit(nativeInputBase, nativeInputMarkdown)) {
+        if (!editor.isComposing() && nativeInputBase !== null && isMeaningfulPageEdit(nativeInputBase, nativeInputMarkdown)) {
           const pending = pendingUnboundPageEditsByDoc.get(doc.id);
           pendingUnboundPageEditsByDoc.set(doc.id, {
             baseMarkdown: pending?.baseMarkdown ?? nativeInputBase,
@@ -2360,7 +2361,10 @@ export async function startBackendWorkbench(): Promise<void> {
         if (markdownCollaborator) {
           const seedMarkdown = (hasUnboundBootstrapEdit ? bootstrapLocalMarkdown : bootstrapBaseMarkdown) ?? doc.markdown;
           markdownCollaborator.applyLocalMarkdown(seedMarkdown);
-          replayedBootstrapEdit = hasUnboundBootstrapEdit && seedMarkdown !== bootstrapBaseMarkdown;
+          // After navigation, doc may already contain the unsaved local draft.
+          // Equality with that cached body does not mean the edit was committed.
+          // The recorded unbound edit is the evidence that a save is required.
+          replayedBootstrapEdit = hasUnboundBootstrapEdit;
         } else if (structuredCollaborator && (doc.kind === "table" || doc.kind === "board")) {
           // An empty epoch can be the result of an authoritative history
           // rollback. The workbench which wins bootstrap may still have the
@@ -3659,6 +3663,7 @@ export async function startBackendWorkbench(): Promise<void> {
     }
 
     const refreshWorkspaceFromRemote = async (): Promise<void> => {
+      editor?.flushPendingInput();
       const previousTreeRevisionByItem = new Map(
         treeData.items.map((item) => [item.id, item.revision] as const),
       );
@@ -4611,6 +4616,7 @@ export async function startBackendWorkbench(): Promise<void> {
 
     const switchActiveDoc = (doc: WorkspaceDoc): void => {
       if (active.id !== doc.id) {
+        editor?.flushPendingInput(true);
         flushPendingDocSave(active.id);
       }
       if (doc.kind === "welcome") {

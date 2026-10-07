@@ -268,7 +268,7 @@ async function main() {
     const loadCollaborativeMarkdown = async (itemId) => {
       const state = await apiJson("POST", `/v1/workspaces/${workspaceId}/items/${itemId}/collab/state?protocol_version=2`, { password });
       const document = new Y.Doc();
-      Y.applyUpdate(document, Buffer.from(state.snapshot_base64, "base64"));
+      if (state.snapshot_base64) Y.applyUpdate(document, Buffer.from(state.snapshot_base64, "base64"));
       return document.getText("markdown").toString();
     };
     const loadRevisions = () => apiJson("POST", `/v1/workspaces/${workspaceId}/revisions`, { password });
@@ -310,6 +310,142 @@ async function main() {
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
 
+    console.error(`[editor-persistence] ${distribution}: immediate document switch after input`);
+    const originalTitle = await pageA.locator("#doc-title-input").inputValue();
+    const switchItem = await createRemoteItem("page", `${markerPrefix} immediate switch`);
+    const switchRow = pageA.locator(`#doc-tree .doc-list-item[data-doc-id="${switchItem.id}"]`);
+    await switchRow.waitFor({ state: "visible", timeout: 20_000 });
+    await switchRow.click();
+    await pageA.waitForFunction((title) => document.querySelector("#doc-title-input")?.value === title
+      && document.querySelector(".doc-editor-surface--markdown")?.getAttribute("aria-busy") === "false",
+    switchItem.title);
+    const switchEditor = await editorFor(pageA);
+    const switchMarker = `${markerPrefix}_快速切换必须保存`;
+    await switchEditor.click();
+    await pageA.keyboard.insertText(switchMarker);
+    await pageA.locator("#doc-tree .doc-list-item", { hasText: originalTitle }).first().click();
+    await switchRow.click();
+    await pageA.waitForFunction((marker) => document.querySelector("#editor-root .doc-editor-surface--markdown")?.textContent?.includes(marker),
+      switchMarker, { timeout: 10_000 });
+    const switchDeadline = Date.now() + 10_000;
+    let switchBody = "";
+    while (Date.now() < switchDeadline) {
+      switchBody = (await loadItem(switchItem.id)).item.markdown;
+      if (count(switchBody, switchMarker) === 1) break;
+      await sleep(100);
+    }
+    assert.equal(count(switchBody, switchMarker), 1, "input immediately followed by navigation must reach storage exactly once");
+    const leaveAndReturn = async (itemRow = switchRow) => {
+      await pageA.locator("#doc-tree .doc-list-item", { hasText: originalTitle }).first().click();
+      await itemRow.click();
+      await pageA.waitForFunction((title) => document.querySelector("#doc-title-input")?.value === title
+        && document.querySelector(".doc-editor-surface--markdown")?.getAttribute("aria-busy") === "false",
+      await itemRow.locator(".doc-list-item-label").textContent());
+    };
+    const waitForStoredMarkdown = async (itemId, predicate) => {
+      const deadline = Date.now() + 12_000;
+      let markdown = "";
+      while (Date.now() < deadline) {
+        markdown = (await loadItem(itemId)).item.markdown;
+        if (predicate(markdown)) return markdown;
+        await sleep(100);
+      }
+      console.error("[editor-persistence] storage diagnostic", JSON.stringify({
+        itemId,
+        editorText: await switchEditor.textContent(),
+        title: await pageA.locator("#doc-title-input").inputValue(),
+        saves: itemSavesA.filter((save) => save.__itemId === itemId).map((save) => ({ markdown: save.markdown, collaborative: Boolean(save.collaborative_update) })),
+        canonical: await loadCollaborativeMarkdown(itemId),
+        drafts: await pageA.evaluate(() => Object.keys(localStorage).filter((key) => key.startsWith("justwork.backend.docDrafts.v1:")).map((key) => localStorage.getItem(key))),
+      }));
+      assert.ok(predicate(markdown), `editor input did not reach storage: ${JSON.stringify(markdown)}`);
+    };
+
+    console.error(`[editor-persistence] ${distribution}: toolbar format and deliberate clear before navigation`);
+    await switchEditor.click();
+    await pageA.keyboard.press("Control+a");
+    await pageA.locator('.vditor-toolbar [data-type="bold"]').click();
+    await leaveAndReturn();
+    await waitForStoredMarkdown(switchItem.id, (markdown) => markdown.includes(`**${switchMarker}**`));
+    await switchEditor.click();
+    await pageA.keyboard.press("Control+a");
+    await pageA.keyboard.press("Backspace");
+    await leaveAndReturn();
+    await waitForStoredMarkdown(switchItem.id, (markdown) => markdown.trim() === "");
+    assert.equal(((await switchEditor.textContent()) ?? "").trim(), "");
+
+    console.error(`[editor-persistence] ${distribution}: offline typing followed by immediate navigation`);
+    await contextA.setOffline(true);
+    const offlineSwitchMarker = `${markerPrefix}_离线快速切换`;
+    await switchEditor.click();
+    await pageA.keyboard.insertText(offlineSwitchMarker);
+    await pageA.locator("#doc-tree .doc-list-item", { hasText: originalTitle }).first().click();
+    await switchRow.click();
+    assert.equal(count((await switchEditor.textContent()) ?? "", offlineSwitchMarker), 1);
+    await contextA.setOffline(false);
+    await waitForStoredMarkdown(switchItem.id, (markdown) => count(markdown, offlineSwitchMarker) === 1);
+
+    console.error(`[editor-persistence] ${distribution}: native Chinese IME commit followed by navigation`);
+    const imeSession = await contextA.newCDPSession(pageA);
+    const imeMarker = `${markerPrefix}_中文输入法提交`;
+    await placeCaret(switchEditor, false);
+    await pageA.keyboard.press("Enter");
+    await imeSession.send("Input.imeSetComposition", { text: "zhongwen", selectionStart: 8, selectionEnd: 8 });
+    await imeSession.send("Input.imeSetComposition", { text: imeMarker, selectionStart: imeMarker.length, selectionEnd: imeMarker.length });
+    await imeSession.send("Input.insertText", { text: imeMarker });
+    await leaveAndReturn();
+    await waitForStoredMarkdown(switchItem.id, (markdown) => count(markdown, imeMarker) === 1);
+    assert.equal(count((await switchEditor.textContent()) ?? "", imeMarker), 1);
+    await imeSession.detach();
+
+    console.error(`[editor-persistence] ${distribution}: navigate while the collaboration join is delayed`);
+    const joiningItem = await createRemoteItem("page", `${markerPrefix} delayed join switch`);
+    const joinRoute = `**/items/${joiningItem.id}/collab/join`;
+    await pageA.route(joinRoute, async (route) => {
+      await sleep(1_800);
+      await route.continue();
+    });
+    const joiningRow = pageA.locator(`#doc-tree .doc-list-item[data-doc-id="${joiningItem.id}"]`);
+    await joiningRow.waitFor({ state: "visible", timeout: 20_000 });
+    await joiningRow.click();
+    await pageA.waitForFunction((title) => document.querySelector("#doc-title-input")?.value === title
+      && !document.querySelector(".doc-editor-surface--markdown")?.classList.contains("is-body-loading"), joiningItem.title);
+    const joinMarker = `${markerPrefix}_连接未完成也要保存`;
+    await switchEditor.click();
+    await pageA.keyboard.insertText(joinMarker);
+    await leaveAndReturn(joiningRow);
+    await waitForStoredMarkdown(joiningItem.id, (markdown) => count(markdown, joinMarker) === 1);
+    assert.equal(count((await switchEditor.textContent()) ?? "", joinMarker), 1);
+    await pageA.unroute(joinRoute);
+
+    console.error(`[editor-persistence] ${distribution}: canonical room arrives during native IME composition`);
+    const composingItem = await createRemoteItem("page", `${markerPrefix} IME during join`);
+    const composingRoute = `**/items/${composingItem.id}/collab/join`;
+    await pageA.route(composingRoute, async (route) => {
+      await sleep(1_800);
+      await route.continue();
+    });
+    const composingRow = pageA.locator(`#doc-tree .doc-list-item[data-doc-id="${composingItem.id}"]`);
+    await composingRow.waitFor({ state: "visible", timeout: 20_000 });
+    await composingRow.click();
+    await pageA.waitForFunction((title) => document.querySelector("#doc-title-input")?.value === title
+      && !document.querySelector(".doc-editor-surface--markdown")?.classList.contains("is-body-loading"), composingItem.title);
+    await switchEditor.click();
+    const composingSession = await contextA.newCDPSession(pageA);
+    await composingSession.send("Input.imeSetComposition", { text: "zhongwen", selectionStart: 8, selectionEnd: 8 });
+    await pageA.waitForFunction(() => document.querySelector(".doc-editor-surface--markdown")?.getAttribute("aria-busy") === "false");
+    assert.equal((await loadCollaborativeMarkdown(composingItem.id)).trim(), "", "uncommitted IME text must not seed the canonical room");
+    const composingMarker = `${markerPrefix}_连接时中文输入`;
+    await composingSession.send("Input.insertText", { text: composingMarker });
+    await leaveAndReturn(composingRow);
+    await waitForStoredMarkdown(composingItem.id, (markdown) => markdown.trim() === composingMarker);
+    assert.equal(((await switchEditor.textContent()) ?? "").trim(), composingMarker);
+    await composingSession.detach();
+    await pageA.unroute(composingRoute);
+    await pageA.locator("#doc-tree .doc-list-item", { hasText: originalTitle }).first().click();
+    await pageA.waitForFunction((marker) => document.querySelector("#editor-root .doc-editor-surface--markdown")?.textContent?.includes(marker), bootstrapMarker);
+    if (process.env.JUSTWORK_E2E_EDITOR_ONLY === "1") return;
+
     // Independent browser processes model two real collaborators and avoid
     // browser-level focus stealing between simultaneous keyboard operations.
     browserB = await chromium.launch({ headless: true });
@@ -325,6 +461,7 @@ async function main() {
     await pageB.click("#unlock-workspace-btn");
     await continueNicknamePrompt(pageB, `${distribution} B`);
     await pageB.waitForSelector(".workspace-shell:not([hidden])");
+    await pageB.locator("#doc-tree .doc-list-item", { hasText: originalTitle }).first().click();
     const editorB = await editorFor(pageB);
     await pageB.waitForFunction(
       (marker) => document.querySelector("#editor-root .doc-editor-surface--markdown")?.textContent?.includes(marker),
@@ -553,6 +690,7 @@ async function main() {
       await rollbackPageC.click("#unlock-workspace-btn");
       await continueNicknamePrompt(rollbackPageC, `${distribution} C`);
       await rollbackPageC.waitForSelector(".workspace-shell:not([hidden])");
+      await rollbackPageC.locator("#doc-tree .doc-list-item", { hasText: originalTitle }).first().click();
       const rollbackEditorC = await editorFor(rollbackPageC);
       await rollbackPageC.waitForFunction(
         ({ removed, retained }) => {

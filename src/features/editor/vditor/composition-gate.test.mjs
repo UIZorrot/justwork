@@ -22,3 +22,14 @@ test("composition gate passes through normal input when not composing", async ()
 
   assert.equal(gate.onInput("hello"), "hello");
 });
+
+test("composition ends with the current DOM rather than an earlier debounced input", async () => {
+  const { createCompositionGate } = await loadTranspiledModule("src/features/editor/vditor/composition-gate.ts");
+  const gate = createCompositionGate();
+  gate.onCompositionStart();
+  gate.onInput("ni");
+  assert.equal(gate.onCompositionEnd("你好"), "你好");
+  gate.onCompositionStart();
+  gate.onInput("old partial");
+  assert.equal(gate.onCompositionCancel("current text"), "current text");
+});

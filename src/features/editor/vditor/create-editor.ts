@@ -220,6 +220,52 @@ export function createWysiwygEditor(options: CreateEditorOptions): DocEditor {
     }
     emitMarkdown(markdown);
   };
+  const flushPendingInput = (finishComposition = false): void => {
+    if (!editorReady || !vditor) return;
+    if (compositionGate.isComposing() && !finishComposition) return;
+    if (uncommittedNativeInputBaseMarkdown === null && !compositionGate.isComposing()) return;
+    const markdown = getMarkdown();
+    if (compositionGate.isComposing()) compositionGate.onCompositionEnd(markdown);
+    // Clear before dispatch: a local Yjs update can synchronously cause a
+    // remote-render retry. That retry must see this input as already consumed.
+    uncommittedNativeInputBaseMarkdown = null;
+    dispatchMarkdown(markdown);
+    compositionBaseMarkdown = null;
+  };
+  const trackNativeInput = (event: Event): void => {
+    if (!event.isTrusted) return;
+    if (uncommittedNativeInputBaseMarkdown === null) {
+      uncommittedNativeInputBaseMarkdown = getMarkdown();
+    }
+    trustedNativeInputVersion += 1;
+    lastNativeInputAt = performance.now();
+  };
+  const captureNativeInput = (event: Event): void => {
+    if (!event.isTrusted) return;
+    // Some edit commands emit input without beforeinput. At this point the
+    // DOM has changed, so use the last serialized value as the edit baseline.
+    if (uncommittedNativeInputBaseMarkdown === null) {
+      uncommittedNativeInputBaseMarkdown = lastInputMarkdown;
+      trustedNativeInputVersion += 1;
+    }
+    lastNativeInputAt = performance.now();
+    // Vditor serializes through its 800ms undo debounce. Capture the DOM after
+    // its synchronous input handlers instead, before navigation or a remote
+    // whole-editor render can cancel that callback and erase the user's edit.
+    queueMicrotask(() => flushPendingInput());
+  };
+  const captureToolbarEdit = (event: Event): void => {
+    const target = event.target;
+    if (!(target instanceof Element) || !target.closest(".vditor-toolbar, .vditor-panel")) return;
+    trackNativeInput(event);
+    queueMicrotask(() => flushPendingInput());
+  };
+  const captureKeyboardEdit = (event: KeyboardEvent): void => {
+    if (!(["Enter", "Tab", "Backspace", "Delete"].includes(event.key)
+      || ((event.ctrlKey || event.metaKey) && ["b", "i", "z", "y", "x", "v"].includes(event.key.toLowerCase())))) return;
+    trackNativeInput(event);
+    queueMicrotask(() => flushPendingInput());
+  };
   const startComposingMarkdown = (): void => {
     compositionBaseMarkdown = imageSync?.fromEditorMarkdown(getMarkdown()) ?? getMarkdown();
     compositionGate.onCompositionStart();
@@ -244,6 +290,7 @@ export function createWysiwygEditor(options: CreateEditorOptions): DocEditor {
   const editorSurface = {
     getMarkdown,
     setMarkdown,
+    flushPendingInput: () => flushPendingInput(),
     isComposing: compositionGate.isComposing,
     isFocused: () => container.contains(document.activeElement),
     hasRecentNativeInput: () => performance.now() - lastNativeInputAt < NATIVE_INPUT_SETTLE_MS,
@@ -302,14 +349,13 @@ export function createWysiwygEditor(options: CreateEditorOptions): DocEditor {
   container.addEventListener("compositionstart", startComposingMarkdown, true);
   container.addEventListener("compositionend", flushComposedMarkdown, true);
   container.addEventListener("compositioncancel", cancelComposedMarkdown, true);
-  container.addEventListener("beforeinput", (event) => {
-    if (!event.isTrusted) return;
-    if (uncommittedNativeInputBaseMarkdown === null) {
-      uncommittedNativeInputBaseMarkdown = getMarkdown();
-    }
-    trustedNativeInputVersion += 1;
-    lastNativeInputAt = performance.now();
-  }, true);
+  container.addEventListener("beforeinput", trackNativeInput, true);
+  container.addEventListener("input", captureNativeInput, true);
+  container.addEventListener("click", captureToolbarEdit, true);
+  container.addEventListener("keydown", captureKeyboardEdit, true);
+  container.addEventListener("paste", trackNativeInput, true);
+  container.addEventListener("cut", trackNativeInput, true);
+  container.addEventListener("drop", trackNativeInput, true);
   container.addEventListener("keyup", notifyMentionQueryChange, true);
   container.addEventListener("mouseup", notifyMentionQueryChange, true);
   container.addEventListener("blur", clearMentionQuery, true);
@@ -408,6 +454,7 @@ export function createWysiwygEditor(options: CreateEditorOptions): DocEditor {
   return {
     root: container,
     getMarkdown,
+    flushPendingInput,
     setMarkdown,
     isComposing: compositionGate.isComposing,
     isFocused: () => container.contains(document.activeElement),
@@ -432,13 +479,22 @@ export function createWysiwygEditor(options: CreateEditorOptions): DocEditor {
     },
     bindCollaborator,
     destroy: () => {
+      flushPendingInput(true);
       unbindCollaborator();
+      editorReady = false;
       vditor?.destroy();
       vditor = undefined;
       imageSync?.dispose?.();
       container.removeEventListener("compositionstart", startComposingMarkdown, true);
       container.removeEventListener("compositionend", flushComposedMarkdown, true);
       container.removeEventListener("compositioncancel", cancelComposedMarkdown, true);
+      container.removeEventListener("beforeinput", trackNativeInput, true);
+      container.removeEventListener("input", captureNativeInput, true);
+      container.removeEventListener("click", captureToolbarEdit, true);
+      container.removeEventListener("keydown", captureKeyboardEdit, true);
+      container.removeEventListener("paste", trackNativeInput, true);
+      container.removeEventListener("cut", trackNativeInput, true);
+      container.removeEventListener("drop", trackNativeInput, true);
       container.removeEventListener("keyup", notifyMentionQueryChange, true);
       container.removeEventListener("mouseup", notifyMentionQueryChange, true);
       container.removeEventListener("blur", clearMentionQuery, true);

@@ -6,6 +6,7 @@ export type MarkdownEditorSurface = {
   getMarkdown: () => string;
   setMarkdown: (markdown: string, clearHistory?: boolean) => void;
   onMarkdownInput: (listener: (markdown: string) => void) => () => void;
+  flushPendingInput?: () => void;
   isComposing?: () => boolean;
   isFocused?: () => boolean;
   hasRecentNativeInput?: () => boolean;
@@ -76,6 +77,7 @@ export function createVditorMarkdownBinding(
       remoteUpdatePendingDuringComposition = true;
       return;
     }
+    editor.flushPendingInput?.();
     // Vditor may publish its normalized Markdown after the browser's native
     // input event. Never let a remote whole-editor render erase DOM input that
     // has not reached the collaborator yet; retry once the local input burst is
@@ -154,6 +156,13 @@ export function createVditorMarkdownBinding(
       collaborator.applyLocalMarkdown(markdown);
     },
     applyRemoteMarkdown: (markdown) => {
+      if (editor.isComposing?.()) {
+        remoteUpdatePending = true;
+        remoteUpdatePendingDuringComposition = true;
+        return;
+      }
+      editor.flushPendingInput?.();
+      markdown = collaborator.getMarkdown();
       if (editor.getMarkdown() === markdown) return;
       clearRemoteRenderTimer();
       remoteUpdatePending = false;
